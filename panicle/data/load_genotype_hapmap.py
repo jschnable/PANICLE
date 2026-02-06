@@ -10,13 +10,14 @@ Spec highlights:
 
 Compressed files (.gz/.bgz) are supported by extension.
 """
-from __future__ import annotations
-
+import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 import os
 import io
 import gzip
+
+logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
@@ -42,7 +43,7 @@ _HET_IUPAC = {
 }
 
 
-def _open_text(path: str | Path):
+def _open_text(path: Union[str, Path]):
     p = str(path)
     pl = p.lower()
     if pl.endswith('.gz') or pl.endswith('.bgz'):
@@ -106,7 +107,7 @@ def _code_cell(geno_char: str, ref: str, alt: str) -> int:
 
 
 def load_genotype_hapmap(
-    hapmap_path: str | Path,
+    hapmap_path: Union[str, Path],
     include_indels: bool = True,
     drop_monomorphic: bool = False,
     max_missing: float = 1.0,
@@ -135,14 +136,14 @@ def load_genotype_hapmap(
                 if (os.path.getmtime(cache_geno) > src_mtime and
                     os.path.getmtime(cache_ind) > src_mtime and
                     os.path.getmtime(cache_map) > src_mtime):
-                    print(f"   [Cache] Loading binary cache for {hapmap_path}...")
+                    logger.info("[Cache] Loading binary cache for %s...", hapmap_path)
                     if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                        print(
-                            "   [Cache] Warning: cached genotype data loaded; "
+                        logger.warning(
+                            "[Cache] Cached genotype data loaded; "
                             "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                            f"(min_maf={min_maf}, max_missing={max_missing}, "
-                            f"drop_monomorphic={drop_monomorphic}). "
-                            "Use --force-recache or delete the cache files to rebuild."
+                            "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
+                            "Use --force-recache or delete the cache files to rebuild.",
+                            min_maf, max_missing, drop_monomorphic,
                         )
                     geno_matrix = np.load(cache_geno, mmap_mode='r')
                     with open(cache_ind, 'r') as f:
@@ -152,9 +153,9 @@ def load_genotype_hapmap(
                     geno_map.attrs["is_imputed"] = True
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:
-        print(f"   [Cache] Failed to load cache: {e}")
+        logger.warning("[Cache] Failed to load cache: %s", e)
 
-    individual_ids: List[str] | None = None
+    individual_ids: Optional[List[str]] = None
     columns: List[np.ndarray] = []
     map_rows: List[dict] = []
 
@@ -241,7 +242,7 @@ def load_genotype_hapmap(
         geno_map.attrs["is_imputed"] = True
 
     try:
-        print(f"   [Cache] Saving binary cache to {cache_base}.panicle.v2.*")
+        logger.info("[Cache] Saving binary cache to %s.panicle.v2.*", cache_base)
         np.save(cache_geno, geno_mat)
         with open(cache_ind, 'w') as f:
             for ind in individual_ids:
@@ -252,7 +253,7 @@ def load_genotype_hapmap(
         else:
             geno_map.to_csv(cache_map, index=False)
     except Exception as e:
-        print(f"   [Cache] Warning: Failed to save cache: {e}")
+        logger.warning("[Cache] Failed to save cache: %s", e)
 
     if individual_ids is None:
         raise ValueError('Invalid HapMap: missing header')

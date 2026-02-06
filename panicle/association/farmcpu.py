@@ -387,7 +387,7 @@ def _farmcpu_remove(
     if x.shape[1] > 1:
         # Handle constant columns
         std = np.std(x, axis=0)
-        constant_cols = std == 0
+        constant_cols = std < 1e-10
         std[constant_cols] = 1  # Prevent division by zero
 
         x_centered = (x - np.mean(x, axis=0)) / std

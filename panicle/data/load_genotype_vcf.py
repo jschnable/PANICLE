@@ -18,11 +18,14 @@ This module avoids external VCF libraries for portability. For very large VCFs,
 consider replacing the parser with cyvcf2/pysam keeping the same coding logic.
 """
 from __future__ import print_function
+import logging
 import sys
 import gzip
 import io
 import os
 import tempfile
+
+logger = logging.getLogger(__name__)
 from typing import Dict, Optional, Tuple
 from typing import Dict, Optional, Tuple
 
@@ -351,14 +354,14 @@ def load_genotype_vcf(
                     os.path.getmtime(cache_ind) > vcf_mtime and
                     os.path.getmtime(cache_map) > vcf_mtime):
 
-                    print(f"   [Cache] Loading binary cache for {vcf_path}...")
+                    logger.info("[Cache] Loading binary cache for %s...", vcf_path)
                     if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                        print(
-                            "   [Cache] Warning: cached genotype data loaded; "
+                        logger.warning(
+                            "[Cache] Cached genotype data loaded; "
                             "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                            f"(min_maf={min_maf}, max_missing={max_missing}, "
-                            f"drop_monomorphic={drop_monomorphic}). "
-                            "Use --force-recache or delete the cache files to rebuild."
+                            "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
+                            "Use --force-recache or delete the cache files to rebuild.",
+                            min_maf, max_missing, drop_monomorphic,
                         )
 
                     # Load Genotypes (memmap for speed/memory efficiency)
@@ -377,7 +380,7 @@ def load_genotype_vcf(
                     # If memmapped, we return it as is. GenotypeMatrix handles it.
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:
-        print(f"   [Cache] Failed to load cache: {e}")
+        logger.warning("[Cache] Failed to load cache: %s", e)
     # --- CACHING LOGIC END ---
 
     # Standard loading proceeds...
@@ -854,12 +857,12 @@ def load_genotype_vcf(
         # This avoids repeated -9 checks in downstream kinship/MLM code
         n_missing = impute_major_allele_inplace(geno, missing_value=MISSING)
         if n_missing > 0:
-            print(f"   [Cache] Imputed {n_missing:,} missing values ({100*n_missing/geno.size:.2f}%)")
+            logger.info("[Cache] Imputed %s missing values (%.2f%%)", f"{n_missing:,}", 100*n_missing/geno.size)
         if hasattr(geno_map, "attrs"):
             geno_map.attrs["is_imputed"] = True
 
         # Save only if successful
-        print(f"   [Cache] Saving binary cache to {cache_base}.panicle.v2.*")
+        logger.info("[Cache] Saving binary cache to %s.panicle.v2.*", cache_base)
         np.save(cache_geno, geno)
 
         with open(cache_ind, 'w') as f:
@@ -873,7 +876,7 @@ def load_genotype_vcf(
              geno_map.to_csv(cache_map, index=False)
 
     except Exception as e:
-        print(f"   [Cache] Warning: Failed to save cache: {e}")
+        logger.warning("[Cache] Failed to save cache: %s", e)
     # --- CACHING LOGIC SAVE END ---
 
     return geno, individual_ids, geno_map

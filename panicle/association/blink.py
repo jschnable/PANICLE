@@ -603,7 +603,7 @@ def _ld_prune_subset(
         return seq_qtn
 
     std = np.std(x, axis=0)
-    constant_cols = std == 0
+    constant_cols = std < 1e-10
     std[constant_cols] = 1.0
     x_centered = (x - np.mean(x, axis=0)) / std
     x_centered[:, constant_cols] = 0.0

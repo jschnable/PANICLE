@@ -2,6 +2,7 @@
 Data loading utilities for various file formats
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -10,6 +11,8 @@ import warnings
 import time
 import sys
 import os
+
+logger = logging.getLogger(__name__)
 
 from ..utils.data_types import GenotypeMatrix, GenotypeMap, impute_major_allele_inplace
 from ..utils.memmap_utils import load_full_from_metadata
@@ -63,7 +66,7 @@ def _detect_and_rename_id_column(df: pd.DataFrame, id_column: str = 'ID',
     """
     if id_column in df.columns:
         if verbose:
-            print(f"   Using specified ID column: '{id_column}'")
+            logger.info("Using specified ID column: '%s'", id_column)
         if id_column != 'ID':
             df = df.rename(columns={id_column: 'ID'})
         return df
@@ -78,7 +81,7 @@ def _detect_and_rename_id_column(df: pd.DataFrame, id_column: str = 'ID',
             )
         detected = present_candidates[0]
         if verbose:
-            print(f"   Auto-detected ID column: '{detected}'")
+            logger.info("Auto-detected ID column: '%s'", detected)
         df = df.rename(columns={detected: 'ID'})
         return df
 
@@ -87,7 +90,7 @@ def _detect_and_rename_id_column(df: pd.DataFrame, id_column: str = 'ID',
         "No recognized ID column found; using first column '{}' as ID.".format(first_col)
     )
     if verbose:
-        print(f"   Using first column as ID: '{first_col}'")
+        logger.info("Using first column as ID: '%s'", first_col)
     df = df.rename(columns={first_col: 'ID'})
     return df
 
@@ -247,20 +250,20 @@ def load_phenotype_file(filepath: Union[str, Path],
             if t.lower() in lower_map:
                 actual = lower_map[t.lower()]
                 resolved_cols.append(actual)
-                print(f"   Note: trait '{t}' matched column '{actual}' (case-insensitive)")
+                logger.info("Note: trait '%s' matched column '%s' (case-insensitive)", t, actual)
                 continue
             # 3. Stripped + case-insensitive match
             key = t.strip().lower()
             if key in stripped_map:
                 actual = stripped_map[key]
                 resolved_cols.append(actual)
-                print(f"   Note: trait '{t}' matched column '{actual}' (after stripping whitespace)")
+                logger.info("Note: trait '%s' matched column '%s' (after stripping whitespace)", t, actual)
                 continue
             unresolved.append(t)
 
         if unresolved:
-            print(f"   Warning: Traits not found in phenotype file: {unresolved}")
-            print(f"   Available columns: {available}")
+            logger.warning("Traits not found in phenotype file: %s", unresolved)
+            logger.warning("Available columns: %s", available)
 
         # Coerce resolved trait columns to numeric
         trait_columns = resolved_cols
@@ -462,10 +465,10 @@ def load_genotype_file(filepath: Union[str, Path],
 
     def _maybe_warn(elapsed_seconds: float) -> None:
         if file_format in NON_BINARY_FORMATS and elapsed_seconds >= LOAD_TIME_WARNING_THRESHOLD:
-            print(
-                f"Warning: Loading genotype file '{filepath}' took {elapsed_seconds / 60:.1f} minutes. "
+            logger.warning(
+                "Loading genotype file '%s' took %.1f minutes. "
                 "Consider caching it with `panicle-cache-genotype` for faster future runs.",
-                file=sys.stderr,
+                filepath, elapsed_seconds / 60,
             )
 
     if file_format == 'memmap':
@@ -540,7 +543,7 @@ def load_genotype_file(filepath: Union[str, Path],
                     if (os.path.getmtime(cache_geno) > src_mtime and
                         os.path.getmtime(cache_ind) > src_mtime and
                         os.path.getmtime(cache_map) > src_mtime):
-                        print(f"   [Cache] Loading binary cache for {filepath}...")
+                        logger.info("[Cache] Loading binary cache for %s...", filepath)
                         geno_np = np.load(cache_geno, mmap_mode='r')
                         with open(cache_ind, 'r') as f:
                             individual_ids_csv = [line.strip() for line in f]
@@ -548,15 +551,15 @@ def load_genotype_file(filepath: Union[str, Path],
                         geno_map_df.attrs["is_imputed"] = True
                         loaded_from_cache = True
                         if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                            print(
-                                "   [Cache] Warning: cached genotype data loaded; "
+                            logger.warning(
+                                "[Cache] Cached genotype data loaded; "
                                 "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                                f"(min_maf={min_maf}, max_missing={max_missing}, "
-                                f"drop_monomorphic={drop_monomorphic}). "
-                                "Use --force-recache or delete the cache files to rebuild."
+                                "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
+                                "Use --force-recache or delete the cache files to rebuild.",
+                                min_maf, max_missing, drop_monomorphic,
                             )
         except Exception as e:
-            print(f"   [Cache] Failed to load cache: {e}")
+            logger.warning("[Cache] Failed to load cache: %s", e)
 
         # Load as CSV/TSV with numeric genotypes
         if file_format == 'csv':
@@ -600,14 +603,14 @@ def load_genotype_file(filepath: Union[str, Path],
             geno_map_df.attrs["is_imputed"] = True
 
             try:
-                print(f"   [Cache] Saving binary cache to {cache_base}.panicle.v2.*")
+                logger.info("[Cache] Saving binary cache to %s.panicle.v2.*", cache_base)
                 np.save(cache_geno, geno_np)
                 with open(cache_ind, 'w') as f:
                     for ind in individual_ids_csv:
                         f.write(f"{ind}\n")
                 geno_map_df.to_csv(cache_map, index=False)
             except Exception as e:
-                print(f"   [Cache] Warning: Failed to save cache: {e}")
+                logger.warning("[Cache] Failed to save cache: %s", e)
 
         if geno_np is None or individual_ids_csv is None or geno_map_df is None:
             raise ValueError("Failed to load genotype data from CSV/TSV")

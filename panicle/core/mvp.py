@@ -25,7 +25,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         map_data: Union[str, Path, pd.DataFrame, GenotypeMap],
         K: Optional[Union[KinshipMatrix, np.ndarray]] = None,
         CV: Optional[np.ndarray] = None,
-        method: List[str] = ["GLM"],
+        method: Optional[List[str]] = None,
         ncpus: int = 1,
         vc_method: str = "BRENT",
         maxLine: int = 5000,
@@ -66,6 +66,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         - 'files': List of created output files
     """
     
+    if method is None:
+        method = ["GLM"]
+
     if verbose:
         print("=" * 60)
         print("PANICLE: Python Algorithms for Nucleotide-phenotype")

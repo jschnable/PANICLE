@@ -1,10 +1,8 @@
 """CLI utility to cache genotype files into fast-loading memmap format."""
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
-from typing import Dict, Any, Sequence
+from typing import Dict, Any, Optional, Sequence
 
 import numpy as np
 
@@ -55,7 +53,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 

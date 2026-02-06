@@ -2,11 +2,9 @@
 Utilities for lightweight performance/environment checks.
 """
 
-from __future__ import annotations
-
 import os
 import warnings
-from typing import Iterable, Set
+from typing import Iterable, Optional, Set
 
 _blas_warning_emitted = False
 
@@ -33,7 +31,7 @@ def _normalise_tokens(values: Iterable[object]) -> Set[str]:
     return tokens
 
 
-def _detect_blas_backend() -> str | None:
+def _detect_blas_backend() -> Optional[str]:
     """Return a lowercase name for the detected BLAS backend, if possible."""
 
     try:

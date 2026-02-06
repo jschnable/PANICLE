@@ -13,11 +13,12 @@ Conventions:
 
 QC options mirror VCF loader: monomorphic, missingness, MAF filters.
 """
-from __future__ import annotations
-
+import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 import os
+
+logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
@@ -28,7 +29,7 @@ from panicle.utils.data_types import impute_major_allele_inplace
 MISSING = -9
 
 
-def _resolve_plink_paths(prefix_or_bed: str | Path, bim: str | Path | None, fam: str | Path | None) -> Tuple[Path, Path, Path]:
+def _resolve_plink_paths(prefix_or_bed: Union[str, Path], bim: Optional[Union[str, Path]], fam: Optional[Union[str, Path]]) -> Tuple[Path, Path, Path]:
     p = Path(prefix_or_bed)
     if p.suffix.lower() == '.bed':
         bed = p
@@ -91,9 +92,9 @@ def _read_bim_map(bim_path: Path, return_pandas: bool):
 
 
 def load_genotype_plink(
-    prefix_or_bed: str | Path,
-    bim: str | Path | None = None,
-    fam: str | Path | None = None,
+    prefix_or_bed: Union[str, Path],
+    bim: Optional[Union[str, Path]] = None,
+    fam: Optional[Union[str, Path]] = None,
     drop_monomorphic: bool = False,
     max_missing: float = 1.0,
     min_maf: float = 0.0,
@@ -127,14 +128,14 @@ def load_genotype_plink(
                 if (os.path.getmtime(cache_geno) > newest_src and
                     os.path.getmtime(cache_ind) > newest_src and
                     os.path.getmtime(cache_map) > newest_src):
-                    print(f"   [Cache] Loading binary cache for {bed_path}...")
+                    logger.info("[Cache] Loading binary cache for %s...", bed_path)
                     if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                        print(
-                            "   [Cache] Warning: cached genotype data loaded; "
+                        logger.warning(
+                            "[Cache] Cached genotype data loaded; "
                             "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                            f"(min_maf={min_maf}, max_missing={max_missing}, "
-                            f"drop_monomorphic={drop_monomorphic}). "
-                            "Use --force-recache or delete the cache files to rebuild."
+                            "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
+                            "Use --force-recache or delete the cache files to rebuild.",
+                            min_maf, max_missing, drop_monomorphic,
                         )
                     geno_matrix = np.load(cache_geno, mmap_mode='r')
                     with open(cache_ind, 'r') as f:
@@ -144,7 +145,7 @@ def load_genotype_plink(
                     geno_map.attrs["is_imputed"] = True
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:
-        print(f"   [Cache] Failed to load cache: {e}")
+        logger.warning("[Cache] Failed to load cache: %s", e)
 
     # Read sample IDs and map first (for integrity checks)
     individual_ids = _read_fam_ids(fam_path)
@@ -216,7 +217,7 @@ def load_genotype_plink(
         geno_map.attrs["is_imputed"] = True
 
     try:
-        print(f"   [Cache] Saving binary cache to {cache_base}.panicle.v2.*")
+        logger.info("[Cache] Saving binary cache to %s.panicle.v2.*", cache_base)
         np.save(cache_geno, Xi)
         with open(cache_ind, 'w') as f:
             for ind in individual_ids:
@@ -227,6 +228,6 @@ def load_genotype_plink(
         else:
             geno_map.to_csv(cache_map, index=False)
     except Exception as e:
-        print(f"   [Cache] Warning: Failed to save cache: {e}")
+        logger.warning("[Cache] Failed to save cache: %s", e)
 
     return Xi, individual_ids, geno_map

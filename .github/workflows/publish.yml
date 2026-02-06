@@ -34,6 +34,8 @@ jobs:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
+      - uses: actions/checkout@v4
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -50,6 +52,12 @@ jobs:
 
       - name: Test import
         run: python -c "import panicle; print('PANICLE version:', panicle.__version__)"
+
+      - name: Install test dependencies
+        run: pip install pytest statsmodels
+
+      - name: Run tests
+        run: python -m pytest tests/ -x --tb=short -q
 
   publish-testpypi:
     needs: test-install

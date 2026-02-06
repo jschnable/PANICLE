@@ -694,8 +694,6 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
         # Add to cumulative position with a small gap between chromosomes
         plot_positions = current_pos + norm_positions
         cumulative_pos[indices_ordered] = plot_positions
-
-        cumulative_pos[indices_ordered] = plot_positions
         
         color = colors[i % len(colors)]
 
@@ -728,8 +726,8 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
                 
                 if n_keep < n_noise:
                     # Deterministic subsampling for reproducibility (visuals shouldn't flicker)
-                    np.random.seed(42 + i) 
-                    keep_indices = np.random.choice(noise_indices, n_keep, replace=False)
+                    rng = np.random.default_rng(42 + i)
+                    keep_indices = rng.choice(noise_indices, n_keep, replace=False)
                     ax.scatter(plot_positions[keep_indices], chrom_log_pvals[keep_indices],
                               c=color, s=point_size, alpha=0.8, edgecolors='none')
                 else:

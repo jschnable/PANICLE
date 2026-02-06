@@ -14,12 +14,12 @@ def synthetic_data(tmp_path: Path):
     """Create small synthetic genotype and phenotype files for testing."""
 
     # Create phenotype file: 20 samples, 2 traits
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     n_samples = 20
 
     sample_ids = [f"Sample{i:03d}" for i in range(n_samples)]
-    trait1 = np.random.randn(n_samples) * 10 + 50  # Mean ~50
-    trait2 = np.random.randn(n_samples) * 5 + 20   # Mean ~20
+    trait1 = rng.standard_normal(n_samples) * 10 + 50  # Mean ~50
+    trait2 = rng.standard_normal(n_samples) * 5 + 20   # Mean ~20
 
     pheno_df = pd.DataFrame({
         'ID': sample_ids,
@@ -35,12 +35,12 @@ def synthetic_data(tmp_path: Path):
     marker_names = [f"SNP{i:04d}" for i in range(n_markers)]
 
     # Generate random genotypes (0, 1, 2)
-    genotypes = np.random.randint(0, 3, size=(n_samples, n_markers))
+    genotypes = rng.integers(0, 3, size=(n_samples, n_markers))
 
     # Add a few markers with stronger effects for trait1 to ensure some signal
     # Markers 10-12 will have correlation with Height
     for i in range(10, 13):
-        genotypes[:, i] = (trait1 > 50).astype(int) + np.random.randint(0, 2, n_samples)
+        genotypes[:, i] = (trait1 > 50).astype(int) + rng.integers(0, 2, n_samples)
         genotypes[:, i] = np.clip(genotypes[:, i], 0, 2)
 
     geno_df = pd.DataFrame(genotypes, columns=marker_names)
@@ -53,7 +53,7 @@ def synthetic_data(tmp_path: Path):
     map_data = {
         'SNP': marker_names,
         'CHROM': [f"Chr{(i % 3) + 1:02d}" for i in range(n_markers)],
-        'POS': [(i * 10000) + np.random.randint(0, 5000) for i in range(n_markers)]
+        'POS': [(i * 10000) + int(rng.integers(0, 5000)) for i in range(n_markers)]
     }
     map_df = pd.DataFrame(map_data)
 
@@ -65,7 +65,7 @@ def synthetic_data(tmp_path: Path):
         'ID': sample_ids,
         'Field': [(i % 3) for i in range(n_samples)],  # Numeric: 0, 1, 2
         'Year': [2023] * n_samples,
-        'Block': np.random.randint(1, 5, n_samples)  # Random blocks 1-4
+        'Block': rng.integers(1, 5, n_samples)  # Random blocks 1-4
     })
 
     cov_file = tmp_path / "covariates.csv"

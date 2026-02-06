@@ -7,8 +7,19 @@ genome-wide association study (GWAS) tool.
 Based on the original rMVP package design.
 """
 
+import logging
 import os
 import warnings
+
+# Configure library-level logging so that INFO+ messages are visible by default
+# (preserves the existing print()-based behavior). Users can override via:
+#   logging.getLogger('panicle').setLevel(logging.WARNING)
+_pkg_logger = logging.getLogger('panicle')
+if not _pkg_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter('%(message)s'))
+    _pkg_logger.addHandler(_handler)
+    _pkg_logger.setLevel(logging.INFO)
 
 # Suppress OpenMP deprecation warnings that occur with Numba parallel processing
 # This is a known issue with newer OpenMP versions and Numba's parallel features
@@ -23,7 +34,6 @@ __version__ = "0.1.0"
 __author__ = "James C. Schnable"
 
 from .core.mvp import PANICLE
-from .data.converters import PANICLE_Data
 from .matrix.kinship import PANICLE_K_VanRaden, PANICLE_K_IBS
 from .matrix.pca import PANICLE_PCA
 from .association.glm import PANICLE_GLM
@@ -35,7 +45,6 @@ from .visualization.manhattan import PANICLE_Report
 
 __all__ = [
     'PANICLE',
-    'PANICLE_Data',
     'PANICLE_K_VanRaden',
     'PANICLE_K_IBS',
     'PANICLE_PCA',

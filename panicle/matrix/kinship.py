@@ -2,10 +2,13 @@
 Kinship matrix computation using VanRaden method
 """
 
+import logging
 import numpy as np
 from typing import Optional, Union, Tuple
 from ..utils.data_types import GenotypeMatrix, KinshipMatrix
 import warnings
+
+logger = logging.getLogger(__name__)
 
 def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray], 
                    marker_freq: Optional[np.ndarray] = None,
@@ -42,13 +45,13 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
         raise ValueError("M must be GenotypeMatrix or numpy array")
     
     if verbose:
-        print(f"Calculating kinship matrix for {n_individuals} individuals, {n_markers} markers")
+        logger.info("Calculating kinship matrix for %d individuals, %d markers", n_individuals, n_markers)
 
     # Initialize kinship matrix in float32 for faster BLAS operations
     kin = np.zeros((n_individuals, n_individuals), dtype=np.float32)
 
     if verbose:
-        print("Computing kinship matrix in batches...")
+        logger.info("Computing kinship matrix in batches...")
 
     # Process markers in batches to manage memory
     n_batches = (n_markers + maxLine - 1) // maxLine
@@ -58,7 +61,7 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
         end_marker = min(start_marker + maxLine, n_markers)
 
         if verbose and n_batches > 1:
-            print(f"Processing batch {batch_idx + 1}/{n_batches} (markers {start_marker}-{end_marker-1})")
+            logger.info("Processing batch %d/%d (markers %d-%d)", batch_idx + 1, n_batches, start_marker, end_marker - 1)
 
         # Get batch of markers in float32 (faster BLAS, sufficient precision for kinship)
         if isinstance(genotype, GenotypeMatrix):
@@ -84,7 +87,7 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
     kin = kin.astype(np.float64)
 
     if verbose:
-        print("Symmetrizing and normalizing kinship matrix...")
+        logger.info("Symmetrizing and normalizing kinship matrix...")
     
     # Ensure symmetry (should already be symmetric, but numerical precision)
     kin = (kin + kin.T) / 2.0
@@ -97,14 +100,14 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
         warnings.warn("Mean diagonal element is zero or negative, skipping normalization")
     
     if verbose:
-        print(f"Kinship matrix matrix computation complete. Mean diagonal: {mean_diag:.6f}")
+        logger.info("Kinship matrix computation complete. Mean diagonal: %.6f", mean_diag)
     
     kinship_matrix = KinshipMatrix(kin)
     
     # Optionally compute eigendecomposition for MLM speedup
     if return_eigen:
         if verbose:
-            print("Computing eigendecomposition for MLM optimization...")
+            logger.info("Computing eigendecomposition for MLM optimization...")
         eigenvals, eigenvecs = np.linalg.eigh(kin)
         
         # Sort eigenvalues and eigenvectors in descending order (for numerical stability)
@@ -118,7 +121,7 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
         }
         
         if verbose:
-            print(f"Eigendecomposition complete. Range of eigenvalues: [{eigenvals.min():.6f}, {eigenvals.max():.6f}]")
+            logger.info("Eigendecomposition complete. Range of eigenvalues: [%.6f, %.6f]", eigenvals.min(), eigenvals.max())
         
         return kinship_matrix, eigenK
     
@@ -153,46 +156,46 @@ def PANICLE_K_IBS(M: Union[GenotypeMatrix, np.ndarray],
         raise ValueError("M must be GenotypeMatrix or numpy array")
     
     if verbose:
-        print(f"Calculating IBS kinship matrix for {n_individuals} individuals, {n_markers} markers")
+        logger.info("Calculating IBS kinship matrix for %d individuals, %d markers", n_individuals, n_markers)
     
-    # Initialize kinship matrix
+    # Initialize kinship accumulator
     kin = np.zeros((n_individuals, n_individuals), dtype=np.float64)
-    
+
     # Process in batches
     n_batches = (n_markers + maxLine - 1) // maxLine
-    
+
     for batch_idx in range(n_batches):
         start_marker = batch_idx * maxLine
         end_marker = min(start_marker + maxLine, n_markers)
-        
+        batch_size = end_marker - start_marker
+
         if verbose and n_batches > 1:
-            print(f"Processing batch {batch_idx + 1}/{n_batches}")
-        
-        # Get batch of markers
+            logger.info("Processing batch %d/%d", batch_idx + 1, n_batches)
+
+        # Get batch of markers as float32 for efficient BLAS matmul
         if isinstance(genotype, GenotypeMatrix):
-            batch = genotype.get_batch(start_marker, end_marker)
+            batch = genotype.get_batch(start_marker, end_marker).astype(np.float32)
         else:
-            batch = genotype[:, start_marker:end_marker]
-        
-        # Calculate IBS for this batch
-        for i in range(n_individuals):
-            for j in range(i, n_individuals):
-                # Count shared alleles
-                geno_i = batch[i, :]
-                geno_j = batch[j, :]
-                
-                # IBS calculation: 1 - |geno_i - geno_j| / 2
-                # This gives 1 for identical genotypes, 0.5 for one allele shared, 0 for no shared alleles
-                ibs = 1.0 - np.abs(geno_i - geno_j) / 2.0
-                kin[i, j] += np.sum(ibs)
-                if i != j:
-                    kin[j, i] += np.sum(ibs)
+            batch = genotype[:, start_marker:end_marker].astype(np.float32)
+
+        # Vectorized IBS using matrix multiplication:
+        # IBS_ij = batch_size - L1_ij / 2
+        # L1_ij = s_i + s_j - 2 * (A @ A' + B @ B')
+        # where A = (batch >= 1), B = (batch >= 2), s_i = row sum of batch
+        A = (batch >= 1).astype(np.float32)
+        B = (batch >= 2).astype(np.float32)
+
+        row_sums = batch.sum(axis=1)
+        shared = A @ A.T + B @ B.T
+
+        L1 = row_sums[:, np.newaxis] + row_sums[np.newaxis, :] - 2.0 * shared
+        kin += batch_size - L1 / 2.0
     
     # Normalize by total number of markers
     kin /= n_markers
     
     if verbose:
-        print("IBS kinship matrix computation complete")
+        logger.info("IBS kinship matrix computation complete")
     
     return KinshipMatrix(kin)
 
