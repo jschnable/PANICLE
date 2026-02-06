@@ -5,8 +5,6 @@ Manhattan plot and Q-Q plot visualization for GWAS results
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.colors import ListedColormap
 from typing import Optional, Union, Dict, List, Tuple
 import warnings
 import re

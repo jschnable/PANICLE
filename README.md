@@ -2,6 +2,7 @@
 
 [![PyPI version](https://badge.fury.io/py/panicle.svg)](https://pypi.org/project/panicle/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml/badge.svg)](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 PANICLE is a **Python package for Genome Wide Association Studies (GWAS)**. It implements GLM, MLM, FarmCPU, and BLINK. PANICLE seeks to achieve speeds comparable or better to other implementations while supporting multiple input data formats, providing multiple quality of life features (native effect marker number testing, leave one chromosome out MLM, calculation of resampling model inclusion probabilities, etc), and allowing modern GWAS algorithms to be natively integrated into python-based data analysis pipelines and ecosystems.
@@ -111,7 +112,7 @@ Other useful filters:
 
 ## Python API Usage
 
-Integrate PANICLE into scripts or Jupyter Notebooks is via the `GWASPipeline` class.
+Integrate PANICLE into scripts or Jupyter Notebooks via the `GWASPipeline` class.
 
 ```python
 from panicle.pipelines.gwas import GWASPipeline

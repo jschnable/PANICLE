@@ -8,7 +8,6 @@ association testing, and result reporting into a reusable pipeline class.
 
 import concurrent.futures
 import time
-import math
 import warnings
 import numpy as np
 import pandas as pd
