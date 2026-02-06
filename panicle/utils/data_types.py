@@ -1,5 +1,5 @@
 """
-Core data structures for pyMVP package
+Core data structures for PANICLE package
 """
 
 import numpy as np

@@ -2,7 +2,7 @@
 """
 Example 01: Basic GWAS Analysis
 
-This example demonstrates the simplest possible GWAS workflow using pyMVP.
+This example demonstrates the simplest possible GWAS workflow using PANICLE.
 We'll run a GLM analysis (no population structure correction) on a single trait.
 
 Prerequisites:

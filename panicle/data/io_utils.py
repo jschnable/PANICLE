@@ -1,5 +1,5 @@
 """
-File I/O utilities for pyMVP package
+File I/O utilities for PANICLE package
 """
 
 import numpy as np

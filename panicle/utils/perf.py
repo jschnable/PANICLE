@@ -97,13 +97,13 @@ def warn_if_potential_single_thread_blas() -> None:
         if not os.environ.get("VECLIB_MAXIMUM_THREADS"):
             warnings.warn(
                 (
-                    "pyMVP detected that NumPy is linked against Apple's Accelerate "
+                    "PANICLE detected that NumPy is linked against Apple's Accelerate "
                     "BLAS/LAPACK. This backend defaults to single-core execution, "
                     "which can severely slow FarmCPU and MLM scans. For multi-core "
                     "performance either reinstall NumPy/SciPy with an OpenBLAS backend "
                     "(e.g. `brew install openblas` followed by "
                     "`pip install --no-binary=:all: numpy scipy`) or set "
-                    "`VECLIB_MAXIMUM_THREADS=<num_cores>` before running pyMVP."
+                    "`VECLIB_MAXIMUM_THREADS=<num_cores>` before running PANICLE."
                 ),
                 RuntimeWarning,
                 stacklevel=2,
@@ -116,7 +116,7 @@ def warn_if_potential_single_thread_blas() -> None:
         if not os.environ.get("OMP_NUM_THREADS"):
             warnings.warn(
                 (
-                    "pyMVP detected a BLIS backend for NumPy/SciPy without an explicit "
+                    "PANICLE detected a BLIS backend for NumPy/SciPy without an explicit "
                     "OMP_NUM_THREADS setting. If analyses only use a single core, "
                     "consider installing OpenBLAS or setting OMP_NUM_THREADS to the "
                     "desired number of threads."
@@ -130,7 +130,7 @@ def warn_if_potential_single_thread_blas() -> None:
     if backend in {"atlas"}:
         warnings.warn(
             (
-                "pyMVP detected that NumPy is using the ATLAS BLAS backend. ATLAS "
+                "PANICLE detected that NumPy is using the ATLAS BLAS backend. ATLAS "
                 "is typically single-threaded on modern macOS builds; if performance "
                 "is limited to one core, consider moving to OpenBLAS or MKL."
             ),

@@ -36,6 +36,61 @@ NON_BINARY_FORMATS = {
 
 LOAD_TIME_WARNING_THRESHOLD = 300.0  # seconds (5 minutes)
 
+# Canonical list of common ID column names recognized across loaders.
+_KNOWN_ID_COLUMNS = [
+    'ID', 'id', 'IID',
+    'sample', 'Sample',
+    'Taxa', 'taxa',
+    'Genotype', 'genotype',
+    'Accession', 'accession',
+]
+
+
+def _detect_and_rename_id_column(df: pd.DataFrame, id_column: str = 'ID',
+                                  verbose: bool = True) -> pd.DataFrame:
+    """Detect and rename the ID column to 'ID' in a DataFrame.
+
+    Checks for *id_column* first, then falls back to well-known column names
+    (see ``_KNOWN_ID_COLUMNS``), and finally uses the first column.
+
+    Args:
+        df: DataFrame to inspect (modified in-place via rename).
+        id_column: The expected ID column name supplied by the caller.
+        verbose: Whether to print auto-detection messages.
+
+    Returns:
+        The (possibly renamed) DataFrame.
+    """
+    if id_column in df.columns:
+        if verbose:
+            print(f"   Using specified ID column: '{id_column}'")
+        if id_column != 'ID':
+            df = df.rename(columns={id_column: 'ID'})
+        return df
+
+    present_candidates = [c for c in df.columns if c in _KNOWN_ID_COLUMNS]
+    if present_candidates:
+        if len(present_candidates) > 1:
+            warnings.warn(
+                "Multiple potential ID columns found: {}. Selecting leftmost '{}' as ID.".format(
+                    present_candidates, present_candidates[0]
+                )
+            )
+        detected = present_candidates[0]
+        if verbose:
+            print(f"   Auto-detected ID column: '{detected}'")
+        df = df.rename(columns={detected: 'ID'})
+        return df
+
+    first_col = df.columns[0]
+    warnings.warn(
+        "No recognized ID column found; using first column '{}' as ID.".format(first_col)
+    )
+    if verbose:
+        print(f"   Using first column as ID: '{first_col}'")
+    df = df.rename(columns={first_col: 'ID'})
+    return df
+
 
 def detect_file_format(filepath: Union[str, Path]) -> str:
     """Detect file format based on extension and content
@@ -158,41 +213,8 @@ def load_phenotype_file(filepath: Union[str, Path],
             df = pd.read_csv(filepath, sep='\t', **read_kwargs)
     
     # Standardize column names
-    detected_id_column = None
-    if id_column not in df.columns:
-        # Try common ID column names (select leftmost if multiple are present)
-        possible_id_cols = [
-            'ID', 'id', 'IID',
-            'sample', 'Sample',
-            'Taxa', 'taxa',
-            'Genotype', 'genotype',
-            'Accession', 'accession',
-        ]
-        present_candidates = [c for c in df.columns if c in possible_id_cols]
-        if present_candidates:
-            if len(present_candidates) > 1:
-                warnings.warn(
-                    "Multiple potential ID columns found: {}. Selecting leftmost '{}' as ID.".format(
-                        present_candidates, present_candidates[0]
-                    )
-                )
-            detected_id_column = present_candidates[0]
-            print(f"   Auto-detected ID column: '{detected_id_column}'")
-            df = df.rename(columns={detected_id_column: 'ID'})
-        else:
-            # Use first column as ID (emit a gentle warning)
-            first_col = df.columns[0]
-            warnings.warn(
-                "No recognized ID column found; using first column '{}' as ID.".format(first_col)
-            )
-            detected_id_column = first_col
-            print(f"   Using first column as ID: '{detected_id_column}'")
-            df = df.rename(columns={first_col: 'ID'})
-    else:
-        print(f"   Using specified ID column: '{id_column}'")
-        if id_column != 'ID':
-            df = df.rename(columns={id_column: 'ID'})
-    
+    df = _detect_and_rename_id_column(df, id_column)
+
     # Auto-detect trait columns if not specified
     if trait_columns is None:
         # Attempt to coerce non-ID columns to numeric to improve detection
@@ -291,32 +313,7 @@ def load_covariate_file(filepath: Union[str, Path],
         except Exception:
             cov_df = pd.read_csv(filepath, sep='	', **read_kwargs)
 
-    if id_column not in cov_df.columns:
-        possible_id_cols = [
-            'ID', 'id', 'IID',
-            'sample', 'Sample',
-            'Taxa', 'taxa',
-            'Genotype', 'genotype',
-            'Accession', 'accession',
-        ]
-        present_candidates = [c for c in cov_df.columns if c in possible_id_cols]
-        if present_candidates:
-            if len(present_candidates) > 1:
-                warnings.warn(
-                    "Multiple potential ID columns found: {}. Selecting leftmost '{}' as ID.".format(
-                        present_candidates, present_candidates[0]
-                    )
-                )
-            cov_df = cov_df.rename(columns={present_candidates[0]: 'ID'})
-        else:
-            first_col = cov_df.columns[0]
-            warnings.warn(
-                "No recognized ID column found; using first column '{}' as ID.".format(first_col)
-            )
-            cov_df = cov_df.rename(columns={first_col: 'ID'})
-    else:
-        if id_column != 'ID':
-            cov_df = cov_df.rename(columns={id_column: 'ID'})
+    cov_df = _detect_and_rename_id_column(cov_df, id_column)
 
     cov_df['ID'] = cov_df['ID'].astype(str)
 
@@ -392,6 +389,35 @@ def load_covariate_file(filepath: Union[str, Path],
     return covariate_data
 
 
+def _wrap_loaded_genotype(
+    geno_np: np.ndarray,
+    individual_ids: List[str],
+    geno_map_df: "pd.DataFrame",
+    precompute_alleles: bool = True,
+    compute_effective_tests: bool = False,
+    effective_test_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[GenotypeMatrix, List[str], GenotypeMap]:
+    """Shared post-processing for format-specific genotype loaders.
+
+    Deduplicates sample IDs, wraps raw arrays into ``GenotypeMatrix`` /
+    ``GenotypeMap`` objects, and optionally computes effective tests.
+    """
+    individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
+    is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
+    geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=is_imputed)
+    geno_map = GenotypeMap(
+        geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df)
+    )
+    if compute_effective_tests:
+        et_kwargs = effective_test_kwargs or {}
+        geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
+            geno_matrix,
+            geno_map,
+            **et_kwargs,
+        )
+    return geno_matrix, individual_ids, geno_map
+
+
 def _deduplicate_genotype_samples(individual_ids: List[str], geno_np: np.ndarray) -> Tuple[List[str], np.ndarray]:
     """Deduplicate genotype sample IDs by retaining the first occurrence per ID.
 
@@ -438,7 +464,7 @@ def load_genotype_file(filepath: Union[str, Path],
         if file_format in NON_BINARY_FORMATS and elapsed_seconds >= LOAD_TIME_WARNING_THRESHOLD:
             print(
                 f"Warning: Loading genotype file '{filepath}' took {elapsed_seconds / 60:.1f} minutes. "
-                "Consider caching it with `pymvp-cache-genotype` for faster future runs.",
+                "Consider caching it with `panicle-cache-genotype` for faster future runs.",
                 file=sys.stderr,
             )
 
@@ -464,71 +490,34 @@ def load_genotype_file(filepath: Union[str, Path],
     if file_format == 'vcf':
         if _load_genotype_vcf is None:
             raise ImportError("VCF loading requires 'load_genotype_vcf' module."
-                              " Ensure pymvp/data/load_genotype_vcf.py is present.")
+                              " Ensure panicle/data/load_genotype_vcf.py is present.")
         geno_np, individual_ids, geno_map_df = _load_genotype_vcf(str(filepath), **kwargs)
-        # Deduplicate genotype sample IDs centrally
-        individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-        # Check if data was loaded from v2 cache (pre-imputed)
-        is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-        geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=is_imputed)
-        geno_map = GenotypeMap(
-            geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df)
-        )
-        if compute_effective_tests:
-            effective_tests_kwargs = effective_test_kwargs or {}
-            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-                geno_matrix,
-                geno_map,
-                **effective_tests_kwargs,
-            )
+        result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
-        return geno_matrix, individual_ids, geno_map
-    
+        return result
+
     if file_format == 'plink':
         if _load_genotype_plink is None:
             raise ImportError("PLINK loading requires 'bed-reader' and 'load_genotype_plink'."
                               " pip install bed-reader.")
         geno_np, individual_ids, geno_map_df = _load_genotype_plink(str(filepath), **kwargs)
-        # Deduplicate genotype sample IDs centrally
-        individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-        is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-        geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=is_imputed)
-        geno_map = GenotypeMap(
-            geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df)
-        )
-        if compute_effective_tests:
-            effective_tests_kwargs = effective_test_kwargs or {}
-            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-                geno_matrix,
-                geno_map,
-                **effective_tests_kwargs,
-            )
+        result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
-        return geno_matrix, individual_ids, geno_map
+        return result
 
     if file_format == 'hapmap':
         if _load_genotype_hapmap is None:
             raise ImportError("HapMap loading requires 'load_genotype_hapmap' module.")
         geno_np, individual_ids, geno_map_df = _load_genotype_hapmap(str(filepath), **kwargs)
-        # Deduplicate genotype sample IDs centrally
-        individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-        is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-        geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=is_imputed)
-        geno_map = GenotypeMap(
-            geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df)
-        )
-        if compute_effective_tests:
-            effective_tests_kwargs = effective_test_kwargs or {}
-            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-                geno_matrix,
-                geno_map,
-                **effective_tests_kwargs,
-            )
+        result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
-        return geno_matrix, individual_ids, geno_map
+        return result
 
     if file_format in ['csv', 'tsv', 'numeric']:
         cache_base = str(filepath)
@@ -541,7 +530,7 @@ def load_genotype_file(filepath: Union[str, Path],
         max_missing = float(kwargs.get('max_missing', 1.0))
         drop_monomorphic = bool(kwargs.get('drop_monomorphic', False))
         geno_np = None
-        individual_ids: List[str] | None = None
+        individual_ids_csv: Optional[List[str]] = None
         geno_map_df = None
         loaded_from_cache = False
         try:
@@ -554,7 +543,7 @@ def load_genotype_file(filepath: Union[str, Path],
                         print(f"   [Cache] Loading binary cache for {filepath}...")
                         geno_np = np.load(cache_geno, mmap_mode='r')
                         with open(cache_ind, 'r') as f:
-                            individual_ids = [line.strip() for line in f]
+                            individual_ids_csv = [line.strip() for line in f]
                         geno_map_df = pd.read_csv(cache_map)
                         geno_map_df.attrs["is_imputed"] = True
                         loaded_from_cache = True
@@ -582,7 +571,7 @@ def load_genotype_file(filepath: Union[str, Path],
             df = pd.read_csv(filepath, sep=separator, low_memory=False)
 
             # First column should be individual IDs
-            individual_ids = df.iloc[:, 0].astype(str).tolist()
+            individual_ids_csv = df.iloc[:, 0].astype(str).tolist()
 
             # Remaining columns are markers
             marker_names = df.columns[1:].tolist()
@@ -614,34 +603,23 @@ def load_genotype_file(filepath: Union[str, Path],
                 print(f"   [Cache] Saving binary cache to {cache_base}.panicle.v2.*")
                 np.save(cache_geno, geno_np)
                 with open(cache_ind, 'w') as f:
-                    for ind in individual_ids:
+                    for ind in individual_ids_csv:
                         f.write(f"{ind}\n")
                 geno_map_df.to_csv(cache_map, index=False)
             except Exception as e:
                 print(f"   [Cache] Warning: Failed to save cache: {e}")
 
-        if geno_np is None or individual_ids is None or geno_map_df is None:
+        if geno_np is None or individual_ids_csv is None or geno_map_df is None:
             raise ValueError("Failed to load genotype data from CSV/TSV")
 
-        # Deduplicate genotype sample IDs centrally
-        individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-
-        # Create GenotypeMatrix
-        geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=True)
-
-        # Create GenotypeMap
-        geno_map = GenotypeMap(geno_map_df)
-        if compute_effective_tests:
-            effective_tests_kwargs = effective_test_kwargs or {}
-            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-                geno_matrix,
-                geno_map,
-                **effective_tests_kwargs,
-            )
+        # CSV/TSV data is already imputed above; mark it so the wrapper preserves the flag.
+        geno_map_df.attrs["is_imputed"] = True
+        result = _wrap_loaded_genotype(geno_np, individual_ids_csv, geno_map_df,
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
 
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
-        return geno_matrix, individual_ids, geno_map
+        return result
     
     else:
         raise ValueError(f"Unsupported file format: {file_format}")
@@ -650,35 +628,26 @@ def load_genotype_file(filepath: Union[str, Path],
 def load_genotype_vcf(filepath: Union[str, Path], **kwargs) -> Tuple[GenotypeMatrix, List[str], GenotypeMap]:
     """Convenience wrapper to load VCF files using the optimized loader.
 
-    Accepts the same keyword args as `load_genotype_vcf` in `pymvp.data.load_genotype_vcf`,
-    including `backend` ('auto'|'cyvcf2'|'builtin'), `split_multiallelic`, and filters.
+    Accepts the same keyword args as ``load_genotype_vcf`` in
+    ``panicle.data.load_genotype_vcf``, including ``backend``
+    ('auto'|'cyvcf2'|'builtin'), ``split_multiallelic``, and filters.
     """
     if _load_genotype_vcf is None:
         raise ImportError("VCF loading requires 'load_genotype_vcf' module.")
     geno_np, individual_ids, geno_map_df = _load_genotype_vcf(str(filepath), **kwargs)
-    # Deduplicate genotype sample IDs centrally
-    individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-    is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-    geno_matrix = GenotypeMatrix(geno_np, is_imputed=is_imputed)
-    geno_map = GenotypeMap(geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df))
-    return geno_matrix, individual_ids, geno_map
+    return _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df)
 
 def load_genotype_plink(filepath: Union[str, Path], **kwargs) -> Tuple[GenotypeMatrix, List[str], GenotypeMap]:
     """Convenience wrapper to load PLINK .bed files.
 
-    Accepts `prefix_or_bed` and optional `bim`/`fam` in kwargs, plus filters
-    matching the VCF loader (drop_monomorphic, max_missing, min_maf).
+    Accepts ``prefix_or_bed`` and optional ``bim``/``fam`` in kwargs, plus
+    filters matching the VCF loader (drop_monomorphic, max_missing, min_maf).
     """
     if _load_genotype_plink is None:
         raise ImportError("PLINK loading requires 'bed-reader' and 'load_genotype_plink'."
                           " pip install bed-reader.")
     geno_np, individual_ids, geno_map_df = _load_genotype_plink(str(filepath), **kwargs)
-    # Deduplicate genotype sample IDs centrally
-    individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-    is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-    geno_matrix = GenotypeMatrix(geno_np, is_imputed=is_imputed)
-    geno_map = GenotypeMap(geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df))
-    return geno_matrix, individual_ids, geno_map
+    return _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df)
 
 def load_genotype_hapmap(filepath: Union[str, Path], **kwargs) -> Tuple[GenotypeMatrix, List[str], GenotypeMap]:
     """Convenience wrapper to load HapMap .hmp(.txt) files.
@@ -688,12 +657,7 @@ def load_genotype_hapmap(filepath: Union[str, Path], **kwargs) -> Tuple[Genotype
     if _load_genotype_hapmap is None:
         raise ImportError("HapMap loading requires 'load_genotype_hapmap' module.")
     geno_np, individual_ids, geno_map_df = _load_genotype_hapmap(str(filepath), **kwargs)
-    # Deduplicate genotype sample IDs centrally
-    individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-    is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
-    geno_matrix = GenotypeMatrix(geno_np, is_imputed=is_imputed)
-    geno_map = GenotypeMap(geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df))
-    return geno_matrix, individual_ids, geno_map
+    return _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df)
 
 def load_map_file(filepath: Union[str, Path]) -> GenotypeMap:
     """Load genetic map file

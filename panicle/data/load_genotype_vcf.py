@@ -66,7 +66,7 @@ class _DynamicInt8MatrixWriter:
         if self.n_rows <= 0:
             raise ValueError("Writer requires a positive number of rows")
         self.capacity = max(int(initial_capacity), 1)
-        tmp = tempfile.NamedTemporaryFile(prefix="pymvp_geno_", suffix=".tmp", delete=False)
+        tmp = tempfile.NamedTemporaryFile(prefix="panicle_geno_", suffix=".tmp", delete=False)
         self.path = tmp.name
         tmp.close()
         self.memmap = np.memmap(self.path, dtype=np.int8, mode='w+', shape=(self.n_rows, self.capacity))
@@ -563,7 +563,7 @@ def load_genotype_vcf(
                 # For safety, mask them or rely on simple sum if we trust the file
                 # Simple sum matches biallelic expectation: 0+0=0, 0+1=1, 1+1=2.
                 # If we have 2 (allele 2), sum is > 2, which logic below might clamp or accept? 
-                # pyMVP expects 0,1,2.
+                # PANICLE expects 0,1,2.
                 
                 # Compute dosage directly; missing handled by mask below
                 dosages = np.sum(alleles, axis=1)

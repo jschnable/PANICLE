@@ -17,7 +17,7 @@ Algorithm:
       t = beta / se,   p = 2 * sf(|t|, df)
 
 Effect/SE scaling:
-- Match pyMVP/rMVP effect scale post-hoc (does not change p-values):
+- Match PANICLE/rMVP effect scale post-hoc (does not change p-values):
   divide by per-marker SD of imputed genotypes, then multiply by 0.656.
 
 This file exposes MVP_GLM_ultrafast with the same signature as MVP_GLM.

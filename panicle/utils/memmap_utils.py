@@ -1,6 +1,6 @@
 """
 Memory-mapped file utilities for efficient handling of large genotype datasets
-Compatible with rMVP and optimized for pyMVP FarmCPU performance
+Compatible with rMVP and optimized for PANICLE FarmCPU performance
 """
 
 import numpy as np
@@ -99,7 +99,7 @@ def save_genotype_to_memmap(genotype: Union[GenotypeMatrix, np.ndarray],
 
 def load_full_from_metadata(metadata_path: Union[str, Path],
                             precompute_alleles: bool = True) -> Tuple[GenotypeMatrix, Sequence[str], Optional[GenotypeMap]]:
-    """Load genotype, sample IDs, and map from a pyMVP cache metadata file."""
+    """Load genotype, sample IDs, and map from a PANICLE cache metadata file."""
 
     metadata_path = Path(metadata_path)
     if not metadata_path.exists():

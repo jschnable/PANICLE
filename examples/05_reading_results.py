@@ -2,7 +2,7 @@
 """
 Example 05: Reading and Analyzing GWAS Results
 
-This example demonstrates how to load and analyze pyMVP output files,
+This example demonstrates how to load and analyze PANICLE output files,
 including filtering, sorting, and extracting information.
 
 Prerequisites: Run example 02 first to generate MLM results.

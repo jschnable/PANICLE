@@ -5,7 +5,7 @@ This module provides the `MVP_GLM` function, which uses the Frisch-Waugh-Lovell 
 theorem and QR decomposition for high-performance association testing.
 
 Implementation details:
-- pymvp.association.glm_fwl_qr: Fast vectorized implementation (default).
+- panicle.association.glm_fwl_qr: Fast vectorized implementation (default).
 """
 
 from typing import Optional, Union

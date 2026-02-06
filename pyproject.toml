@@ -61,6 +61,7 @@ panicle-cache-genotype = "panicle.tools.convert_genotype:main"
 
 [tool.setuptools.packages.find]
 include = ["panicle*"]
+exclude = ["panicle.association._archived*"]
 
 [tool.setuptools.package-data]
 panicle = ["py.typed"]

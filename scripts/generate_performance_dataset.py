@@ -14,10 +14,10 @@ Features:
 - MAF-effect size coupling with configurable architecture
 - Heritability sweep functionality for benchmarking
 - Study design modes for crops and inbreeding/selfing populations
-- Flexible output formats compatible with pyMVP package
+- Flexible output formats compatible with PANICLE package
 - Comprehensive dataset documentation and metadata
 
-Author: Generated for pyMVP performance testing
+Author: Generated for PANICLE performance testing
 """
 
 import numpy as np
@@ -966,7 +966,7 @@ class GWASDatasetGenerator:
                     phenotype_df: pd.DataFrame) -> None:
         """Save complete dataset in multiple formats with comprehensive metadata
 
-        Saves dataset in formats compatible with pyMVP and other GWAS tools:
+        Saves dataset in formats compatible with PANICLE and other GWAS tools:
         - Compressed NumPy arrays for fast loading
         - CSV files for compatibility
         - Parquet files for efficient storage

@@ -9,6 +9,7 @@ from pathlib import Path
 import warnings
 
 from ..utils.data_types import Phenotype, GenotypeMatrix, GenotypeMap, KinshipMatrix, AssociationResults
+from ..data.loaders import load_genotype_file
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
 from ..association.mlm_loco import PANICLE_MLM_LOCO
@@ -110,15 +111,18 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         
         # Load genotype data
         if isinstance(geno, (str, Path)):
-            # Load genotype from file (placeholder - would need actual file loading)
-            raise NotImplementedError("Loading genotype from file not yet implemented")
+            genotype, _individual_ids, loaded_map = load_genotype_file(geno)
+            # Use the map embedded in the genotype file when map_data is not
+            # explicitly provided (i.e. caller passed the same path or None).
+            if isinstance(map_data, (str, Path)) or map_data is None:
+                map_data = loaded_map
         elif isinstance(geno, np.ndarray):
             genotype = GenotypeMatrix(geno)
         elif isinstance(geno, GenotypeMatrix):
             genotype = geno
         else:
             raise ValueError("Invalid genotype input type")
-        
+
         # Load map data
         if isinstance(map_data, (str, Path)):
             genetic_map = GenotypeMap(map_data)

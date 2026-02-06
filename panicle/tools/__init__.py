@@ -1,1 +1,1 @@
-"""Utility command-line helpers for pyMVP."""
+"""Utility command-line helpers for PANICLE."""

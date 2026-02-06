@@ -97,12 +97,12 @@ def test_panicle_farmcpu_resampling_threshold_warning(monkeypatch) -> None:
     assert res["summary"]["methods_run"] == ["FarmCPUResampling"]
 
 
-def test_panicle_rejects_genotype_path(monkeypatch) -> None:
+def test_panicle_rejects_nonexistent_genotype_path(monkeypatch) -> None:
     phe, geno, geno_map = _basic_inputs()
     geno_file = Path("fake.bed")
     # Ensure other heavy functions are not called
     monkeypatch.setattr(mvp, "PANICLE_Report", lambda **kwargs: {"files_created": []})
-    with pytest.raises(NotImplementedError):
+    with pytest.raises((FileNotFoundError, ValueError)):
         mvp.PANICLE(phe, str(geno_file), geno_map, method=["GLM"], file_output=False, verbose=False)
 
 

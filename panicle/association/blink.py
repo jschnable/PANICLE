@@ -3,7 +3,7 @@
 Python implementation aligned with the reference rMVP/BLINK algorithm.
 
 The current implementation focuses on parity with the R routines located in
-``BLINK/R`` while leveraging pyMVP utilities for genotype handling and
+``BLINK/R`` while leveraging PANICLE utilities for genotype handling and
 high-performance GLM scanning.
 """
 
