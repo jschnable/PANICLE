@@ -42,6 +42,15 @@ from .association.farmcpu import PANICLE_FarmCPU
 from .association.blink import PANICLE_BLINK
 from .association.farmcpu_resampling import PANICLE_FarmCPUResampling
 from .visualization.manhattan import PANICLE_Report
+from .data.loaders import (
+    load_genotype_file,
+    load_genotype_vcf,
+    load_genotype_plink,
+    load_genotype_hapmap,
+    load_phenotype_file,
+    load_map_file,
+    match_individuals,
+)
 
 __all__ = [
     'PANICLE',
@@ -53,5 +62,12 @@ __all__ = [
     'PANICLE_FarmCPU',
     'PANICLE_BLINK',
     'PANICLE_FarmCPUResampling',
-    'PANICLE_Report'
+    'PANICLE_Report',
+    'load_genotype_file',
+    'load_genotype_vcf',
+    'load_genotype_plink',
+    'load_genotype_hapmap',
+    'load_phenotype_file',
+    'load_map_file',
+    'match_individuals',
 ]

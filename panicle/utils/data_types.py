@@ -59,8 +59,9 @@ class Phenotype:
 
 class GenotypeMap:
     """SNP map information compatible with R rMVP format
-    
-    Expected columns: [SNP_ID, Chr, Pos, REF, ALT]
+
+    Required columns: [SNP, CHROM, POS]
+    Optional columns: [REF, ALT]
     """
     
     def __init__(self, data: Union[pd.DataFrame, str, Path], metadata: Optional[Dict[str, Any]] = None):

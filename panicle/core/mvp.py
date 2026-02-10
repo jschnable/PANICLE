@@ -42,7 +42,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
     association testing, and visualization.
     
     Args:
-        phe: Phenotype data (file path, array, or Phenotype object)
+        phe: Phenotype data. Accepts a file path (CSV/TSV with ID + trait columns),
+            an (n, 2) numpy array where column 0 is individual ID and column 1 is
+            the trait value, a DataFrame, or a Phenotype object
         geno: Genotype data (file path, array, or GenotypeMatrix object)
         map_data: Genetic map data (file path, DataFrame, or GenotypeMap object)
         K: Kinship matrix (optional, calculated if not provided for MLM/FarmCPU)

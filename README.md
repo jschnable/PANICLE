@@ -55,6 +55,46 @@ pip install -e .[all]
 - `bed-reader` ≥1.0.0 — PLINK .bed/.bim/.fam format support (`pip install panicle[plink]`)
 - `joblib` ≥1.0.0 — Parallel processing for LOCO methods (`pip install panicle[parallel]`)
 
+## Quick Start (Python API)
+
+```python
+from panicle import PANICLE
+
+# Run GWAS with a single function call
+results = PANICLE(
+    phe="data/phenotype.csv",
+    geno="data/genotypes.vcf.gz",
+    map_data="data/map.csv",       # optional for VCF (map is extracted automatically)
+    method=["GLM", "MLM", "FarmCPU"]
+)
+
+# Results are also saved to CSV files automatically
+```
+
+For more control over data loading, use the loader functions directly:
+
+```python
+from panicle import load_genotype_vcf, load_phenotype_file, match_individuals
+from panicle import PANICLE_MLM, PANICLE_K_VanRaden, PANICLE_PCA
+
+# Load data
+genotype, sample_ids, snp_map = load_genotype_vcf("data/genotypes.vcf.gz")
+phenotypes = load_phenotype_file("data/phenotype.csv")
+
+# Align samples and loop over traits
+for trait in phenotypes.columns[1:]:
+    phe_trait = phenotypes[["ID", trait]].dropna()
+    phe_aligned, _, geno_idx, _ = match_individuals(phe_trait, sample_ids)
+
+    geno_subset = genotype.subset_individuals(geno_idx)
+    phe_array = phe_aligned.values  # (n, 2) array: [ID, value]
+
+    K = PANICLE_K_VanRaden(geno_subset)
+    results = PANICLE_MLM(phe=phe_array, geno=geno_subset, K=K)
+    df = results.to_dataframe()
+    print(f"{trait}: {(df['P'] < 5e-8).sum()} significant markers")
+```
+
 ## CLI Usage (Quick Start)
 
 The `run_GWAS.py` script provides a command-line interface for batch processing.
