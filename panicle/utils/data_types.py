@@ -611,6 +611,43 @@ class AssociationResults:
         
         return np.column_stack([eff, se, pv])
 
+    def manhattan_plot(self,
+                       map_data: Optional[GenotypeMap] = None,
+                       threshold: float = 5e-8,
+                       title: str = "Manhattan Plot",
+                       figsize: Tuple[int, int] = (12, 6),
+                       output_file: Optional[Union[str, Path]] = None):
+        """Create a Manhattan plot directly from this result object."""
+        from ..visualization.manhattan import create_manhattan_plot
+
+        effective_map = map_data if map_data is not None else self.snp_map
+        fig = create_manhattan_plot(
+            pvalues=self.pvalues if self.pvalues.ndim == 1 else self.pvalues[:, 0],
+            map_data=effective_map,
+            threshold=threshold,
+            title=title,
+            figsize=figsize,
+        )
+        if output_file is not None:
+            fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        return fig
+
+    def qq_plot(self,
+                title: str = "Q-Q Plot",
+                figsize: Tuple[int, int] = (6, 6),
+                output_file: Optional[Union[str, Path]] = None):
+        """Create a QQ plot directly from this result object."""
+        from ..visualization.manhattan import create_qq_plot
+
+        fig = create_qq_plot(
+            pvalues=self.pvalues if self.pvalues.ndim == 1 else self.pvalues[:, 0],
+            title=title,
+            figsize=figsize,
+        )
+        if output_file is not None:
+            fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        return fig
+
 
 class KinshipMatrix:
     """Kinship matrix with validation and properties

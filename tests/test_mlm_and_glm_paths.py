@@ -41,6 +41,16 @@ def test_mlm_accepts_preimputed_genotype_matrix() -> None:
     assert np.all(np.isfinite(res.se))
 
 
+def test_mlm_accepts_1d_phenotype_vector() -> None:
+    geno, phe, kinship = _make_basic_inputs()
+    trait = phe[:, 1].astype(np.float64)
+
+    res = PANICLE_MLM(trait, geno, K=kinship, maxLine=2, verbose=False)
+
+    assert res.effects.shape == (geno.shape[1],)
+    assert np.all(np.isfinite(res.pvalues))
+
+
 def test_mlm_variance_components_brent_produces_positive_components() -> None:
     y = np.array([1.0, 2.0, 3.0, 4.0])
     X = np.ones((4, 1))
@@ -123,6 +133,21 @@ def test_mlm_errors_on_invalid_inputs() -> None:
     bad_kin = np.eye(phe.shape[0] + 1)
     with pytest.raises(ValueError, match="dimensions must match"):
         PANICLE_MLM(phe, geno, K=bad_kin, verbose=False)
+
+
+def test_mlm_loco_errors_on_missing_trait_values() -> None:
+    geno, phe, _ = _make_basic_inputs()
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(geno.shape[1])],
+            "CHROM": ["1", "1", "2", "2", "3"][:geno.shape[1]],
+            "POS": np.arange(1, geno.shape[1] + 1),
+        }
+    )
+    phe[1, 1] = np.nan
+
+    with pytest.raises(ValueError, match="missing/non-finite"):
+        PANICLE_MLM_LOCO(phe, geno, map_data=map_df, verbose=False)
 
 
 def test_mlm_uses_provided_eigen_and_kinship_matrix_and_cpu_zero() -> None:

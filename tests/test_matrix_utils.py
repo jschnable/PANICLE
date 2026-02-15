@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from panicle.matrix.kinship import PANICLE_K_IBS, validate_kinship_matrix
+from panicle.matrix.kinship import PANICLE_K_IBS, PANICLE_K_VanRaden, validate_kinship_matrix
 from panicle.matrix.pca import PANICLE_PCA, PANICLE_PCA_genotype, PANICLE_PCA_kinship
 from panicle.utils.data_types import GenotypeMatrix
 
@@ -87,3 +87,15 @@ def test_validate_kinship_matrix_detects_shape_and_psd_issues() -> None:
     is_valid, errors = validate_kinship_matrix(np.array([[1.0, 0.0], [0.0, 1.0]]))
     assert is_valid
     assert errors == []
+
+
+def test_panicle_k_vanraden_throttles_progress_logging(caplog) -> None:
+    rng = np.random.default_rng(5)
+    geno = rng.integers(0, 3, size=(6, 80), dtype=np.int8)
+
+    with caplog.at_level("INFO", logger="panicle.matrix.kinship"):
+        PANICLE_K_VanRaden(geno, maxLine=2, verbose=True)
+
+    progress_records = [r for r in caplog.records if "Processing batch" in r.message]
+    # 80 markers / 2 per batch = 40 batches; logging should be throttled below per-batch spam.
+    assert 0 < len(progress_records) < 40

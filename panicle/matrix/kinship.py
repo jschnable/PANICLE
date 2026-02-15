@@ -15,6 +15,7 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
                    maxLine: int = 5000, 
                    cpu: int = 1,
                    verbose: bool = True,
+                   progress_every: Optional[int] = None,
                    return_eigen: bool = False) -> Union[KinshipMatrix, Tuple[KinshipMatrix, dict]]:
     """VanRaden kinship matrix calculation
     
@@ -28,6 +29,8 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
         maxLine: Batch size for processing markers
         cpu: Number of CPU threads (currently ignored)
         verbose: Print progress information
+        progress_every: Number of batches between progress messages.
+            If None, logs approximately every 10% of batches.
         return_eigen: If True, also return eigendecomposition for MLM speedup
     
     Returns:
@@ -55,12 +58,21 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
 
     # Process markers in batches to manage memory
     n_batches = (n_markers + maxLine - 1) // maxLine
+    if progress_every is None:
+        progress_every = max(1, n_batches // 10)
+    else:
+        progress_every = max(1, int(progress_every))
 
     for batch_idx in range(n_batches):
         start_marker = batch_idx * maxLine
         end_marker = min(start_marker + maxLine, n_markers)
 
-        if verbose and n_batches > 1:
+        should_report = (
+            batch_idx == 0
+            or batch_idx == n_batches - 1
+            or (batch_idx + 1) % progress_every == 0
+        )
+        if verbose and n_batches > 1 and should_report:
             logger.info("Processing batch %d/%d (markers %d-%d)", batch_idx + 1, n_batches, start_marker, end_marker - 1)
 
         # Get batch of markers in float32 (faster BLAS, sufficient precision for kinship)

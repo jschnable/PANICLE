@@ -109,6 +109,25 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
     Returns:
         AssociationResults object containing Effect, SE, and P-value for each marker
     """
+    if not isinstance(phe, np.ndarray) or phe.ndim != 2 or phe.shape[1] != 2:
+        raise ValueError("Phenotype must be numpy array with 2 columns [ID, trait_value]")
+    trait_values_full = phe[:, 1].astype(np.float64)
+    if not np.all(np.isfinite(trait_values_full)):
+        raise ValueError(
+            "Phenotype contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO"
+        )
+    if CV is not None:
+        if CV.shape[0] != phe.shape[0]:
+            raise ValueError("Covariate matrix must have same number of rows as phenotypes")
+        try:
+            CV = CV.astype(np.float64, copy=False)
+        except (TypeError, ValueError):
+            raise ValueError("Covariate matrix must contain numeric values")
+        if not np.all(np.isfinite(CV)):
+            raise ValueError(
+                "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO"
+            )
+
     if isinstance(geno, GenotypeMatrix):
         n_markers = geno.n_markers
     elif isinstance(geno, np.ndarray):
@@ -213,13 +232,11 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
 
         if n_candidates > 0:
             # Extract phenotype values and setup covariates
-            trait_values = phe[:, 1].astype(np.float64)
-            trait_values = np.nan_to_num(trait_values, nan=0.0, posinf=0.0, neginf=0.0)
+            trait_values = trait_values_full
             n_individuals = len(trait_values)
 
             if CV is not None:
-                CV_clean = np.nan_to_num(CV.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-                X = np.column_stack([np.ones(n_individuals), CV_clean])
+                X = np.column_stack([np.ones(n_individuals), CV])
             else:
                 X = np.ones((n_individuals, 1))
 

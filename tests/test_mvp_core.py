@@ -136,3 +136,87 @@ def test_save_results_to_files_writes_outputs(tmp_path) -> None:
     assert any("GLM_results.csv" in f for f in files)
     for f in files:
         assert Path(f).exists()
+
+
+def test_panicle_auto_matches_ids_and_subsets_genotype(monkeypatch, tmp_path) -> None:
+    geno_file = tmp_path / "geno.csv"
+    pd.DataFrame(
+        {
+            "ID": ["A", "B", "C"],
+            "m1": [0, 1, 2],
+            "m2": [2, 1, 0],
+        }
+    ).to_csv(geno_file, index=False)
+    geno_map = GenotypeMap(
+        pd.DataFrame({"SNP": ["m1", "m2"], "CHROM": [1, 1], "POS": [1, 2]})
+    )
+    phe_file = tmp_path / "phe.csv"
+    pd.DataFrame({"ID": ["B", "D", "A"], "Trait": [1.0, 2.0, 3.0]}).to_csv(phe_file, index=False)
+
+    captured = {}
+    dummy = DummyAssocResult(2, np.array([0.2, 0.3]))
+
+    def fake_glm(**kwargs):
+        captured["phe"] = kwargs["phe"]
+        captured["geno"] = kwargs["geno"].get_batch(0, kwargs["geno"].n_markers)
+        return dummy
+
+    monkeypatch.setattr(mvp, "PANICLE_GLM", fake_glm)
+    monkeypatch.setattr(mvp, "PANICLE_Report", lambda **kwargs: {"files_created": []})
+
+    res = mvp.PANICLE(
+        phe=str(phe_file),
+        geno=str(geno_file),
+        map_data=geno_map,
+        method=["GLM"],
+        file_output=False,
+        verbose=False,
+    )
+
+    assert captured["phe"][:, 0].tolist() == ["B", "A"]
+    np.testing.assert_array_equal(captured["geno"], np.array([[1, 1], [0, 2]], dtype=np.int8))
+    assert res["summary"]["total_individuals"] == 2
+    assert res["summary"]["sample_matching"]["n_common"] == 2
+    assert res["summary"]["sample_matching"]["n_phenotype_dropped"] == 1
+    assert res["summary"]["sample_matching"]["n_genotype_dropped"] == 1
+
+
+def test_panicle_excludes_missing_trait_values_per_trait(monkeypatch, tmp_path) -> None:
+    geno_file = tmp_path / "geno.csv"
+    pd.DataFrame(
+        {
+            "ID": ["A", "B", "C"],
+            "m1": [0, 1, 2],
+            "m2": [2, 1, 0],
+        }
+    ).to_csv(geno_file, index=False)
+    geno_map = GenotypeMap(
+        pd.DataFrame({"SNP": ["m1", "m2"], "CHROM": [1, 1], "POS": [1, 2]})
+    )
+    phe_file = tmp_path / "phe_nan.csv"
+    pd.DataFrame({"ID": ["A", "B", "C"], "Trait": [1.0, np.nan, 3.0]}).to_csv(phe_file, index=False)
+
+    captured = {}
+    dummy = DummyAssocResult(2, np.array([0.4, 0.5]))
+
+    def fake_glm(**kwargs):
+        captured["phe"] = kwargs["phe"]
+        captured["geno_n"] = kwargs["geno"].n_individuals
+        return dummy
+
+    monkeypatch.setattr(mvp, "PANICLE_GLM", fake_glm)
+    monkeypatch.setattr(mvp, "PANICLE_Report", lambda **kwargs: {"files_created": []})
+
+    res = mvp.PANICLE(
+        phe=str(phe_file),
+        geno=str(geno_file),
+        map_data=geno_map,
+        method=["GLM"],
+        file_output=False,
+        verbose=False,
+    )
+
+    assert captured["geno_n"] == 2
+    assert captured["phe"][:, 0].tolist() == ["A", "C"]
+    assert np.all(np.isfinite(captured["phe"][:, 1].astype(float)))
+    assert res["summary"]["trait_sample_sizes"]["Trait"] == 2

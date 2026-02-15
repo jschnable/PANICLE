@@ -310,7 +310,9 @@ def PANICLE_MLM(phe: np.ndarray,
     - e ~ N(0, sigma_e^2 * I) is the residual error
     
     Args:
-        phe: Phenotype matrix (n_individuals × 2), columns [ID, trait_value]
+        phe: Phenotype values as either:
+            - 1D array of trait values (n_individuals,)
+            - 2D array (n_individuals × 2), columns [ID, trait_value]
         geno: Genotype matrix (n_individuals × n_markers)
         K: Kinship matrix (n_individuals × n_individuals)
         eigenK: Pre-computed eigendecomposition of K
@@ -344,9 +346,14 @@ def PANICLE_MLM(phe: np.ndarray,
     
     # Handle input validation and data preparation (same as original)
     if isinstance(phe, np.ndarray):
-        if phe.shape[1] != 2:
-            raise ValueError("Phenotype matrix must have 2 columns [ID, trait_value]")
-        trait_values = phe[:, 1].astype(np.float64)
+        if phe.ndim == 1:
+            trait_values = phe.astype(np.float64)
+        elif phe.ndim == 2:
+            if phe.shape[1] != 2:
+                raise ValueError("Phenotype matrix must have 2 columns [ID, trait_value]")
+            trait_values = phe[:, 1].astype(np.float64)
+        else:
+            raise ValueError("Phenotype must be a 1D trait array or a 2D [ID, trait_value] array")
     else:
         raise ValueError("Phenotype must be numpy array")
     
@@ -368,6 +375,10 @@ def PANICLE_MLM(phe: np.ndarray,
     # Validate dimensions
     if len(trait_values) != n_individuals:
         raise ValueError("Number of phenotype observations must match number of individuals")
+    if not np.all(np.isfinite(trait_values)):
+        raise ValueError(
+            "Phenotype contains missing/non-finite values; filter individuals before PANICLE_MLM"
+        )
     
     # Handle kinship matrix
     if K is None:
@@ -387,6 +398,14 @@ def PANICLE_MLM(phe: np.ndarray,
     if CV is not None:
         if CV.shape[0] != n_individuals:
             raise ValueError("Covariate matrix must have same number of rows as phenotypes")
+        try:
+            CV = CV.astype(np.float64, copy=False)
+        except (TypeError, ValueError):
+            raise ValueError("Covariate matrix must contain numeric values")
+        if not np.all(np.isfinite(CV)):
+            raise ValueError(
+                "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM"
+            )
         X = np.column_stack([np.ones(n_individuals), CV])
         if verbose:
             print(f"Design matrix: {n_individuals} × {X.shape[1]} (including intercept)")

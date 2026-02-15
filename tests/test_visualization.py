@@ -173,3 +173,19 @@ def test_create_multi_panel_manhattan_colors_and_true_qtns() -> None:
 
     assert isinstance(fig, matplotlib.figure.Figure)
     plt.close(fig)
+
+
+def test_association_results_plot_helpers() -> None:
+    pvals = np.array([0.05, 1e-6, 0.2])
+    effects = np.array([0.1, -0.2, 0.3])
+    ses = np.array([0.01, 0.02, 0.03])
+    geno_map = _make_genotype_map(3)
+    results = AssociationResults(effects, ses, pvals, snp_map=geno_map)
+
+    manhattan_fig = results.manhattan_plot()
+    qq_fig = results.qq_plot()
+
+    assert isinstance(manhattan_fig, matplotlib.figure.Figure)
+    assert isinstance(qq_fig, matplotlib.figure.Figure)
+    plt.close(manhattan_fig)
+    plt.close(qq_fig)

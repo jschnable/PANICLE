@@ -59,6 +59,13 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         output_prefix: Prefix for output files
         verbose: Print progress information
         **kwargs: Additional parameters for specific methods
+
+    Notes:
+        - When genotype sample IDs are available (e.g., file loaders), PANICLE
+          automatically matches phenotype IDs to genotype IDs and subsets both
+          datasets to their intersection.
+        - For each trait, individuals with missing/non-finite phenotype values
+          (or covariate values, when provided) are excluded before model fitting.
     
     Returns:
         Dictionary containing:
@@ -88,6 +95,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             'total_markers': 0,
             'total_individuals': 0,
             'significant_markers': {},
+            'trait_sample_sizes': {},
             'runtime': {}
         }
     }
@@ -114,9 +122,27 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         else:
             raise ValueError("Invalid phenotype input type")
         
+        # Normalize covariate input early so row checks and subsetting are consistent.
+        covariates = None
+        if CV is not None:
+            covariates = np.asarray(CV)
+            if covariates.ndim == 1:
+                covariates = covariates.reshape(-1, 1)
+            if covariates.ndim != 2:
+                raise ValueError("Covariate matrix must be 1D or 2D array-like")
+            try:
+                covariates = covariates.astype(np.float64, copy=False)
+            except (TypeError, ValueError):
+                raise ValueError("Covariate matrix must contain numeric values")
+            if covariates.shape[0] != phenotype.n_individuals:
+                raise ValueError(
+                    "Covariate matrix must have the same number of rows as phenotype data"
+                )
+
         # Load genotype data
+        genotype_ids = None
         if isinstance(geno, (str, Path)):
-            genotype, _individual_ids, loaded_map = load_genotype_file(geno)
+            genotype, genotype_ids, loaded_map = load_genotype_file(geno)
             # Use the map embedded in the genotype file when map_data is not
             # explicitly provided (i.e. caller passed the same path or None).
             if isinstance(map_data, (str, Path)) or map_data is None:
@@ -137,6 +163,26 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             genetic_map = map_data
         else:
             raise ValueError("Invalid map input type")
+
+        # Automatically align phenotype/covariates to genotype IDs when available.
+        if genotype_ids is not None:
+            phenotype, genotype, covariates, matching_summary = _align_samples_to_genotype(
+                phenotype=phenotype,
+                genotype=genotype,
+                genotype_ids=genotype_ids,
+                covariates=covariates,
+            )
+            analysis_results['summary']['sample_matching'] = matching_summary
+            if verbose:
+                print("Sample matching complete")
+                print(f"  Matched individuals: {matching_summary['n_common']}")
+                print(f"  Dropped phenotype-only IDs: {matching_summary['n_phenotype_dropped']}")
+                print(f"  Dropped genotype-only IDs: {matching_summary['n_genotype_dropped']}")
+        elif phenotype.n_individuals != genotype.n_individuals:
+            raise ValueError(
+                "Phenotype and genotype have different numbers of individuals, "
+                "and genotype sample IDs are unavailable for automatic alignment."
+            )
         
         # Validate data consistency
         validate_data_consistency(phenotype, genotype, genetic_map, verbose)
@@ -146,7 +192,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             'phenotype': phenotype,
             'genotype': genotype,
             'map': genetic_map,
-            'covariates': CV
+            'covariates': covariates
         }
         
         analysis_results['summary']['total_markers'] = genotype.n_markers
@@ -230,14 +276,39 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
 
         # Track which methods were run (only add once, not per-trait)
         methods_actually_run = set()
+        covariate_finite_mask = (
+            np.isfinite(covariates).all(axis=1) if covariates is not None else None
+        )
 
         # Loop over each trait
         for trait_idx, trait_name in enumerate(phenotype.trait_names):
             if verbose and phenotype.n_traits > 1:
                 print(f"\n--- Analyzing trait: {trait_name} ({trait_idx + 1}/{phenotype.n_traits}) ---")
 
-            # Get single-trait phenotype array (ID + trait value)
-            phenotype_array = phenotype.get_single_trait_array(trait_idx)
+            # Trait-specific filtering: exclude missing/non-finite phenotype and covariates.
+            raw_trait = pd.to_numeric(phenotype.get_trait(trait_idx), errors='coerce').to_numpy(dtype=np.float64)
+            trait_ids = phenotype.ids.astype(str).to_numpy()
+            valid_mask = np.isfinite(raw_trait)
+            if covariate_finite_mask is not None:
+                valid_mask = valid_mask & covariate_finite_mask
+
+            n_valid = int(valid_mask.sum())
+            if n_valid == 0:
+                raise ValueError(
+                    f"Trait '{trait_name}' has no valid observations after excluding missing phenotype/covariate values."
+                )
+
+            if n_valid < len(valid_mask):
+                excluded = len(valid_mask) - n_valid
+                if verbose:
+                    print(
+                        f"  Trait '{trait_name}': excluded {excluded} individual(s) with missing/non-finite phenotype or covariate values."
+                    )
+
+            phenotype_array = np.column_stack([trait_ids[valid_mask], raw_trait[valid_mask]])
+            trait_genotype = genotype if n_valid == genotype.n_individuals else genotype.subset_individuals(np.where(valid_mask)[0])
+            trait_covariates = covariates[valid_mask, :] if covariates is not None else None
+            analysis_results['summary']['trait_sample_sizes'][trait_name] = n_valid
 
             # Initialize results dict for this trait
             analysis_results['results'][trait_name] = {}
@@ -251,8 +322,8 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 glm_start = time.time()
                 glm_results = PANICLE_GLM(
                     phe=phenotype_array,
-                    geno=genotype,
-                    CV=CV,
+                    geno=trait_genotype,
+                    CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
                     verbose=verbose
@@ -282,9 +353,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
                 mlm_results = PANICLE_MLM_LOCO(
                     phe=phenotype_array,
-                    geno=genotype,
+                    geno=trait_genotype,
                     map_data=genetic_map,
-                    CV=CV,
+                    CV=trait_covariates,
                     vc_method=vc_method,
                     maxLine=maxLine,
                     cpu=ncpus,
@@ -313,9 +384,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 farmcpu_start = time.time()
                 farmcpu_results = PANICLE_FarmCPU(
                     phe=phenotype_array,
-                    geno=genotype,
+                    geno=trait_genotype,
                     map_data=genetic_map,
-                    CV=CV,
+                    CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
                     verbose=verbose,
@@ -344,9 +415,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 blink_start = time.time()
                 blink_results = PANICLE_BLINK(
                     phe=phenotype_array,
-                    geno=genotype,
+                    geno=trait_genotype,
                     map_data=genetic_map,
-                    CV=CV,
+                    CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
                     verbose=verbose,
@@ -388,9 +459,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     )
                 resampling_results = PANICLE_FarmCPUResampling(
                     phe=phenotype_array,
-                    geno=genotype,
+                    geno=trait_genotype,
                     map_data=genetic_map,
-                    CV=CV,
+                    CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
                     trait_name=trait_name,
@@ -521,6 +592,54 @@ def validate_data_consistency(phenotype: Phenotype,
     
     if verbose:
         print("Data consistency validation passed")
+
+
+def _align_samples_to_genotype(
+    phenotype: Phenotype,
+    genotype: GenotypeMatrix,
+    genotype_ids: List[Any],
+    covariates: Optional[np.ndarray] = None,
+) -> Tuple[Phenotype, GenotypeMatrix, Optional[np.ndarray], Dict[str, int]]:
+    """Align phenotype (and optional covariates) to genotype sample IDs.
+
+    Keeps phenotype row order, subsets genotype to matching rows, and reports
+    how many IDs were retained/dropped.
+    """
+    phenotype_df = phenotype.data.copy()
+    phenotype_df['ID'] = phenotype_df['ID'].astype(str)
+
+    genotype_ids_str = [str(sample_id) for sample_id in genotype_ids]
+    id_to_genotype_index = {sample_id: idx for idx, sample_id in enumerate(genotype_ids_str)}
+
+    phe_ids = phenotype_df['ID'].to_numpy()
+    keep_mask = np.array([sample_id in id_to_genotype_index for sample_id in phe_ids], dtype=bool)
+
+    n_common = int(keep_mask.sum())
+    if n_common == 0:
+        raise ValueError("No common sample IDs between phenotype and genotype data")
+
+    aligned_phenotype_df = phenotype_df.loc[keep_mask].reset_index(drop=True)
+    aligned_ids = aligned_phenotype_df['ID'].tolist()
+    genotype_indices = np.array([id_to_genotype_index[sample_id] for sample_id in aligned_ids], dtype=int)
+    aligned_genotype = genotype.subset_individuals(genotype_indices)
+
+    aligned_covariates = None
+    if covariates is not None:
+        aligned_covariates = covariates[keep_mask, :]
+
+    unique_phe = set(phe_ids.tolist())
+    unique_geno = set(genotype_ids_str)
+    common_ids = unique_phe & unique_geno
+
+    summary = {
+        'n_phenotype_original': len(unique_phe),
+        'n_genotype_original': len(unique_geno),
+        'n_common': len(common_ids),
+        'n_phenotype_dropped': len(unique_phe - common_ids),
+        'n_genotype_dropped': len(unique_geno - common_ids),
+    }
+
+    return Phenotype(aligned_phenotype_df), aligned_genotype, aligned_covariates, summary
 
 
 def save_results_to_files(results: Dict[str, Any],
