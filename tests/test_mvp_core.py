@@ -62,8 +62,9 @@ def test_panicle_glm_only_runs_and_summarizes(monkeypatch) -> None:
         threshold=0.05,
     )
 
-    assert res["results"]["GLM"] is dummy
-    assert res["summary"]["significant_markers"]["GLM"] == 1
+    # Results are nested by trait name (single trait uses "Trait")
+    assert res["results"]["Trait"]["GLM"] is dummy
+    assert res["summary"]["significant_markers"]["Trait"]["GLM"] == 1
     assert res["summary"]["methods_run"] == ["GLM"]
 
 
@@ -92,8 +93,9 @@ def test_panicle_farmcpu_resampling_threshold_warning(monkeypatch) -> None:
         QTN_threshold=0.2,
     )
 
-    assert res["results"]["FarmCPUResampling"] is dummy_resampling
-    assert res["summary"]["significant_markers"]["FarmCPUResampling"] >= 0
+    # Results are nested by trait name
+    assert res["results"]["Trait"]["FarmCPUResampling"] is dummy_resampling
+    assert res["summary"]["significant_markers"]["Trait"]["FarmCPUResampling"] >= 0
     assert res["summary"]["methods_run"] == ["FarmCPUResampling"]
 
 
@@ -112,15 +114,18 @@ def test_save_results_to_files_writes_outputs(tmp_path) -> None:
     genotype = GenotypeMatrix(geno)
     dummy_result = DummyAssocResult(geno.shape[1], np.array([0.01, 0.02]))
 
+    # Results are now nested by trait name
     results = {
         "data": {"map": geno_map},
-        "results": {"GLM": dummy_result},
+        "results": {"Trait": {"GLM": dummy_result}},
         "summary": {
             "methods_run": ["GLM"],
             "total_individuals": genotype.n_individuals,
             "total_markers": genotype.n_markers,
-            "significant_markers": {"GLM": 1},
-            "runtime": {"GLM": 0.1, "total": 0.2},
+            "n_traits": 1,
+            "trait_names": ["Trait"],
+            "significant_markers": {"Trait": {"GLM": 1}},
+            "runtime": {"GLM_Trait": 0.1, "total": 0.2},
         },
         "files": [],
     }

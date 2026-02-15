@@ -226,184 +226,215 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         if verbose:
             print(f"\n[Phase 3] Running association analysis...")
             print(f"Methods: {', '.join(method)}")
-        
-        phenotype_array = phenotype.to_numpy()
-        
-        # Run GLM
-        if "GLM" in method:
-            if verbose:
-                print("\nRunning GLM analysis...")
-            
-            glm_start = time.time()
-            glm_results = PANICLE_GLM(
-                phe=phenotype_array,
-                geno=genotype,
-                CV=CV,
-                maxLine=maxLine,
-                cpu=ncpus,
-                verbose=verbose
-            )
-            glm_time = time.time() - glm_start
-            
-            analysis_results['results']['GLM'] = glm_results
-            analysis_results['summary']['methods_run'].append('GLM')
-            analysis_results['summary']['runtime']['GLM'] = glm_time
-            
-            # Count significant markers
-            glm_pvals = glm_results.to_numpy()[:, 2]
-            n_sig = np.sum(glm_pvals < threshold)
-            analysis_results['summary']['significant_markers']['GLM'] = n_sig
-            
-            if verbose:
-                print(f"GLM analysis complete ({glm_time:.2f}s)")
-                print(f"  Significant markers (p < {threshold}): {n_sig}")
-        
-        # Run MLM
-        if "MLM" in method:
-            if verbose:
-                print("\nRunning MLM analysis...")
+            print(f"Traits: {', '.join(phenotype.trait_names)}")
 
-            mlm_start = time.time()
-            if K is not None and verbose:
-                warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
-            mlm_results = PANICLE_MLM_LOCO(
-                phe=phenotype_array,
-                geno=genotype,
-                map_data=genetic_map,
-                CV=CV,
-                vc_method=vc_method,
-                maxLine=maxLine,
-                cpu=ncpus,
-                verbose=verbose
-            )
-            mlm_time = time.time() - mlm_start
+        # Track which methods were run (only add once, not per-trait)
+        methods_actually_run = set()
 
-            analysis_results['results']['MLM'] = mlm_results
-            analysis_results['summary']['methods_run'].append('MLM')
-            analysis_results['summary']['runtime']['MLM'] = mlm_time
+        # Loop over each trait
+        for trait_idx, trait_name in enumerate(phenotype.trait_names):
+            if verbose and phenotype.n_traits > 1:
+                print(f"\n--- Analyzing trait: {trait_name} ({trait_idx + 1}/{phenotype.n_traits}) ---")
 
-            # Count significant markers
-            mlm_pvals = mlm_results.to_numpy()[:, 2]
-            n_sig = np.sum(mlm_pvals < threshold)
-            analysis_results['summary']['significant_markers']['MLM'] = n_sig
+            # Get single-trait phenotype array (ID + trait value)
+            phenotype_array = phenotype.get_single_trait_array(trait_idx)
 
-            if verbose:
-                print(f"MLM analysis complete ({mlm_time:.2f}s)")
-                print(f"  Significant markers (p < {threshold}): {n_sig}")
-        
-        # Run FarmCPU
-        if "FarmCPU" in method:
-            if verbose:
-                print("\nRunning FarmCPU analysis...")
+            # Initialize results dict for this trait
+            analysis_results['results'][trait_name] = {}
+            analysis_results['summary']['significant_markers'][trait_name] = {}
 
-            farmcpu_start = time.time()
-            farmcpu_results = PANICLE_FarmCPU(
-                phe=phenotype_array,
-                geno=genotype,
-                map_data=genetic_map,
-                CV=CV,
-                maxLine=maxLine,
-                cpu=ncpus,
-                verbose=verbose,
-                **farmcpu_extra_kwargs
-            )
-            farmcpu_time = time.time() - farmcpu_start
-            
-            analysis_results['results']['FarmCPU'] = farmcpu_results
-            analysis_results['summary']['methods_run'].append('FarmCPU')
-            analysis_results['summary']['runtime']['FarmCPU'] = farmcpu_time
-            
-            # Count significant markers
-            farmcpu_pvals = farmcpu_results.to_numpy()[:, 2]
-            n_sig = np.sum(farmcpu_pvals < threshold)
-            analysis_results['summary']['significant_markers']['FarmCPU'] = n_sig
-            
-            if verbose:
-                print(f"FarmCPU analysis complete ({farmcpu_time:.2f}s)")
-                print(f"  Significant markers (p < {threshold}): {n_sig}")
+            # Run GLM
+            if "GLM" in method:
+                if verbose:
+                    print(f"\nRunning GLM analysis on {trait_name}...")
 
-        # Run BLINK
-        if "BLINK" in method:
-            if verbose:
-                print("\nRunning BLINK analysis...")
-
-            blink_start = time.time()
-            blink_results = PANICLE_BLINK(
-                phe=phenotype_array,
-                geno=genotype,
-                map_data=genetic_map,
-                CV=CV,
-                maxLine=maxLine,
-                cpu=ncpus,
-                verbose=verbose,
-                **blink_kwargs,
-            )
-            blink_time = time.time() - blink_start
-
-            analysis_results['results']['BLINK'] = blink_results
-            analysis_results['summary']['methods_run'].append('BLINK')
-            analysis_results['summary']['runtime']['BLINK'] = blink_time
-
-            blink_pvals = blink_results.to_numpy()[:, 2]
-            n_sig = np.sum(blink_pvals < threshold)
-            analysis_results['summary']['significant_markers']['BLINK'] = int(n_sig)
-
-            if verbose:
-                print(f"BLINK analysis complete ({blink_time:.2f}s)")
-                print(f"  Significant markers (p < {threshold}): {n_sig}")
-
-        # Run FarmCPU Resampling
-        if "FarmCPUResampling" in method:
-            if verbose:
-                print("\nRunning FarmCPU resampling analysis...")
-
-            resampling_start = time.time()
-            resampling_significance = resampling_params.get('significance_threshold')
-            if resampling_significance is None:
-                resampling_significance = threshold
-                resampling_params['significance_threshold'] = resampling_significance
-            resampling_p_threshold = farmcpu_extra_kwargs.get('p_threshold', 0.05)
-            resampling_qtn_threshold = max(resampling_p_threshold, farmcpu_extra_kwargs.get('QTN_threshold', 0.01))
-            if resampling_significance > resampling_qtn_threshold and resampling_override_used:
-                warnings.warn(
-                    "FarmCPU resampling significance threshold "
-                    f"({resampling_significance:.3g}) is less stringent than the "
-                    f"QTN threshold ({resampling_qtn_threshold:.3g}); markers with "
-                    "p-values above the QTN threshold cannot act as pseudo QTNs in "
-                    "later FarmCPU iterations."
+                glm_start = time.time()
+                glm_results = PANICLE_GLM(
+                    phe=phenotype_array,
+                    geno=genotype,
+                    CV=CV,
+                    maxLine=maxLine,
+                    cpu=ncpus,
+                    verbose=verbose
                 )
-            resampling_results = PANICLE_FarmCPUResampling(
-                phe=phenotype_array,
-                geno=genotype,
-                map_data=genetic_map,
-                CV=CV,
-                maxLine=maxLine,
-                cpu=ncpus,
-                trait_name=phenotype.data.columns[1] if hasattr(phenotype, 'data') else 'Trait',
-                verbose=verbose,
-                **resampling_params,
-                **farmcpu_extra_kwargs,
-            )
-            resampling_time = time.time() - resampling_start
+                glm_time = time.time() - glm_start
 
-            analysis_results['results']['FarmCPUResampling'] = resampling_results
-            analysis_results['summary']['methods_run'].append('FarmCPUResampling')
-            analysis_results['summary']['runtime']['FarmCPUResampling'] = resampling_time
+                analysis_results['results'][trait_name]['GLM'] = glm_results
+                methods_actually_run.add('GLM')
+                analysis_results['summary']['runtime'][f'GLM_{trait_name}'] = glm_time
 
-            n_identified = len(resampling_results.entries)
-            analysis_results['summary']['significant_markers']['FarmCPUResampling'] = n_identified
+                # Count significant markers
+                glm_pvals = glm_results.to_numpy()[:, 2]
+                n_sig = np.sum(glm_pvals < threshold)
+                analysis_results['summary']['significant_markers'][trait_name]['GLM'] = n_sig
 
-            if verbose:
-                print(f"FarmCPU resampling complete ({resampling_time:.2f}s)")
-                print(f"  Markers/clusters with RMIP > 0: {n_identified}")
+                if verbose:
+                    print(f"GLM analysis complete ({glm_time:.2f}s)")
+                    print(f"  Significant markers (p < {threshold}): {n_sig}")
+
+            # Run MLM
+            if "MLM" in method:
+                if verbose:
+                    print(f"\nRunning MLM analysis on {trait_name}...")
+
+                mlm_start = time.time()
+                if K is not None and verbose and trait_idx == 0:
+                    warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
+                mlm_results = PANICLE_MLM_LOCO(
+                    phe=phenotype_array,
+                    geno=genotype,
+                    map_data=genetic_map,
+                    CV=CV,
+                    vc_method=vc_method,
+                    maxLine=maxLine,
+                    cpu=ncpus,
+                    verbose=verbose
+                )
+                mlm_time = time.time() - mlm_start
+
+                analysis_results['results'][trait_name]['MLM'] = mlm_results
+                methods_actually_run.add('MLM')
+                analysis_results['summary']['runtime'][f'MLM_{trait_name}'] = mlm_time
+
+                # Count significant markers
+                mlm_pvals = mlm_results.to_numpy()[:, 2]
+                n_sig = np.sum(mlm_pvals < threshold)
+                analysis_results['summary']['significant_markers'][trait_name]['MLM'] = n_sig
+
+                if verbose:
+                    print(f"MLM analysis complete ({mlm_time:.2f}s)")
+                    print(f"  Significant markers (p < {threshold}): {n_sig}")
+
+            # Run FarmCPU
+            if "FarmCPU" in method:
+                if verbose:
+                    print(f"\nRunning FarmCPU analysis on {trait_name}...")
+
+                farmcpu_start = time.time()
+                farmcpu_results = PANICLE_FarmCPU(
+                    phe=phenotype_array,
+                    geno=genotype,
+                    map_data=genetic_map,
+                    CV=CV,
+                    maxLine=maxLine,
+                    cpu=ncpus,
+                    verbose=verbose,
+                    **farmcpu_extra_kwargs
+                )
+                farmcpu_time = time.time() - farmcpu_start
+
+                analysis_results['results'][trait_name]['FarmCPU'] = farmcpu_results
+                methods_actually_run.add('FarmCPU')
+                analysis_results['summary']['runtime'][f'FarmCPU_{trait_name}'] = farmcpu_time
+
+                # Count significant markers
+                farmcpu_pvals = farmcpu_results.to_numpy()[:, 2]
+                n_sig = np.sum(farmcpu_pvals < threshold)
+                analysis_results['summary']['significant_markers'][trait_name]['FarmCPU'] = n_sig
+
+                if verbose:
+                    print(f"FarmCPU analysis complete ({farmcpu_time:.2f}s)")
+                    print(f"  Significant markers (p < {threshold}): {n_sig}")
+
+            # Run BLINK
+            if "BLINK" in method:
+                if verbose:
+                    print(f"\nRunning BLINK analysis on {trait_name}...")
+
+                blink_start = time.time()
+                blink_results = PANICLE_BLINK(
+                    phe=phenotype_array,
+                    geno=genotype,
+                    map_data=genetic_map,
+                    CV=CV,
+                    maxLine=maxLine,
+                    cpu=ncpus,
+                    verbose=verbose,
+                    **blink_kwargs,
+                )
+                blink_time = time.time() - blink_start
+
+                analysis_results['results'][trait_name]['BLINK'] = blink_results
+                methods_actually_run.add('BLINK')
+                analysis_results['summary']['runtime'][f'BLINK_{trait_name}'] = blink_time
+
+                blink_pvals = blink_results.to_numpy()[:, 2]
+                n_sig = np.sum(blink_pvals < threshold)
+                analysis_results['summary']['significant_markers'][trait_name]['BLINK'] = int(n_sig)
+
+                if verbose:
+                    print(f"BLINK analysis complete ({blink_time:.2f}s)")
+                    print(f"  Significant markers (p < {threshold}): {n_sig}")
+
+            # Run FarmCPU Resampling
+            if "FarmCPUResampling" in method:
+                if verbose:
+                    print(f"\nRunning FarmCPU resampling analysis on {trait_name}...")
+
+                resampling_start = time.time()
+                resampling_significance = resampling_params.get('significance_threshold')
+                if resampling_significance is None:
+                    resampling_significance = threshold
+                    resampling_params['significance_threshold'] = resampling_significance
+                resampling_p_threshold = farmcpu_extra_kwargs.get('p_threshold', 0.05)
+                resampling_qtn_threshold = max(resampling_p_threshold, farmcpu_extra_kwargs.get('QTN_threshold', 0.01))
+                if resampling_significance > resampling_qtn_threshold and resampling_override_used:
+                    warnings.warn(
+                        "FarmCPU resampling significance threshold "
+                        f"({resampling_significance:.3g}) is less stringent than the "
+                        f"QTN threshold ({resampling_qtn_threshold:.3g}); markers with "
+                        "p-values above the QTN threshold cannot act as pseudo QTNs in "
+                        "later FarmCPU iterations."
+                    )
+                resampling_results = PANICLE_FarmCPUResampling(
+                    phe=phenotype_array,
+                    geno=genotype,
+                    map_data=genetic_map,
+                    CV=CV,
+                    maxLine=maxLine,
+                    cpu=ncpus,
+                    trait_name=trait_name,
+                    verbose=verbose,
+                    **resampling_params,
+                    **farmcpu_extra_kwargs,
+                )
+                resampling_time = time.time() - resampling_start
+
+                analysis_results['results'][trait_name]['FarmCPUResampling'] = resampling_results
+                methods_actually_run.add('FarmCPUResampling')
+                analysis_results['summary']['runtime'][f'FarmCPUResampling_{trait_name}'] = resampling_time
+
+                n_identified = len(resampling_results.entries)
+                analysis_results['summary']['significant_markers'][trait_name]['FarmCPUResampling'] = n_identified
+
+                if verbose:
+                    print(f"FarmCPU resampling complete ({resampling_time:.2f}s)")
+                    print(f"  Markers/clusters with RMIP > 0: {n_identified}")
+
+        # Record which methods were run
+        analysis_results['summary']['methods_run'] = list(methods_actually_run)
+        analysis_results['summary']['n_traits'] = phenotype.n_traits
+        analysis_results['summary']['trait_names'] = phenotype.trait_names
         
         # Phase 4: Visualization and Reporting
         if verbose:
             print(f"\n[Phase 4] Generating visualization report...")
-        
+
         viz_start = time.time()
+
+        # Flatten results for visualization: {trait_method: result_obj}
+        flat_results = {}
+        for trait_name, trait_results in analysis_results['results'].items():
+            for method_name, result_obj in trait_results.items():
+                # Use trait name in key only if multiple traits
+                if phenotype.n_traits == 1:
+                    key = method_name
+                else:
+                    key = f"{trait_name}_{method_name}"
+                flat_results[key] = result_obj
+
         visualization_report = PANICLE_Report(
-            results=analysis_results['results'],
+            results=flat_results,
             map_data=genetic_map,
             threshold=threshold,
             output_prefix=output_prefix,
@@ -492,13 +523,13 @@ def validate_data_consistency(phenotype: Phenotype,
         print("Data consistency validation passed")
 
 
-def save_results_to_files(results: Dict[str, Any], 
+def save_results_to_files(results: Dict[str, Any],
                          output_prefix: str,
                          verbose: bool = True) -> List[str]:
     """Save analysis results to files"""
-    
+
     saved_files = []
-    
+
     try:
         # Save summary statistics
         summary_file = f"{output_prefix}_summary.txt"
@@ -508,30 +539,36 @@ def save_results_to_files(results: Dict[str, Any],
             f.write(f"Methods run: {', '.join(results['summary']['methods_run'])}\n")
             f.write(f"Total individuals: {results['summary']['total_individuals']}\n")
             f.write(f"Total markers: {results['summary']['total_markers']}\n")
-            f.write("\nSignificant markers by method:\n")
-            for method, count in results['summary']['significant_markers'].items():
-                f.write(f"  {method}: {count}\n")
+            n_traits = results['summary'].get('n_traits', 1)
+            trait_names = results['summary'].get('trait_names', ['Trait'])
+            f.write(f"Traits analyzed: {n_traits} ({', '.join(trait_names)})\n")
+            f.write("\nSignificant markers by trait and method:\n")
+            for trait_name, methods in results['summary']['significant_markers'].items():
+                f.write(f"  {trait_name}:\n")
+                for method, count in methods.items():
+                    f.write(f"    {method}: {count}\n")
             f.write("\nRuntimes (seconds):\n")
             for phase, time_val in results['summary']['runtime'].items():
                 f.write(f"  {phase}: {time_val:.2f}s\n")
-        
+
         saved_files.append(summary_file)
-        
-        # Save association results as CSV files
-        for method_name, result_obj in results['results'].items():
-            result_file = f"{output_prefix}_{method_name}_results.csv"
-            result_df = result_obj.to_dataframe()
 
-            # Add map information if available
-            if 'map' in results['data']:
-                map_obj = results['data']['map']
-                if hasattr(map_obj, 'to_dataframe'):
-                    map_df = map_obj.to_dataframe()
-                elif hasattr(map_obj, 'data'):
-                    map_df = map_obj.data
-                else:
-                    map_df = None
+        # Get map data once for reuse
+        map_df = None
+        if 'map' in results['data']:
+            map_obj = results['data']['map']
+            if hasattr(map_obj, 'to_dataframe'):
+                map_df = map_obj.to_dataframe()
+            elif hasattr(map_obj, 'data'):
+                map_df = map_obj.data
 
+        # Save association results as CSV files (nested by trait)
+        for trait_name, trait_results in results['results'].items():
+            for method_name, result_obj in trait_results.items():
+                result_file = f"{output_prefix}_{trait_name}_{method_name}_results.csv"
+                result_df = result_obj.to_dataframe()
+
+                # Add map information if available
                 if map_df is not None:
                     if 'SNP' not in result_df.columns:
                         result_df['SNP'] = map_df['SNP'].values[:len(result_df)]
@@ -540,13 +577,13 @@ def save_results_to_files(results: Dict[str, Any],
                     if 'Pos' not in result_df.columns and 'POS' in map_df.columns:
                         result_df['Pos'] = map_df['POS'].values[:len(result_df)]
 
-            result_df.to_csv(result_file, index=False)
-            saved_files.append(result_file)
-        
+                result_df.to_csv(result_file, index=False)
+                saved_files.append(result_file)
+
         if verbose:
             print(f"Saved {len(saved_files)} result files")
-        
+
     except Exception as e:
         warnings.warn(f"Failed to save some results files: {e}")
-    
+
     return saved_files

@@ -4,17 +4,21 @@ Core data structures for PANICLE package
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Union, Tuple, Dict, Any
+from typing import Optional, Union, Tuple, Dict, Any, List
 from pathlib import Path
 
 class Phenotype:
     """Phenotype data structure compatible with R rMVP format
-    
-    Expected format: n × 2 matrix where:
-    - Column 1: Individual IDs 
-    - Column 2: Trait values
+
+    Supports single or multiple traits:
+    - Column 1: Individual IDs
+    - Columns 2+: Trait values (one or more traits)
+
+    Examples:
+        Single trait: [ID, Trait1]
+        Multiple traits: [ID, Trait1, Trait2, Trait3, Trait4]
     """
-    
+
     def __init__(self, data: Union[np.ndarray, pd.DataFrame, str, Path]):
         if isinstance(data, (str, Path)):
             # Load from file - try with header first
@@ -29,31 +33,76 @@ class Phenotype:
             self.data = pd.DataFrame(data)
         else:
             raise ValueError("Data must be array, DataFrame, or file path")
-            
-        # Validate structure
-        if self.data.shape[1] != 2:
-            raise ValueError(f"Phenotype must have 2 columns, got {self.data.shape[1]}")
-            
-        # Set standard column names
-        self.data.columns = ['ID', 'Trait']
-        
+
+        # Validate structure - need at least ID + 1 trait
+        if self.data.shape[1] < 2:
+            raise ValueError(f"Phenotype must have at least 2 columns (ID + trait), got {self.data.shape[1]}")
+
+        # Normalize column names
+        n_traits = self.data.shape[1] - 1
+        if n_traits == 1:
+            self.data.columns = ['ID', 'Trait']
+        else:
+            # Multiple traits: ID, Trait1, Trait2, ...
+            self.data.columns = ['ID'] + [f'Trait{i+1}' for i in range(n_traits)]
+
     @property
     def ids(self) -> pd.Series:
         """Individual IDs"""
         return self.data['ID']
-    
-    @property 
-    def values(self) -> pd.Series:
-        """Trait values"""
-        return self.data['Trait']
-    
+
+    @property
+    def trait_names(self) -> List[str]:
+        """Names of all trait columns"""
+        return list(self.data.columns[1:])
+
+    @property
+    def values(self) -> pd.DataFrame:
+        """All trait values as DataFrame"""
+        return self.data.iloc[:, 1:]
+
     @property
     def n_individuals(self) -> int:
         """Number of individuals"""
         return len(self.data)
-    
+
+    @property
+    def n_traits(self) -> int:
+        """Number of traits"""
+        return self.data.shape[1] - 1
+
+    def get_trait(self, trait: Union[int, str]) -> pd.Series:
+        """Get values for a specific trait by index or name.
+
+        Args:
+            trait: Trait index (0-based) or trait column name
+
+        Returns:
+            Series of trait values
+        """
+        if isinstance(trait, int):
+            if trait < 0 or trait >= self.n_traits:
+                raise IndexError(f"Trait index {trait} out of range (0-{self.n_traits-1})")
+            return self.data.iloc[:, trait + 1]
+        else:
+            if trait not in self.data.columns:
+                raise KeyError(f"Trait '{trait}' not found. Available: {self.trait_names}")
+            return self.data[trait]
+
+    def get_single_trait_array(self, trait: Union[int, str] = 0) -> np.ndarray:
+        """Get ID + single trait as numpy array for GWAS methods.
+
+        Args:
+            trait: Trait index (0-based) or trait column name
+
+        Returns:
+            Array of shape (n_individuals, 2) with [ID, trait_value]
+        """
+        trait_values = self.get_trait(trait)
+        return np.column_stack([self.ids.values, trait_values.values])
+
     def to_numpy(self) -> np.ndarray:
-        """Convert to numpy array"""
+        """Convert to numpy array (all columns including ID)"""
         return self.data.values
 
 
