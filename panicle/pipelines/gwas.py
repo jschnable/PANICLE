@@ -6,7 +6,8 @@ It encapsulates data loading, sample alignment, population structure correction,
 association testing, and result reporting into a reusable pipeline class.
 """
 
-import concurrent.futures
+import os
+import json
 import time
 import warnings
 import numpy as np
@@ -31,10 +32,13 @@ from ..association.farmcpu_resampling import (
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
 from ..association.mlm_loco import PANICLE_MLM_LOCO
+from ..association.bayes_loco import PANICLE_BayesLOCO
+from ..association.bayes_loco.config import BayesLocoConfig
 from ..association.farmcpu import PANICLE_FarmCPU
 from ..association.blink import PANICLE_BLINK
 from ..matrix.pca import PANICLE_PCA
 from ..matrix.kinship import PANICLE_K_VanRaden
+from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from ..visualization.manhattan import PANICLE_Report
 
 # Internal helper for resampling progress logging.
@@ -57,27 +61,80 @@ class _FarmCPUResamplingProgressReporter:
         if run_idx >= total_runs:
             self._log(f"[{self._trait_name}] finished resampling in {self._total_elapsed:.0f}s")
 
-# Helper function for parallel execution
-def _run_single_method(method, y_sub, g_sub, cov_sub, k_sub, map_data, fc_params, blk_params, max_iterations, base_threshold, n_markers, n_eff=None, alpha=0.05):
-    """Worker function to run a single GWAS method in a separate process."""
+
+def _resolve_method_cpu(ncpus: int, parallel_mode: str) -> int:
+    """Resolve effective CPU count for per-method internal parallelism."""
+    mode = str(parallel_mode).strip().lower()
+    if mode not in {"auto", "off", "on"}:
+        raise ValueError("parallel_mode must be one of: 'auto', 'off', 'on'")
+    try:
+        requested = int(ncpus)
+    except (TypeError, ValueError):
+        raise ValueError("ncpus must be an integer")
+    if requested < 0:
+        raise ValueError("ncpus must be >= 0")
+    if mode == "off":
+        return 1
+    if requested == 0:
+        return max(1, os.cpu_count() or 1)
+    return max(1, requested)
+
+
+# Helper function for method dispatch
+def _run_single_method(
+    method,
+    y_sub,
+    g_sub,
+    cov_sub,
+    k_sub,
+    map_data,
+    fc_params,
+    blk_params,
+    bl_params,
+    max_iterations,
+    base_threshold,
+    n_markers,
+    n_eff=None,
+    alpha=0.05,
+    mlm_loco_kinship=None,
+    mlm_kwargs=None,
+    ncpus: int = 1,
+):
+    """Run a single GWAS method and return (name, result, lambda_gc, error)."""
     try:
         if method == 'GLM':
-            res = PANICLE_GLM(phe=y_sub, geno=g_sub, CV=cov_sub, verbose=False)
+            res = PANICLE_GLM(
+                phe=y_sub,
+                geno=g_sub,
+                CV=cov_sub,
+                cpu=ncpus,
+                verbose=False,
+            )
             lambda_gc = genomic_inflation_factor(res.pvalues)
             return ('GLM', res, lambda_gc, None)
 
         elif method == 'MLM':
+            mlm_kwargs = mlm_kwargs or {}
             if map_data is None:
                 if k_sub is None:
                     return ('MLM', None, None, "Kinship matrix missing")
-                res = PANICLE_MLM(phe=y_sub, geno=g_sub, CV=cov_sub, K=k_sub, verbose=False)
+                res = PANICLE_MLM(
+                    phe=y_sub,
+                    geno=g_sub,
+                    CV=cov_sub,
+                    K=k_sub,
+                    cpu=ncpus,
+                    verbose=False,
+                )
             else:
                 res = PANICLE_MLM_LOCO(
                     phe=y_sub,
                     geno=g_sub,
                     map_data=map_data,
+                    loco_kinship=mlm_loco_kinship,
                     CV=cov_sub,
                     verbose=False,
+                    **mlm_kwargs,
                 )
             lambda_gc = genomic_inflation_factor(res.pvalues)
             return ('MLM', res, lambda_gc, None)
@@ -98,6 +155,7 @@ def _run_single_method(method, y_sub, g_sub, cov_sub, k_sub, map_data, fc_params
                 converge=fc_converge,
                 bin_size=fc_bin,
                 method_bin=fc_method_bin,
+                cpu=ncpus,
                 verbose=False
             )
             lambda_gc = genomic_inflation_factor(res.pvalues)
@@ -106,10 +164,23 @@ def _run_single_method(method, y_sub, g_sub, cov_sub, k_sub, map_data, fc_params
         elif method == 'BLINK':
             res = PANICLE_BLINK(
                 phe=y_sub, geno=g_sub, map_data=map_data, CV=cov_sub,
-                maxLoop=max_iterations, verbose=False
+                maxLoop=max_iterations, cpu=ncpus, verbose=False
             )
             lambda_gc = genomic_inflation_factor(res.pvalues)
             return ('BLINK', res, lambda_gc, None)
+
+        elif method == 'BAYESLOCO':
+            res = PANICLE_BayesLOCO(
+                phe=y_sub,
+                geno=g_sub,
+                map_data=map_data,
+                CV=cov_sub,
+                cpu=ncpus,
+                verbose=False,
+                bl_config=bl_params,
+            )
+            lambda_gc = genomic_inflation_factor(res.pvalues)
+            return ('BAYESLOCO', res, lambda_gc, None)
             
         elif method == 'FarmCPUResampling':
             # Resampling is usually heavy and might output files directly or need special handling
@@ -240,6 +311,10 @@ class GWASPipeline:
         self._trait_cache_genotype: Optional[GenotypeMatrix] = None
         self._trait_cache_pcs: Optional[np.ndarray] = None
         self._trait_cache_kinship: Optional[np.ndarray] = None
+
+        # Cache LOCO kinship objects keyed by trait-specific sample subsets.
+        self._loco_kinship_cache: Dict[Tuple[int, int], Any] = {}
+        self._loco_kinship_cache_max_entries: int = 4
         
         # Analysis State
         self.results: Dict[str, Dict[str, Any]] = {}  # {trait: {method: result}}
@@ -251,6 +326,43 @@ class GWASPipeline:
         self._trait_cache_genotype = None
         self._trait_cache_pcs = None
         self._trait_cache_kinship = None
+        self._loco_kinship_cache.clear()
+
+    @staticmethod
+    def _sample_subset_cache_key(indices: np.ndarray) -> Tuple[int, int]:
+        arr = np.ascontiguousarray(indices, dtype=np.int64)
+        return int(arr.size), hash(arr.tobytes())
+
+    def _get_or_create_loco_kinship(
+        self,
+        genotype_subset: GenotypeMatrix,
+        subset_indices: np.ndarray,
+        *,
+        maxLine: int = 5000,
+    ):
+        """Return cached LOCO kinship for a trait sample subset, computing on miss."""
+        if self.geno_map is None:
+            return None
+
+        key = self._sample_subset_cache_key(subset_indices)
+        cached = self._loco_kinship_cache.get(key)
+        if cached is not None:
+            return cached
+
+        loco_kinship = PANICLE_K_VanRaden_LOCO(
+            genotype_subset,
+            self.geno_map,
+            maxLine=maxLine,
+            verbose=False,
+        )
+        self._loco_kinship_cache[key] = loco_kinship
+
+        # Keep cache bounded to avoid unbounded memory growth for many traits.
+        while len(self._loco_kinship_cache) > self._loco_kinship_cache_max_entries:
+            first_key = next(iter(self._loco_kinship_cache.keys()))
+            del self._loco_kinship_cache[first_key]
+
+        return loco_kinship
         
     def log(self, message: str):
         """Internal logger (can be replaced with standard logging later)"""
@@ -603,6 +715,8 @@ class GWASPipeline:
                      traits: Optional[List[str]] = None,
                      methods: List[str] = ['GLM', 'MLM', 'FARMCPU', 'BLINK'],
                      max_iterations: int = 10,
+                     ncpus: int = 1,
+                     parallel_mode: str = "auto",
                      significance: Optional[float] = None,
                      alpha: float = 0.05,
                      n_eff: Optional[int] = None,
@@ -610,6 +724,7 @@ class GWASPipeline:
                      max_genotype_dosage: float = 2.0,
                      farmcpu_params: Optional[Dict] = None,
                      blink_params: Optional[Dict] = None,
+                     bayesloco_params: Optional[Dict] = None,
                      outputs: List[str] = list(OUTPUT_CHOICES)):
         """
         Run GWAS analysis for specified traits and methods.
@@ -618,6 +733,8 @@ class GWASPipeline:
             raise ValueError("Data not loaded.")
 
         self.log_step("Step 4: Running GWAS analysis")
+        method_cpus = _resolve_method_cpu(ncpus=ncpus, parallel_mode=parallel_mode)
+        self.log(f"   Method CPU setting: {method_cpus} (ncpus={ncpus}, parallel_mode={parallel_mode})")
 
         # 1. Trait Selection — with case-insensitive / whitespace-stripped fallback
         available_traits = [c for c in self.phenotype_df.columns if c != 'ID' and pd.api.types.is_numeric_dtype(self.phenotype_df[c])]
@@ -660,6 +777,19 @@ class GWASPipeline:
                 )
 
         methods_upper_check = [m.upper() for m in methods]
+        if 'BAYESLOCO' in methods_upper_check:
+            if self.geno_map is None:
+                raise ValueError("BAYESLOCO requires map_data with chromosome labels")
+            try:
+                bl_cfg = BayesLocoConfig.from_object(bayesloco_params)
+                bl_cfg.validate()
+            except Exception as exc:
+                raise ValueError(f"Invalid BAYESLOCO configuration: {exc}") from exc
+            if bl_cfg.calibrate_stat_scale == "unrelated_subset" and bl_cfg.unrelated_subset_indices is None:
+                raise ValueError(
+                    "BAYESLOCO unrelated_subset calibration requires unrelated_subset_indices in bayesloco_params"
+                )
+
         need_kinship = 'MLM' in methods_upper_check
         structure_n_pcs = self._structure_n_pcs
 
@@ -703,16 +833,18 @@ class GWASPipeline:
             if not trait_data:
                 continue
 
-            y_sub, g_sub, cov_sub, k_sub = trait_data
+            y_sub, g_sub, cov_sub, k_sub, trait_geno_idx = trait_data
             n_samples_trait = y_sub.shape[0]
 
-            # Run Methods (Parallel Execution)
+            # Run methods in deterministic order. Method engines may still use
+            # internal threading based on `cpu`.
             method_results = {}
             method_lambda_gc = {}  # Track lambda GC for each method
             
             # Setup params for FarmCPU/BLINK
             fc_params = farmcpu_params or {}
             blk_params = blink_params or {}
+            bl_params = bayesloco_params or {}
             method_thresholds: Dict[str, float] = {}
             method_threshold_sources: Dict[str, str] = {}
 
@@ -732,18 +864,23 @@ class GWASPipeline:
                 fc_qtn_corrected = fc_qtn_alpha / fc_n_tests
                 fc_qtn_source = 'FarmCPU QTN threshold'
 
-            # Identify parallelizable methods (case-insensitive matching)
-            # Note: method names passed to worker must match worker's expected case
+            # Resolve methods once and run them in-process. Each method handles
+            # its own internal threading using `cpu`.
             methods_upper = [m.upper() for m in methods]
-            parallel_methods = []
-            if 'GLM' in methods_upper: parallel_methods.append('GLM')
-            if 'MLM' in methods_upper: parallel_methods.append('MLM')
-            if 'FARMCPU' in methods_upper: parallel_methods.append('FARMCPU')
-            if 'BLINK' in methods_upper: parallel_methods.append('BLINK')
+            ordered_methods: List[str] = []
+            if 'GLM' in methods_upper:
+                ordered_methods.append('GLM')
+            if 'MLM' in methods_upper:
+                ordered_methods.append('MLM')
+            if 'FARMCPU' in methods_upper:
+                ordered_methods.append('FARMCPU')
+            if 'BLINK' in methods_upper:
+                ordered_methods.append('BLINK')
+            if 'BAYESLOCO' in methods_upper:
+                ordered_methods.append('BAYESLOCO')
 
-            # Track method-specific thresholds for plotting/reporting
-            # Note: Keys must match the result names returned from parallel workers
-            # (e.g., 'FarmCPU' not 'FARMCPU', 'BLINK' not 'blink')
+            # Track method-specific thresholds for plotting/reporting.
+            # Keys match method result names (e.g., 'FarmCPU', 'BLINK').
             if 'FARMCPU' in methods_upper:
                 # FarmCPU applies multiple testing correction internally
                 # Use the same denominator for reporting consistency
@@ -758,6 +895,9 @@ class GWASPipeline:
             if 'MLM' in methods_upper:
                 method_thresholds['MLM'] = base_threshold
                 method_threshold_sources['MLM'] = threshold_source
+            if 'BAYESLOCO' in methods_upper:
+                method_thresholds['BAYESLOCO'] = base_threshold
+                method_threshold_sources['BAYESLOCO'] = threshold_source
             if 'FARMCPURESAMPLING' in methods_upper:
                 if 'resampling_significance_threshold' in fc_params:
                     resampling_thresh = fc_params['resampling_significance_threshold']
@@ -771,65 +911,52 @@ class GWASPipeline:
             # Resampling usually handled separately or sequentially due to complexity
             run_resampling = 'FARMCPURESAMPLING' in methods_upper
 
-            # Only run parallel executor if there are parallel methods to run
-            if parallel_methods:
-                if len(parallel_methods) > 1:
-                    self.log(f"   Running parallel analysis for: {parallel_methods}")
-                else:
-                    self.log(f"   Running analysis for: {parallel_methods}")
+            mlm_loco_kinship = None
+            mlm_kwargs = {"cpu": method_cpus}
+            if 'MLM' in ordered_methods and self.geno_map is not None:
+                # Keep MLM in-process so LOCO kinship/eigens can be cached across traits.
+                self.log("   Running MLM in main process (reusing LOCO cache)")
+                mlm_loco_kinship = self._get_or_create_loco_kinship(
+                    g_sub,
+                    trait_geno_idx,
+                    maxLine=5000,
+                )
 
-                if len(parallel_methods) == 1:
-                    method = parallel_methods[0]
+            if ordered_methods:
+                self.log(f"   Running analysis for: {ordered_methods}")
+                for method in ordered_methods:
+                    loco_arg = mlm_loco_kinship if method == 'MLM' else None
+                    mlm_kw_arg = mlm_kwargs if method == 'MLM' else None
                     res_name, res_obj, lambda_gc, error = _run_single_method(
                         method,
-                        y_sub, g_sub, cov_sub, k_sub,
+                        y_sub,
+                        g_sub,
+                        cov_sub,
+                        k_sub,
                         self.geno_map,
-                        fc_params, blk_params,
-                        max_iterations, base_threshold, n_markers,
-                        effective_n, alpha,
+                        fc_params,
+                        blk_params,
+                        bl_params,
+                        max_iterations,
+                        base_threshold,
+                        n_markers,
+                        effective_n,
+                        alpha,
+                        loco_arg,
+                        mlm_kw_arg,
+                        ncpus=method_cpus,
                     )
                     if error:
                         self.log(f"   {method} Failed: {error}")
-                    else:
-                        method_results[res_name] = res_obj
-                        if lambda_gc is not None:
-                            method_lambda_gc[res_name] = lambda_gc
-                            self.log(f"   {res_name} Lambda (GC): {lambda_gc:.3f}")
-                            if lambda_gc > 1.3:
-                                self.log(f"   WARNING: Genomic inflation factor ({lambda_gc:.3f}) > 1.3 for {res_name}.")
-                                self.log(f"            This suggests population stratification or other confounding.")
-                                self.log(f"            Consider using MLM or adding more PCs to control inflation.")
-                else:
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, len(parallel_methods))) as executor:
-                        future_to_method = {
-                            executor.submit(
-                                _run_single_method,
-                                method,
-                                y_sub, g_sub, cov_sub, k_sub,
-                                self.geno_map,
-                                fc_params, blk_params,
-                                max_iterations, base_threshold, n_markers,
-                                effective_n, alpha  # Pass n_eff and alpha for FarmCPU
-                            ): method for method in parallel_methods
-                        }
-
-                        for future in concurrent.futures.as_completed(future_to_method):
-                            m_name = future_to_method[future]
-                            try:
-                                res_name, res_obj, lambda_gc, error = future.result()
-                                if error:
-                                    self.log(f"   {m_name} Failed: {error}")
-                                else:
-                                    method_results[res_name] = res_obj
-                                    if lambda_gc is not None:
-                                        method_lambda_gc[res_name] = lambda_gc
-                                        self.log(f"   {res_name} Lambda (GC): {lambda_gc:.3f}")
-                                        if lambda_gc > 1.3:
-                                            self.log(f"   WARNING: Genomic inflation factor ({lambda_gc:.3f}) > 1.3 for {res_name}.")
-                                            self.log(f"            This suggests population stratification or other confounding.")
-                                            self.log(f"            Consider using MLM or adding more PCs to control inflation.")
-                            except Exception as exc:
-                                self.log(f"   {m_name} generated an exception: {exc}")
+                        continue
+                    method_results[res_name] = res_obj
+                    if lambda_gc is not None:
+                        method_lambda_gc[res_name] = lambda_gc
+                        self.log(f"   {res_name} Lambda (GC): {lambda_gc:.3f}")
+                        if lambda_gc > 1.3:
+                            self.log(f"   WARNING: Genomic inflation factor ({lambda_gc:.3f}) > 1.3 for {res_name}.")
+                            self.log(f"            This suggests population stratification or other confounding.")
+                            self.log(f"            Consider using MLM or adding more PCs to control inflation.")
 
             # Specific handling for Resampling (Sequential)
             if run_resampling:
@@ -888,7 +1015,7 @@ class GWASPipeline:
     def _prepare_trait_data(self, trait_name, n_pcs: int = 0, need_kinship: bool = False):
         """
         Handle missing data removal (phenotype & covariates).
-        Returns (y_sub, g_sub, cov_sub, k_sub) or None if empty.
+        Returns (y_sub, g_sub, cov_sub, k_sub, geno_idx) or None if empty.
         """
         if self._matched_indices is None:
              raise ValueError("Samples not aligned. Call align_samples() first.")
@@ -1041,7 +1168,7 @@ class GWASPipeline:
 
         cov_final = np.column_stack(cov_parts) if cov_parts else None
 
-        return y_final, g_final, cov_final, k_final
+        return y_final, g_final, cov_final, k_final, geno_idx
 
     def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
         """Internal helper to save tables and plots"""
@@ -1081,13 +1208,22 @@ class GWASPipeline:
                 allele_freq = np.nanmean(geno_subset, axis=0) / max(max_dosage, 1e-12)
             return np.minimum(allele_freq, 1.0 - allele_freq)
 
+        def _json_default(obj):
+            if isinstance(obj, (np.integer, np.floating)):
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
         all_res_df = base_df.copy()
         sig_snps = []
         hits_by_method = {}
         resampling_hit_snps = set()
         rmip_hit_threshold = 0.1
 
-        preferred_order = ['GLM', 'MLM', 'FarmCPU', 'BLINK', 'FarmCPUResampling']
+        preferred_order = ['GLM', 'MLM', 'BAYESLOCO', 'FarmCPU', 'BLINK', 'FarmCPUResampling']
         ordered_methods = [m for m in preferred_order if m in results]
         ordered_methods.extend([m for m in results if m not in ordered_methods])
 
@@ -1166,6 +1302,13 @@ class GWASPipeline:
                 'Runtime_Seconds': round(runtime_seconds, 2) if runtime_seconds else None,
                 'Info': method_source
             })
+
+            method_metadata = getattr(Res, "metadata", None)
+            if isinstance(method_metadata, dict) and method_metadata:
+                meta_file = self.output_dir / f"GWAS_{trait_name}_{method}_metadata.json"
+                with open(meta_file, "w", encoding="utf-8") as handle:
+                    json.dump(method_metadata, handle, indent=2, sort_keys=True, default=_json_default)
+                summary_data[-1]["Metadata_File"] = meta_file.name
             
             # Plots
             if 'manhattan' in outputs or 'qq' in outputs:

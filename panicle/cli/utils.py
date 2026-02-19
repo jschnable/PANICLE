@@ -93,9 +93,21 @@ def parse_args():
                        type=normalize_format,
                        help="Genotype file format (csv, tsv, numeric, vcf, bcf, plink, hapmap)")
     parser.add_argument("--methods", default="GLM,MLM,FarmCPU",
-                       help="Methods to run (comma-separated: GLM, MLM, FarmCPU, BLINK)")
+                       help="Methods to run (comma-separated: GLM, MLM, BAYESLOCO, FarmCPU, BLINK)")
     parser.add_argument("--n-pcs", type=int, default=3,
                        help="Number of PCs")
+    parser.add_argument(
+        "--ncpus",
+        type=int,
+        default=1,
+        help="CPUs used by each method engine (0 = all available cores)",
+    )
+    parser.add_argument(
+        "--parallel-mode",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help="Method execution mode: off forces single CPU, auto/on use --ncpus",
+    )
     
     # Thresholds
     parser.add_argument("--significance", type=float, default=None,
@@ -146,6 +158,30 @@ def parse_args():
                        help="Alpha for FarmCPU QTN Bonferroni threshold (alpha/n)")
     parser.add_argument("--farmcpu-p-threshold", type=float, default=None,
                        help="Fixed p-value threshold for FarmCPU early stopping")
+
+    # BAYESLOCO options
+    parser.add_argument("--bayesloco-max-iter", type=int, default=None,
+                       help="BAYESLOCO max fitting epochs")
+    parser.add_argument("--bayesloco-patience", type=int, default=None,
+                       help="BAYESLOCO early-stopping patience")
+    parser.add_argument("--bayesloco-loco-mode", choices=["subtract_only", "refine"], default=None,
+                       help="BAYESLOCO LOCO mode")
+    parser.add_argument("--bayesloco-test-method", choices=["score", "wald"], default=None,
+                       help="BAYESLOCO association test method")
+    parser.add_argument("--bayesloco-calibration", choices=["none", "gc", "unrelated_subset"], default=None,
+                       help="BAYESLOCO test-stat calibration mode")
+    parser.add_argument("--bayesloco-unrelated-indices", default=None,
+                       help="Path to newline-delimited unrelated sample row indices for BAYESLOCO calibration")
+    parser.add_argument("--bayesloco-prior-pi-grid", default=None,
+                       help="Comma-separated BAYESLOCO prior pi grid (e.g. 0.005,0.02,0.05)")
+    parser.add_argument("--bayesloco-prior-slab-scale-grid", default=None,
+                       help="Comma-separated BAYESLOCO slab-scale grid (e.g. 0.75,1.25)")
+    parser.add_argument("--bayesloco-batch-fit", type=int, default=None,
+                       help="BAYESLOCO marker batch size for fitting")
+    parser.add_argument("--bayesloco-batch-test", type=int, default=None,
+                       help="BAYESLOCO marker batch size for testing")
+    parser.add_argument("--bayesloco-refine-iter", type=int, default=None,
+                       help="BAYESLOCO LOCO refinement epochs per chromosome")
 
     # Loader options (simplified subset)
     parser.add_argument("--drop-monomorphic", action='store_true', dest='drop_monomorphic',

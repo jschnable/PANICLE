@@ -15,7 +15,12 @@ Validation Status: ✅ PASSED - Ready for production use
 import numpy as np
 from typing import Optional, Union, Dict, Tuple
 from scipy import stats, optimize
-from ..utils.data_types import GenotypeMatrix, KinshipMatrix, AssociationResults
+from ..utils.data_types import (
+    GenotypeMatrix,
+    KinshipMatrix,
+    AssociationResults,
+    impute_numpy_batch_major_allele,
+)
 from ..utils.perf import warn_if_potential_single_thread_blas
 import warnings
 import time
@@ -503,15 +508,14 @@ def PANICLE_MLM(phe: np.ndarray,
 
     start_time = time.time()
 
-    # OPTIMIZATION: Check once if data needs sanitization, then skip per-batch checks
+    # Check once if raw numpy genotype contains missing values.
     if isinstance(genotype, GenotypeMatrix):
         geno_source = genotype
-        needs_imputation = True  # GenotypeMatrix handles imputation via get_batch_imputed
         # If pre-imputed, no need to check for -9 in numpy path
         is_preimputed = genotype.is_imputed
+        genotype_has_missing = False
     else:
         geno_source = genotype
-        needs_imputation = False
         is_preimputed = False
         # Quick check: does any missing value exist? (one scan, not per-batch)
         # Check for both -9 sentinel and NaN
@@ -520,7 +524,7 @@ def PANICLE_MLM(phe: np.ndarray,
             has_nan = np.isnan(genotype).any()
         else:
             has_nan = False
-        has_missing = has_missing_sentinel or has_nan
+        genotype_has_missing = bool(has_missing_sentinel or has_nan)
 
     def _build_batch(start_marker: int, end_marker: int) -> Tuple[np.ndarray, int]:
         # Get batch of markers (float32 for faster eigenspace transformation)
@@ -534,12 +538,13 @@ def PANICLE_MLM(phe: np.ndarray,
         else:
             # Numpy array: convert to float32 per batch (cache-friendly, faster matmul)
             G_batch = geno_source[:, start_marker:end_marker].astype(np.float32)
-            # Handle missing values: -9 sentinel and NaN (skip if pre-imputed)
-            if has_missing and not is_preimputed:
-                missing_mask = (G_batch == -9) | np.isnan(G_batch)
-                if missing_mask.any():
-                    # Impute missing to 0 (mean-centered value)
-                    G_batch[missing_mask] = 0.0
+            # Use the same major-allele imputation strategy as GenotypeMatrix.
+            if genotype_has_missing:
+                G_batch = impute_numpy_batch_major_allele(
+                    G_batch,
+                    fill_value=None,
+                    dtype=np.float32,
+                )
 
         # Transform genotypes to eigenspace (float32 @ float32 = fast)
         with warnings.catch_warnings():
@@ -552,25 +557,30 @@ def PANICLE_MLM(phe: np.ndarray,
 
     # Phase 3: Process batches (parallel if available)
     if HAS_JOBLIB and cpu > 1:
-        # Parallel processing: build batch data list
-        batch_data_list = []
-        for batch_idx in range(n_batches):
-            start_marker = batch_idx * maxLine
-            end_marker = min(start_marker + maxLine, n_markers)
-            G_batch_f32, start_marker = _build_batch(start_marker, end_marker)
-            batch_data_list.append((
-                G_batch_f32,
-                weights_f32,
-                XTW_f32,
-                wy_f32,
-                UXWUX_f64,
-                UXWy_f64,
-                vg_hat,
-                start_marker,
-            ))
+        # Stream work into joblib so we do not materialize all transformed batches.
+        def _iter_batch_data():
+            for batch_idx in range(n_batches):
+                start_marker = batch_idx * maxLine
+                end_marker = min(start_marker + maxLine, n_markers)
+                G_batch_f32, start_marker_local = _build_batch(start_marker, end_marker)
+                yield (
+                    G_batch_f32,
+                    weights_f32,
+                    XTW_f32,
+                    wy_f32,
+                    UXWUX_f64,
+                    UXWy_f64,
+                    vg_hat,
+                    start_marker_local,
+                )
 
-        batch_results = Parallel(n_jobs=cpu, backend='threading')(
-            delayed(process_batch_parallel)(batch_data) for batch_data in batch_data_list
+        batch_results = Parallel(
+            n_jobs=cpu,
+            backend='threading',
+            pre_dispatch=max(1, cpu),
+            batch_size=1,
+        )(
+            delayed(process_batch_parallel)(batch_data) for batch_data in _iter_batch_data()
         )
 
         # Collect results from all batches
@@ -676,23 +686,18 @@ def estimate_variance_components_brent(y: np.ndarray,
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             ViX = V0bi[:, np.newaxis] * X
             XViX = X.T @ ViX
-    # Robust inversion for XViX
+    # Solve for fixed effects without forming explicit matrix inverse.
+    rhs = ViX.T @ y
     try:
-        XViX_inv = np.linalg.solve(XViX, np.eye(XViX.shape[0]))
+        beta = np.linalg.solve(XViX, rhs)
     except np.linalg.LinAlgError:
-         # Fallback to pseudo-inverse if singular
-        XViX_inv = np.linalg.pinv(XViX)
-    
-    # Calculate P0y (Projected phenotype)
+        beta = np.linalg.lstsq(XViX, rhs, rcond=None)[0]
+
+    # Calculate P0y (projected phenotype).
     Viy = V0bi * y
-    
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            # beta = (X' V^-1 X)^-1 X' V^-1 y
-            beta = XViX_inv @ (ViX.T @ y)
-
-            # P0y = V^-1 y - V^-1 X beta
             P0y = Viy - ViX @ beta
     yP0y = float(np.dot(P0y, y))
     
@@ -745,18 +750,22 @@ def _calculate_neg_reml_likelihood(h2: float, y: np.ndarray, X: np.ndarray, eige
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         XViX = X.T @ ViX  # X'V⁻¹X
     
-    try:
-        XViX_inv = np.linalg.solve(XViX, np.eye(XViX.shape[0]))  # (X'V⁻¹X)⁻¹
-        log_det_XViX_inv = np.log(np.linalg.det(XViX_inv))  # log|(X'V⁻¹X)⁻¹|
-    except (np.linalg.LinAlgError, ValueError):
+    sign, log_det_XViX = np.linalg.slogdet(XViX)
+    if sign <= 0 or not np.isfinite(log_det_XViX):
         return np.inf
-    
+    log_det_XViX_inv = -log_det_XViX
+
     # REML residuals: P₀y = V⁻¹y - V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹y
+    rhs = ViX.T @ y
+    try:
+        beta = np.linalg.solve(XViX, rhs)
+    except (np.linalg.LinAlgError, ValueError):
+        beta = np.linalg.lstsq(XViX, rhs, rcond=None)[0]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         Viy = V0bi * y  # V⁻¹y
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            P0y = Viy - ViX @ (XViX_inv @ (ViX.T @ y))  # REML residuals
+            P0y = Viy - ViX @ beta  # REML residuals
     yP0y = np.dot(P0y, y)  # y'P₀y
     
     # Check for numerical issues
@@ -766,6 +775,8 @@ def _calculate_neg_reml_likelihood(h2: float, y: np.ndarray, X: np.ndarray, eige
     # REML likelihood components
     log_V0b_sum = np.sum(np.log(V0b))  # sum(log(V₀ᵦ))
     df = n - r - p  # Degrees of freedom
+    if df <= 0:
+        return np.inf
     
     # The NEGATIVE log-likelihood rMVP minimizes
     # Formula: 0.5 * [sum(log(V₀ᵦ)) + log|(X'V⁻¹X)⁻¹| + (n-r-p)*log(y'P₀y) + (n-r-p)*(1-log(n-r-p))]
@@ -793,16 +804,17 @@ def _calculate_neg_ml_likelihood(h2: float, y: np.ndarray, X: np.ndarray, eigenv
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         XViX = X.T @ ViX
     
+    rhs = ViX.T @ y
     try:
-        XViX_inv = np.linalg.solve(XViX, np.eye(XViX.shape[0]))
+        beta = np.linalg.solve(XViX, rhs)
     except (np.linalg.LinAlgError, ValueError):
-        return np.inf
+        beta = np.linalg.lstsq(XViX, rhs, rcond=None)[0]
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         Viy = V0bi * y
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            P0y = Viy - ViX @ (XViX_inv @ (ViX.T @ y))
+            P0y = Viy - ViX @ beta
     yP0y = np.dot(P0y, y)
     
     if yP0y <= 0:

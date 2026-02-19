@@ -10,10 +10,14 @@ import warnings
 from typing import Optional, Union, Tuple, Dict
 import numpy as np
 
-from ..utils.data_types import GenotypeMatrix, AssociationResults
+from ..utils.data_types import (
+    GenotypeMatrix,
+    AssociationResults,
+    impute_numpy_batch_major_allele,
+)
 from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO, LocoKinship, _extract_chromosomes, _group_markers_by_chrom
 from .mlm import PANICLE_MLM, estimate_variance_components_brent, _calculate_neg_ml_likelihood
-from .lrt import fit_marker_lrt
+from .lrt import fit_marker_lrt_prebuilt, fit_markers_lrt_batch_prebuilt
 
 # Check for joblib availability
 try:
@@ -29,7 +33,8 @@ def _subset_genotypes(geno: Union[GenotypeMatrix, np.ndarray],
 
     For GenotypeMatrix, uses get_columns_imputed which handles -9 and NaN.
     For pre-imputed GenotypeMatrix, skips -9 checks for faster access.
-    For numpy arrays, handles -9 sentinel and NaN values by imputing to 0.
+    For numpy arrays, handles -9 sentinel and NaN values by major-allele
+    imputation (matching GenotypeMatrix behavior).
     """
     if isinstance(geno, GenotypeMatrix):
         if geno.is_imputed:
@@ -37,30 +42,29 @@ def _subset_genotypes(geno: Union[GenotypeMatrix, np.ndarray],
             return geno._data[:, indices].astype(np.float32)
         return geno.get_columns_imputed(indices)
     # For numpy arrays, handle missing values
-    subset = geno[:, indices].astype(np.float32)
-    missing_mask = (subset == -9) | np.isnan(subset)
-    if missing_mask.any():
-        subset[missing_mask] = 0.0
-    return subset
+    subset = geno[:, indices]
+    return impute_numpy_batch_major_allele(subset, fill_value=None, dtype=np.float32)
 
 
 def _process_chromosome(chrom: str,
                         indices: np.ndarray,
-                        geno_subset: np.ndarray,
+                        geno: Union[GenotypeMatrix, np.ndarray],
                         phe: np.ndarray,
-                        K_loco: np.ndarray,
-                        eigenK: Dict[str, np.ndarray],
+                        loco_kinship: LocoKinship,
                         CV: Optional[np.ndarray],
                         vc_method: str,
                         maxLine: int) -> Tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Process a single chromosome for LOCO MLM.
 
     This function is designed to be called in parallel for each chromosome.
-    Takes pre-computed K_loco and eigenK to avoid serializing the full LocoKinship object.
 
     Returns:
         Tuple of (chrom, indices, effects, std_errors, pvalues)
     """
+    geno_subset = _subset_genotypes(geno, indices)
+    eigenK = loco_kinship.get_eigen(chrom)
+    K_loco = loco_kinship.get_loco(chrom)
+
     res = PANICLE_MLM(
         phe=phe,
         geno=geno_subset,
@@ -85,7 +89,9 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
                  maxLine: int = 1000,
                  cpu: int = 1,
                  lrt_refinement: bool = True,
-                 screen_threshold: float = 1e-4,
+                 screen_threshold: float = 5e-4,
+                 lrt_solver: str = "GEMMA",
+                 lrt_batch_size: int = 2048,
                  verbose: bool = True) -> AssociationResults:
     """Run MLM with LOCO kinship matrices grouped by chromosome.
 
@@ -103,7 +109,9 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
         maxLine: Batch size for processing markers
         cpu: Number of CPU cores for parallel chromosome processing
         lrt_refinement: Apply LRT refinement to top hits (default: True)
-        screen_threshold: P-value threshold for LRT refinement (default: 1e-4)
+        screen_threshold: P-value threshold for LRT refinement (default: 5e-4)
+        lrt_solver: Exact LRT solver ["GEMMA", "BRENT", "AUTO"] (default: "GEMMA")
+        lrt_batch_size: Candidate chunk size for batched genotype transforms
         verbose: Print progress information
 
     Returns:
@@ -138,6 +146,12 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
     chrom_values = _extract_chromosomes(map_data, n_markers)
     chrom_groups = _group_markers_by_chrom(chrom_values)
 
+    lrt_solver_norm = str(lrt_solver).strip().upper()
+    if lrt_solver_norm not in {"GEMMA", "BRENT", "AUTO"}:
+        raise ValueError("lrt_solver must be one of: 'GEMMA', 'BRENT', 'AUTO'")
+    if lrt_batch_size < 1:
+        raise ValueError("lrt_batch_size must be >= 1")
+
     if loco_kinship is None:
         loco_kinship = PANICLE_K_VanRaden_LOCO(geno, map_data, maxLine=maxLine, verbose=verbose)
 
@@ -160,29 +174,27 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
         import multiprocessing
         cpu = multiprocessing.cpu_count()
 
-    # Determine if we should use parallel processing
-    use_parallel = HAS_JOBLIB and cpu > 1 and n_chroms > 1
+    # Determine if we should use parallel processing.
+    # Small workloads usually run faster sequentially due scheduling overhead.
+    n_workers = min(cpu, n_chroms)
+    parallel_worthwhile = n_workers > 1 and n_markers >= 50_000 and n_chroms >= 3
+    use_parallel = HAS_JOBLIB and parallel_worthwhile
 
     if use_parallel:
         if verbose:
-            print(f"Using parallel processing with {min(cpu, n_chroms)} workers")
+            print(f"Using parallel processing with {n_workers} workers")
 
-        # Pre-compute all data needed for parallel processing
-        # This avoids serializing the full LocoKinship object to workers
-        chrom_data = []
-        for chrom, indices in chrom_items:
-            geno_subset = _subset_genotypes(geno, indices)
-            eigenK = loco_kinship.get_eigen(chrom)
-            K_loco = loco_kinship.get_loco(chrom).to_numpy()
-            chrom_data.append((chrom, indices, geno_subset, K_loco, eigenK))
-
-        # Process chromosomes in parallel
-        # Use 'loky' for CPU-bound work (releases GIL in numpy/numba)
-        results = Parallel(n_jobs=min(cpu, n_chroms), backend='loky')(
+        # Threading avoids expensive process serialization for large genotype data.
+        results = Parallel(
+            n_jobs=n_workers,
+            backend='threading',
+            pre_dispatch=n_workers,
+            batch_size=1,
+        )(
             delayed(_process_chromosome)(
-                chrom, indices, geno_subset, phe, K_loco, eigenK, CV, vc_method, maxLine
+                chrom, indices, geno, phe, loco_kinship, CV, vc_method, maxLine
             )
-            for chrom, indices, geno_subset, K_loco, eigenK in chrom_data
+            for chrom, indices in chrom_items
         )
 
         # Collect results
@@ -195,30 +207,26 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
         # Sequential processing (original behavior)
         if verbose and not HAS_JOBLIB and cpu > 1:
             print("Note: joblib not available, using sequential processing")
+        elif verbose and cpu > 1 and not parallel_worthwhile:
+            print("Parallel overhead likely exceeds benefit for this workload; using sequential processing")
 
         for chrom, indices in chrom_items:
             if verbose:
                 print(f"Processing chromosome {chrom} ({indices.size} markers)")
 
-            geno_subset = _subset_genotypes(geno, indices)
-            eigenK = loco_kinship.get_eigen(chrom)
-            K_loco = loco_kinship.get_loco(chrom)
-
-            res = PANICLE_MLM(
+            _, _, eff, se, pvals = _process_chromosome(
+                chrom=chrom,
+                indices=indices,
+                geno=geno,
                 phe=phe,
-                geno=geno_subset,
-                K=K_loco,
-                eigenK=eigenK,
+                loco_kinship=loco_kinship,
                 CV=CV,
                 vc_method=vc_method,
                 maxLine=maxLine,
-                cpu=1,
-                verbose=False,
             )
-
-            effects[indices] = res.effects
-            std_errors[indices] = res.se
-            p_values[indices] = res.pvalues
+            effects[indices] = eff
+            std_errors[indices] = se
+            p_values[indices] = pvals
 
     # -------------------------------------------------------------------------
     # LRT Refinement Phase (if enabled)
@@ -271,47 +279,107 @@ def PANICLE_MLM_LOCO(phe: np.ndarray,
                     "eigenvecs": eigenvecs,
                     "y_transformed": y_transformed,
                     "X_transformed": X_transformed,
+                    "h2_null": h2_null,
                     "null_neg_loglik": null_neg_loglik,
                 }
                 null_cache[chrom] = payload
                 return payload
 
-            # Process candidates
+            # Process candidates chromosome-by-chromosome in chunks so we can
+            # batch eigenspace transforms and reduce Python-level overhead.
             start_time = time.time()
-            for i, marker_idx in enumerate(candidate_indices):
-                if verbose and i % 10 == 0:
-                    print(f"  Refining marker {i+1}/{n_candidates}...", end='\r')
+            processed = 0
+            candidate_chrom = np.asarray(chrom_values[candidate_indices], dtype=str)
+            lrt_batch_n = int(lrt_batch_size)
+            chunk_tasks = []
+            # Preserve chromosome order from the main MLM pass for reproducibility.
+            for chrom, _ in chrom_items:
+                chrom_mask = (candidate_chrom == str(chrom))
+                if not np.any(chrom_mask):
+                    continue
+                chrom_candidates = candidate_indices[chrom_mask]
+                null_model = _get_null_model(str(chrom))
+                for chunk_start in range(0, chrom_candidates.size, lrt_batch_n):
+                    chunk_indices = chrom_candidates[chunk_start:chunk_start + lrt_batch_n]
+                    if chunk_indices.size == 0:
+                        continue
+                    chunk_tasks.append((np.asarray(chunk_indices, dtype=np.int64), null_model))
 
-                chrom = str(chrom_values[marker_idx])
-                null_model = _get_null_model(chrom)
-
-                # Get genotype
+            def _refine_chunk(
+                chunk_indices: np.ndarray,
+                null_model: Dict[str, np.ndarray],
+            ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
                 if isinstance(geno, GenotypeMatrix):
-                    g_raw = geno.get_batch_imputed(marker_idx, marker_idx+1).flatten()
+                    g_raw_batch = geno.get_columns_imputed(chunk_indices, dtype=np.float64)
                 else:
-                    g_raw = geno[:, marker_idx]
-
-                g_raw = np.nan_to_num(np.asarray(g_raw, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-
-                # Transform genotype
-                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                    g_transformed = null_model["eigenvecs"].T @ g_raw
-                g_transformed = np.nan_to_num(g_transformed, nan=0.0, posinf=0.0, neginf=0.0)
-
-                # Run LRT
-                lrt_stat, lrt_p, lrt_beta, lrt_se = fit_marker_lrt(
-                    null_model["y_transformed"],
-                    null_model["X_transformed"],
-                    g_transformed,
-                    null_model["eigenvals"],
-                    null_model["null_neg_loglik"]
+                    g_raw_batch = impute_numpy_batch_major_allele(
+                        geno[:, chunk_indices],
+                        fill_value=None,
+                        dtype=np.float64,
+                    )
+                g_raw_batch = np.nan_to_num(
+                    np.asarray(g_raw_batch, dtype=np.float64),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
                 )
 
-                # Update results if LRT model is numerically stable
-                if np.isfinite(lrt_p) and np.isfinite(lrt_beta) and np.isfinite(lrt_se):
-                    p_values[marker_idx] = lrt_p
-                    effects[marker_idx] = lrt_beta
-                    std_errors[marker_idx] = lrt_se
+                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                    g_transformed_batch = null_model["eigenvecs"].T @ g_raw_batch
+                g_transformed_batch = np.nan_to_num(
+                    np.asarray(g_transformed_batch, dtype=np.float64),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+
+                y_transformed = null_model["y_transformed"]
+                X_transformed = null_model["X_transformed"]
+                eigenvals = null_model["eigenvals"]
+                null_neg_loglik = null_model["null_neg_loglik"]
+                null_h2_value = float(null_model["h2_null"])
+
+                n_chunk = int(chunk_indices.size)
+                chunk_p = np.ones(n_chunk, dtype=np.float64)
+                chunk_beta = np.zeros(n_chunk, dtype=np.float64)
+                chunk_se = np.full(n_chunk, np.inf, dtype=np.float64)
+
+                # Batch GEMMA Schur path with exact per-marker fallback preserves
+                # numerical behavior while reducing repeated scan overhead.
+                batch_p, batch_beta, batch_se = fit_markers_lrt_batch_prebuilt(
+                    y_transformed,
+                    X_transformed,
+                    g_transformed_batch,
+                    eigenvals,
+                    null_neg_loglik,
+                    null_h2=null_h2_value,
+                    solver_norm=lrt_solver_norm,
+                    assume_sanitized=True,
+                )
+                chunk_p[:] = batch_p
+                chunk_beta[:] = batch_beta
+                chunk_se[:] = batch_se
+
+                return chunk_indices, chunk_p, chunk_beta, chunk_se
+
+            chunk_results = [
+                _refine_chunk(chunk_indices, null_model)
+                for chunk_indices, null_model in chunk_tasks
+            ]
+
+            progress_step = max(10, lrt_batch_n)
+            for chunk_indices, chunk_p, chunk_beta, chunk_se in chunk_results:
+                processed += int(chunk_indices.size)
+                if verbose and (processed == n_candidates or processed % progress_step == 0):
+                    print(f"  Refining marker {processed}/{n_candidates}...", end='\r')
+
+                valid = np.isfinite(chunk_p) & np.isfinite(chunk_beta) & np.isfinite(chunk_se)
+                if not np.any(valid):
+                    continue
+                marker_idx = chunk_indices[valid]
+                p_values[marker_idx] = chunk_p[valid]
+                effects[marker_idx] = chunk_beta[valid]
+                std_errors[marker_idx] = chunk_se[valid]
 
             duration = time.time() - start_time
             if verbose:

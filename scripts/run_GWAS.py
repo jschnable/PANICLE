@@ -4,6 +4,7 @@ Comprehensive GWAS Analysis Script using PANICLE (Refactored Pipeline Version)
 """
 import sys
 from pathlib import Path
+from typing import Optional, Tuple
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -48,6 +49,7 @@ def normalize_methods(methods):
     aliases = {
         "GLM": "GLM",
         "MLM": "MLM",
+        "BAYESLOCO": "BAYESLOCO",
         "FARMCPU": "FARMCPU",
         "FARMCPU_RESAMPLING": "FarmCPUResampling",
         "FARMCPURESAMPLING": "FarmCPUResampling",
@@ -66,6 +68,28 @@ def normalize_methods(methods):
             normalized.append(method)
             seen.add(method)
     return normalized
+
+
+def _parse_float_tuple(text: Optional[str]) -> Optional[Tuple[float, ...]]:
+    if text is None:
+        return None
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    if not parts:
+        return None
+    return tuple(float(p) for p in parts)
+
+
+def _load_index_file(path: Optional[str]) -> Optional[list]:
+    if path is None:
+        return None
+    out = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            token = line.strip()
+            if not token or token.startswith("#"):
+                continue
+            out.append(int(token))
+    return out
 
 
 class FarmCPUResamplingProgressReporter:
@@ -203,15 +227,47 @@ def main():
     if "FarmCPUResampling" in valid_methods:
         farmcpu_params.setdefault("resampling_progress", True)
 
+    bayesloco_params = {}
+    if args.bayesloco_max_iter is not None:
+        bayesloco_params["max_iter"] = int(args.bayesloco_max_iter)
+    if args.bayesloco_patience is not None:
+        bayesloco_params["patience"] = int(args.bayesloco_patience)
+    if args.bayesloco_loco_mode is not None:
+        bayesloco_params["loco_mode"] = args.bayesloco_loco_mode
+    if args.bayesloco_test_method is not None:
+        bayesloco_params["test_method"] = args.bayesloco_test_method
+    if args.bayesloco_calibration is not None:
+        bayesloco_params["calibrate_stat_scale"] = args.bayesloco_calibration
+    if args.bayesloco_batch_fit is not None:
+        bayesloco_params["batch_markers_fit"] = int(args.bayesloco_batch_fit)
+    if args.bayesloco_batch_test is not None:
+        bayesloco_params["batch_markers_test"] = int(args.bayesloco_batch_test)
+    if args.bayesloco_refine_iter is not None:
+        bayesloco_params["loco_refine_iter"] = int(args.bayesloco_refine_iter)
+
+    pi_grid = _parse_float_tuple(args.bayesloco_prior_pi_grid)
+    if pi_grid is not None:
+        bayesloco_params["prior_tune_pi_grid"] = pi_grid
+    slab_grid = _parse_float_tuple(args.bayesloco_prior_slab_scale_grid)
+    if slab_grid is not None:
+        bayesloco_params["prior_tune_slab_scale_grid"] = slab_grid
+
+    unrelated_indices = _load_index_file(args.bayesloco_unrelated_indices)
+    if unrelated_indices is not None:
+        bayesloco_params["unrelated_subset_indices"] = unrelated_indices
+
     pipeline.run_analysis(
         traits=traits,
         methods=valid_methods,
         max_iterations=args.max_iterations,
+        ncpus=args.ncpus,
+        parallel_mode=args.parallel_mode,
         significance=args.significance,
         alpha=args.alpha,
         n_eff=args.n_eff,
         max_genotype_dosage=args.max_genotype_dosage,
         farmcpu_params=farmcpu_params,
+        bayesloco_params=(bayesloco_params or None),
         outputs=outputs
     )
 

@@ -4,6 +4,7 @@ Main MVP function - Primary GWAS analysis interface
 
 import numpy as np
 import pandas as pd
+import json
 from typing import Optional, List, Dict, Union, Any, Tuple
 from pathlib import Path
 import warnings
@@ -13,10 +14,12 @@ from ..data.loaders import load_genotype_file
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
 from ..association.mlm_loco import PANICLE_MLM_LOCO
+from ..association.bayes_loco import PANICLE_BayesLOCO
 from ..association.farmcpu import PANICLE_FarmCPU
 from ..association.blink import PANICLE_BLINK
 from ..association.farmcpu_resampling import PANICLE_FarmCPUResampling
 from ..matrix.kinship import PANICLE_K_VanRaden
+from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from ..matrix.pca import PANICLE_PCA
 from ..visualization.manhattan import PANICLE_Report
 
@@ -49,7 +52,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         map_data: Genetic map data (file path, DataFrame, or GenotypeMap object)
         K: Kinship matrix (optional, calculated if not provided for MLM/FarmCPU)
         CV: Covariate matrix (optional)
-        method: GWAS methods to run ["GLM", "MLM", "FarmCPU", "BLINK", "FarmCPUResampling"]
+        method: GWAS methods to run ["GLM", "MLM", "BAYESLOCO", "FarmCPU", "BLINK", "FarmCPUResampling"]
         ncpus: Number of CPU cores to use
         vc_method: Variance component method for MLM ["BRENT", "EMMA", "HE"]
         maxLine: Batch size for marker processing
@@ -211,7 +214,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         kinship_matrix = None
         pca_results = None
         
-        if any(method_name in ["MLM", "FarmCPU"] for method_name in method) and K is None:
+        if any(method_name in ["FarmCPU"] for method_name in method) and K is None:
             if verbose:
                 print("\n[Phase 2] Computing kinship matrix...")
             
@@ -279,6 +282,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         covariate_finite_mask = (
             np.isfinite(covariates).all(axis=1) if covariates is not None else None
         )
+        loco_kinship_cache: Dict[Tuple[int, int], Any] = {}
 
         # Loop over each trait
         for trait_idx, trait_name in enumerate(phenotype.trait_names):
@@ -305,8 +309,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                         f"  Trait '{trait_name}': excluded {excluded} individual(s) with missing/non-finite phenotype or covariate values."
                     )
 
+            valid_indices = np.where(valid_mask)[0]
             phenotype_array = np.column_stack([trait_ids[valid_mask], raw_trait[valid_mask]])
-            trait_genotype = genotype if n_valid == genotype.n_individuals else genotype.subset_individuals(np.where(valid_mask)[0])
+            trait_genotype = genotype if n_valid == genotype.n_individuals else genotype.subset_individuals(valid_indices)
             trait_covariates = covariates[valid_mask, :] if covariates is not None else None
             analysis_results['summary']['trait_sample_sizes'][trait_name] = n_valid
 
@@ -351,10 +356,23 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 mlm_start = time.time()
                 if K is not None and verbose and trait_idx == 0:
                     warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
+                key_arr = np.ascontiguousarray(valid_indices, dtype=np.int64)
+                loco_key = (int(key_arr.size), hash(key_arr.tobytes()))
+                trait_loco_kinship = loco_kinship_cache.get(loco_key)
+                if trait_loco_kinship is None:
+                    trait_loco_kinship = PANICLE_K_VanRaden_LOCO(
+                        trait_genotype,
+                        genetic_map,
+                        maxLine=maxLine,
+                        cpu=ncpus,
+                        verbose=False,
+                    )
+                    loco_kinship_cache[loco_key] = trait_loco_kinship
                 mlm_results = PANICLE_MLM_LOCO(
                     phe=phenotype_array,
                     geno=trait_genotype,
                     map_data=genetic_map,
+                    loco_kinship=trait_loco_kinship,
                     CV=trait_covariates,
                     vc_method=vc_method,
                     maxLine=maxLine,
@@ -374,6 +392,43 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
 
                 if verbose:
                     print(f"MLM analysis complete ({mlm_time:.2f}s)")
+                    print(f"  Significant markers (p < {threshold}): {n_sig}")
+
+            # Run BAYESLOCO
+            if "BAYESLOCO" in method:
+                if verbose:
+                    print(f"\nRunning BAYESLOCO analysis on {trait_name}...")
+
+                bayes_cfg = kwargs.get("bayesloco_config", kwargs.get("bl_config"))
+                if bayes_cfg is None:
+                    bayes_cfg = {}
+                if isinstance(bayes_cfg, dict):
+                    bayes_cfg = dict(bayes_cfg)
+                    # Reuse PANICLE maxLine as BAYESLOCO marker batch defaults when not overridden.
+                    bayes_cfg.setdefault("batch_markers_fit", int(maxLine))
+                    bayes_cfg.setdefault("batch_markers_test", int(maxLine))
+                bayes_start = time.time()
+                bayes_results = PANICLE_BayesLOCO(
+                    phe=phenotype_array,
+                    geno=trait_genotype,
+                    map_data=genetic_map,
+                    CV=trait_covariates,
+                    cpu=ncpus,
+                    verbose=verbose,
+                    bl_config=bayes_cfg,
+                )
+                bayes_time = time.time() - bayes_start
+
+                analysis_results['results'][trait_name]['BAYESLOCO'] = bayes_results
+                methods_actually_run.add('BAYESLOCO')
+                analysis_results['summary']['runtime'][f'BAYESLOCO_{trait_name}'] = bayes_time
+
+                bayes_pvals = bayes_results.to_numpy()[:, 2]
+                n_sig = np.sum(bayes_pvals < threshold)
+                analysis_results['summary']['significant_markers'][trait_name]['BAYESLOCO'] = int(n_sig)
+
+                if verbose:
+                    print(f"BAYESLOCO analysis complete ({bayes_time:.2f}s)")
                     print(f"  Significant markers (p < {threshold}): {n_sig}")
 
             # Run FarmCPU
@@ -649,6 +704,15 @@ def save_results_to_files(results: Dict[str, Any],
 
     saved_files = []
 
+    def _json_default(obj):
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     try:
         # Save summary statistics
         summary_file = f"{output_prefix}_summary.txt"
@@ -698,6 +762,13 @@ def save_results_to_files(results: Dict[str, Any],
 
                 result_df.to_csv(result_file, index=False)
                 saved_files.append(result_file)
+
+                metadata = getattr(result_obj, "metadata", None)
+                if isinstance(metadata, dict) and metadata:
+                    meta_file = f"{output_prefix}_{trait_name}_{method_name}_metadata.json"
+                    with open(meta_file, "w", encoding="utf-8") as f:
+                        json.dump(metadata, f, indent=2, sort_keys=True, default=_json_default)
+                    saved_files.append(meta_file)
 
         if verbose:
             print(f"Saved {len(saved_files)} result files")

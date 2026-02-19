@@ -5,7 +5,11 @@ Kinship matrix computation using VanRaden method
 import logging
 import numpy as np
 from typing import Optional, Union, Tuple
-from ..utils.data_types import GenotypeMatrix, KinshipMatrix
+from ..utils.data_types import (
+    GenotypeMatrix,
+    KinshipMatrix,
+    impute_numpy_batch_major_allele,
+)
 import warnings
 
 logger = logging.getLogger(__name__)
@@ -80,11 +84,11 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
             # get_batch_imputed handles missing values and returns requested dtype
             Z_batch = genotype.get_batch_imputed(start_marker, end_marker, dtype=np.float32)
         else:
-            Z_batch = genotype[:, start_marker:end_marker].astype(np.float32)
-            # Handle missing values for raw numpy arrays
-            missing_mask = (Z_batch == -9) | np.isnan(Z_batch)
-            if missing_mask.any():
-                Z_batch[missing_mask] = 0.0
+            Z_batch = impute_numpy_batch_major_allele(
+                genotype[:, start_marker:end_marker],
+                fill_value=None,
+                dtype=np.float32,
+            )
 
         # Center the genotype matrix by subtracting per-marker means (2p)
         # Use regular mean since get_batch_imputed already handles missing values

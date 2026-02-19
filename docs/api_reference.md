@@ -292,7 +292,9 @@ results = PANICLE_MLM_LOCO(
     maxLine=1000,           # Batch size
     cpu=1,                  # Number of CPU cores
     lrt_refinement=True,    # Apply LRT refinement to top hits
-    screen_threshold=1e-4,  # P-value cutoff for LRT refinement
+    screen_threshold=5e-4,  # P-value cutoff for LRT refinement
+    lrt_solver='GEMMA',     # Exact LRT solver: 'GEMMA' (fast) or 'BRENT' (legacy)
+    lrt_batch_size=2048,    # Candidate chunk size for batched eigenspace transforms
     verbose=True
 )
 ```
@@ -301,7 +303,9 @@ results = PANICLE_MLM_LOCO(
 
 **Notes:**
 - Requires `map_data` with chromosome information for LOCO kinship
-- By default, markers with Wald p-value < 1e-4 are re-tested using exact LRT
+- By default, markers with Wald p-value < 5e-4 are re-tested using exact LRT
+- `lrt_solver='GEMMA'` uses a derivative-based exact optimizer with automatic fallback
+  to bounded Brent on numerical edge cases
 - If `loco_kinship` is not provided, it will be computed automatically
 - Set `lrt_refinement=False` to skip LRT refinement (faster, Wald p-values only)
 

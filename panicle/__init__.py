@@ -40,6 +40,7 @@ from .association.glm import PANICLE_GLM
 from .association.mlm import PANICLE_MLM
 from .association.farmcpu import PANICLE_FarmCPU
 from .association.blink import PANICLE_BLINK
+from .association.bayes_loco import PANICLE_BayesLOCO, BayesLocoConfig
 from .association.farmcpu_resampling import PANICLE_FarmCPUResampling
 from .visualization.manhattan import PANICLE_Report
 from .data.loaders import (
@@ -61,6 +62,8 @@ __all__ = [
     'PANICLE_MLM',
     'PANICLE_FarmCPU',
     'PANICLE_BLINK',
+    'PANICLE_BayesLOCO',
+    'BayesLocoConfig',
     'PANICLE_FarmCPUResampling',
     'PANICLE_Report',
     'load_genotype_file',

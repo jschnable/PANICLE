@@ -51,6 +51,22 @@ def test_mlm_accepts_1d_phenotype_vector() -> None:
     assert np.all(np.isfinite(res.pvalues))
 
 
+def test_mlm_numpy_missing_matches_genotype_matrix_missing() -> None:
+    rng = np.random.default_rng(11)
+    n, m = 16, 12
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    geno[rng.random((n, m)) < 0.15] = -9
+    phe = np.column_stack([np.arange(n), rng.normal(size=n)])
+    kinship = np.eye(n, dtype=np.float64)
+
+    res_np = PANICLE_MLM(phe, geno, K=kinship, maxLine=4, verbose=False)
+    res_gm = PANICLE_MLM(phe, GenotypeMatrix(geno), K=kinship, maxLine=4, verbose=False)
+
+    np.testing.assert_allclose(res_np.effects, res_gm.effects, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_np.se, res_gm.se, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_np.pvalues, res_gm.pvalues, rtol=1e-8, atol=1e-8, equal_nan=True)
+
+
 def test_mlm_variance_components_brent_produces_positive_components() -> None:
     y = np.array([1.0, 2.0, 3.0, 4.0])
     X = np.ones((4, 1))
@@ -117,6 +133,90 @@ def test_mlm_loco_parallel_path_uses_stubbed_joblib(monkeypatch) -> None:
     assert res.effects.shape == (geno.shape[1],)
     assert res.se.shape == (geno.shape[1],)
     assert res.pvalues.shape == (geno.shape[1],)
+
+
+def test_mlm_loco_lrt_refinement_uses_prebuilt_fast_path(monkeypatch) -> None:
+    rng = np.random.default_rng(3)
+    n, m = 12, 8
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+    phe = np.column_stack([np.arange(n), 0.4 * geno[:, 0].astype(np.float64) + rng.normal(scale=0.2, size=n)])
+
+    geno_matrix = GenotypeMatrix(geno)
+    loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=4, verbose=False)
+    calls = {"batch_calls": 0, "markers_seen": 0}
+
+    def fake_fit_markers_lrt_batch_prebuilt(_y, _x, g_batch, *_args, **_kwargs):
+        calls["batch_calls"] += 1
+        calls["markers_seen"] += int(g_batch.shape[1])
+        n = int(g_batch.shape[1])
+        return (
+            np.full(n, 0.5, dtype=np.float64),
+            np.full(n, 0.1, dtype=np.float64),
+            np.full(n, 1.0, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        mlm_loco,
+        "fit_markers_lrt_batch_prebuilt",
+        fake_fit_markers_lrt_batch_prebuilt,
+    )
+
+    res = PANICLE_MLM_LOCO(
+        phe=phe,
+        geno=geno_matrix,
+        map_data=map_df,
+        loco_kinship=loco,
+        cpu=2,
+        maxLine=4,
+        lrt_refinement=True,
+        screen_threshold=2.0,  # force all markers into LRT refinement
+        lrt_batch_size=2,
+        verbose=False,
+    )
+
+    assert calls["batch_calls"] >= 1
+    assert calls["markers_seen"] >= m
+    assert res.effects.shape == (m,)
+    assert res.se.shape == (m,)
+    assert res.pvalues.shape == (m,)
+    assert np.all(np.isfinite(res.pvalues))
+
+
+def test_mlm_loco_numpy_missing_matches_genotype_matrix_missing() -> None:
+    rng = np.random.default_rng(21)
+    n, m = 12, 10
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    geno[rng.random((n, m)) < 0.10] = -9
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+    phe = np.column_stack([np.arange(n), rng.normal(size=n)])
+
+    res_np = PANICLE_MLM_LOCO(phe, geno, map_data=map_df, maxLine=4, cpu=1, lrt_refinement=False, verbose=False)
+    res_gm = PANICLE_MLM_LOCO(
+        phe,
+        GenotypeMatrix(geno),
+        map_data=map_df,
+        maxLine=4,
+        cpu=1,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    np.testing.assert_allclose(res_np.effects, res_gm.effects, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_np.se, res_gm.se, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_np.pvalues, res_gm.pvalues, rtol=1e-8, atol=1e-8, equal_nan=True)
 
 
 def test_mlm_errors_on_invalid_inputs() -> None:

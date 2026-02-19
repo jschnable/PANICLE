@@ -45,6 +45,17 @@ def test_loco_kinship_matches_naive():
         np.testing.assert_allclose(loco_k, ref, rtol=1e-8, atol=5e-7)
 
 
+def test_vanraden_numpy_missing_matches_genotype_matrix_missing():
+    rng = np.random.default_rng(222)
+    geno = rng.integers(0, 3, size=(18, 40), dtype=np.int8)
+    geno[rng.random(geno.shape) < 0.12] = -9
+
+    k_np = PANICLE_K_VanRaden(geno, maxLine=9, verbose=False).to_numpy()
+    k_gm = PANICLE_K_VanRaden(GenotypeMatrix(geno), maxLine=9, verbose=False).to_numpy()
+
+    np.testing.assert_allclose(k_np, k_gm, rtol=1e-8, atol=1e-8)
+
+
 def test_mlm_loco_matches_per_chrom_mlm():
     rng = np.random.default_rng(321)
     n_individuals = 20

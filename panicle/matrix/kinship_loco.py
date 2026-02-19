@@ -6,6 +6,7 @@ is not adopted.
 """
 
 from typing import Dict, List, Optional, Union, Tuple
+import os
 import numpy as np
 import warnings
 import pandas as pd
@@ -227,15 +228,31 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
         import multiprocessing
         cpu = multiprocessing.cpu_count()
 
-    # Determine if we should use parallel processing
-    use_parallel = HAS_JOBLIB and cpu > 1 and n_chroms > 1
+    # Determine if we should use parallel processing.
+    # Empirical runs on real sorghum datasets (170k to 4.2M markers) showed
+    # threading is typically slower for LOCO kinship due memory-bandwidth limits.
+    # Keep a high default threshold and expose an explicit override.
+    n_workers = min(cpu, n_chroms)
+    force_parallel = os.getenv("PANICLE_FORCE_LOCO_KINSHIP_PARALLEL", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    parallel_worthwhile = n_workers > 1 and n_markers >= 8_000_000 and n_chroms >= 3
+    if force_parallel:
+        parallel_worthwhile = n_workers > 1 and n_chroms >= 2
+    use_parallel = HAS_JOBLIB and parallel_worthwhile
 
     if use_parallel:
         if verbose:
-            print(f"Using parallel processing with {min(cpu, n_chroms)} workers")
+            suffix = " (forced by PANICLE_FORCE_LOCO_KINSHIP_PARALLEL)" if force_parallel else ""
+            print(f"Using parallel processing with {n_workers} workers{suffix}")
 
-        # Process chromosomes in parallel
-        results = Parallel(n_jobs=min(cpu, n_chroms), backend='loky')(
+        # Use threading to avoid expensive serialization of genotype arrays.
+        results = Parallel(
+            n_jobs=n_workers,
+            backend='threading',
+            pre_dispatch=n_workers,
+            batch_size=1,
+        )(
             delayed(_compute_chrom_kinship)(chrom, indices, genotype_data, n_individuals)
             for chrom, indices in chrom_groups.items()
         )
@@ -259,6 +276,8 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
         # This avoids redundant total matmul and per-batch chromosome splitting
         if verbose and not HAS_JOBLIB and cpu > 1:
             print("Note: joblib not available, using sequential processing")
+        elif verbose and cpu > 1 and not parallel_worthwhile:
+            print("Parallel overhead likely exceeds benefit for this workload; using sequential processing")
 
         raw_by_chrom = {}
         diag_by_chrom = {}

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import panicle.pipelines.gwas as gwas_module
 from panicle.pipelines.gwas import GWASPipeline
 
 
@@ -81,6 +82,24 @@ def synthetic_data(tmp_path: Path):
         'sample_ids': sample_ids,
         'trait_names': ['Height', 'Yield']
     }
+
+
+def test_resolve_method_cpu_modes(monkeypatch) -> None:
+    monkeypatch.setattr(gwas_module.os, "cpu_count", lambda: 6)
+
+    assert gwas_module._resolve_method_cpu(ncpus=0, parallel_mode="auto") == 6
+    assert gwas_module._resolve_method_cpu(ncpus=3, parallel_mode="auto") == 3
+    assert gwas_module._resolve_method_cpu(ncpus=3, parallel_mode="on") == 3
+    assert gwas_module._resolve_method_cpu(ncpus=3, parallel_mode="off") == 1
+
+
+def test_resolve_method_cpu_validates_inputs() -> None:
+    with pytest.raises(ValueError, match="parallel_mode"):
+        gwas_module._resolve_method_cpu(ncpus=1, parallel_mode="invalid")
+    with pytest.raises(ValueError, match="ncpus must be >= 0"):
+        gwas_module._resolve_method_cpu(ncpus=-1, parallel_mode="auto")
+    with pytest.raises(ValueError, match="ncpus must be an integer"):
+        gwas_module._resolve_method_cpu(ncpus="bad", parallel_mode="auto")
 
 
 def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
@@ -385,3 +404,36 @@ def test_gwas_pipeline_runs_without_kinship_for_loco(synthetic_data, tmp_path):
     assert results_file.exists()
     results_df = pd.read_csv(results_file)
     assert 'MLM_P' in results_df.columns
+
+
+def test_gwas_pipeline_reuses_loco_kinship_cache_across_traits(synthetic_data, tmp_path, monkeypatch):
+    """MLM LOCO kinship should be computed once when trait sample subsets match."""
+
+    output_dir = tmp_path / "gwas_loco_cache"
+    pipeline = GWASPipeline(output_dir=str(output_dir))
+
+    pipeline.load_data(
+        phenotype_file=str(synthetic_data['phenotype_file']),
+        genotype_file=str(synthetic_data['genotype_file']),
+        map_file=str(synthetic_data['map_file']),
+        trait_columns=['Height', 'Yield'],
+        genotype_format='csv',
+    )
+    pipeline.align_samples()
+
+    call_counter = {"count": 0}
+    real_fn = gwas_module.PANICLE_K_VanRaden_LOCO
+
+    def wrapped_loco(*args, **kwargs):
+        call_counter["count"] += 1
+        return real_fn(*args, **kwargs)
+
+    monkeypatch.setattr(gwas_module, "PANICLE_K_VanRaden_LOCO", wrapped_loco)
+
+    pipeline.run_analysis(
+        traits=['Height', 'Yield'],
+        methods=['MLM'],
+        outputs=['all_marker_pvalues'],
+    )
+
+    assert call_counter["count"] == 1

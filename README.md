@@ -245,7 +245,7 @@ Mixed Linear Model accounting for population structure and cryptic relatedness v
 - **Eigenspace transformation**: Data is transformed via eigendecomposition of the kinship matrix, converting the correlated mixed model into an equivalent weighted least squares problem.
 - **REML variance components**: Heritability (h²) is estimated using Brent's method optimization of the REML likelihood.
 
-**MLM_Hybrid** extends MLM with a two-phase approach: (1) fast Wald screening of all markers, (2) Likelihood Ratio Test (LRT) refinement for markers passing a screening threshold (default p < 1e-4). LRT re-estimates variance components per marker, providing more accurate p-values but would be slow to run for many millions of markers.
+**MLM_Hybrid** extends MLM with a two-phase approach: (1) fast Wald screening of all markers, (2) Likelihood Ratio Test (LRT) refinement for markers passing a screening threshold (default p < 5e-4). LRT re-estimates variance components per marker, with a GEMMA-inspired derivative solver available for faster exact refinement versus the legacy bounded-Brent optimizer.
 
 ### FarmCPU
 

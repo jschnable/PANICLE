@@ -31,7 +31,11 @@ import time
 import numpy as np
 from scipy import special
 
-from panicle.utils.data_types import GenotypeMatrix, AssociationResults
+from panicle.utils.data_types import (
+    GenotypeMatrix,
+    AssociationResults,
+    impute_numpy_batch_major_allele,
+)
 
 
 _PROFILE_GLM_BATCH = os.getenv("PANICLE_PROFILE_GLM_BATCH", "").lower() in {"1", "true", "yes"}
@@ -98,52 +102,12 @@ def _load_genotype_batch(
 def _impute_numpy_batch_major_allele(batch: np.ndarray,
                                      fill_value: Optional[float] = None,
                                      dtype: np.dtype = np.float64) -> np.ndarray:
-    """Impute -9/NaN values for a numpy genotype batch.
-
-    Args:
-        batch: Raw genotype slice (n_individuals × n_markers)
-        fill_value: Optional constant used to replace missing values. When
-            provided, this overrides the major-allele strategy used by rMVP
-            for backwards compatibility with legacy FarmCPU behaviour.
-        dtype: Output dtype for the returned array.
-    """
-    out_dtype = np.dtype(dtype)
-    G = np.array(batch, dtype=out_dtype, copy=True)
-    missing = (G == -9) | np.isnan(G)
-    if not missing.any():
-        return G
-
-    if fill_value is not None:
-        G[missing] = out_dtype.type(fill_value)
-        return G
-
-    # Default behaviour: impute with per-SNP major allele (matches rMVP C++ helpers)
-    with np.errstate(invalid="ignore"):
-        c0 = np.sum(G == 0, axis=0, dtype=np.int32)
-        c1 = np.sum(G == 1, axis=0, dtype=np.int32)
-        c2 = np.sum(G == 2, axis=0, dtype=np.int32)
-    counts = np.stack([c0, c1, c2], axis=0)
-    maj_idx = np.argmax(counts, axis=0)
-    maj_vals = maj_idx.astype(out_dtype)
-
-    # Columns containing unexpected genotype codes fallback to unique counts
-    valid_set_mask = (G == 0) | (G == 1) | (G == 2) | missing
-    col_has_other = ~np.all(valid_set_mask, axis=0)
-    if np.any(col_has_other):
-        cols = np.where(col_has_other)[0]
-        for j in cols:
-            col = G[:, j]
-            mm = (col == -9) | np.isnan(col)
-            non_missing = col[~mm]
-            if non_missing.size > 0:
-                vals, cnts = np.unique(non_missing, return_counts=True)
-                maj = vals[int(np.argmax(cnts))]
-            else:
-                maj = out_dtype.type(0.0)
-            maj_vals[j] = out_dtype.type(maj)
-
-    G[missing] = np.broadcast_to(maj_vals, G.shape)[missing]
-    return G
+    """Backward-compatible wrapper around shared numpy imputation helper."""
+    return impute_numpy_batch_major_allele(
+        batch,
+        fill_value=fill_value,
+        dtype=dtype,
+    )
 
 
 def _compute_qr(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

@@ -178,6 +178,68 @@ def impute_major_allele_inplace(geno: np.ndarray, missing_value: int = -9) -> in
     return n_missing
 
 
+def impute_numpy_batch_major_allele(
+    batch: np.ndarray,
+    *,
+    fill_value: Optional[float] = None,
+    dtype: np.dtype = np.float64,
+) -> np.ndarray:
+    """Impute -9/NaN values for a numpy genotype batch.
+
+    This mirrors the major-allele strategy used by ``GenotypeMatrix`` imputation
+    paths so callers get consistent behavior regardless of genotype container type.
+
+    Args:
+        batch: Raw genotype slice with shape (n_individuals, n_markers_in_batch).
+        fill_value: Optional constant used to replace missing values. If None,
+            per-marker major allele is used.
+        dtype: Output dtype for the returned array.
+    """
+    out_dtype = np.dtype(dtype)
+    G = np.array(batch, dtype=out_dtype, copy=True)
+
+    if G.size == 0:
+        return G
+
+    missing = (G == -9) | np.isnan(G)
+    if not missing.any():
+        return G
+
+    if fill_value is not None:
+        G[missing] = out_dtype.type(fill_value)
+        return G
+
+    # Fast path for canonical diploid encoding {0,1,2,-9,NaN}.
+    valid_set_mask = (G == 0) | (G == 1) | (G == 2) | missing
+    if np.all(valid_set_mask):
+        with np.errstate(invalid="ignore"):
+            c0 = np.sum(G == 0, axis=0, dtype=np.int32)
+            c1 = np.sum(G == 1, axis=0, dtype=np.int32)
+            c2 = np.sum(G == 2, axis=0, dtype=np.int32)
+        counts = np.stack([c0, c1, c2], axis=0)
+        major = np.argmax(counts, axis=0).astype(out_dtype, copy=False)
+        G[missing] = np.broadcast_to(major, G.shape)[missing]
+        return G
+
+    # Fallback for unexpected genotype coding: pick the mode among non-missing.
+    n_markers = G.shape[1]
+    for j in range(n_markers):
+        col = G[:, j]
+        miss = missing[:, j]
+        if not miss.any():
+            continue
+        non_missing = col[~miss]
+        if non_missing.size == 0:
+            maj = out_dtype.type(0.0)
+        else:
+            vals, cnts = np.unique(non_missing, return_counts=True)
+            maj = out_dtype.type(vals[int(np.argmax(cnts))])
+        col[miss] = maj
+        G[:, j] = col
+
+    return G
+
+
 class GenotypeMatrix:
     """Memory-efficient genotype matrix with lazy loading support
 
@@ -563,7 +625,8 @@ class AssociationResults:
     """
     
     def __init__(self, effects: np.ndarray, se: np.ndarray, pvalues: np.ndarray,
-                 snp_map: Optional[GenotypeMap] = None):
+                 snp_map: Optional[GenotypeMap] = None,
+                 metadata: Optional[Dict[str, Any]] = None):
         
         # Validate lengths (first dimension must match)
         n = len(effects)
@@ -576,6 +639,7 @@ class AssociationResults:
         self.se = se  
         self.pvalues = pvalues
         self.snp_map = snp_map
+        self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
     
     @property
     def n_markers(self) -> int:
