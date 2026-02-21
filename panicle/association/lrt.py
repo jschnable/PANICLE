@@ -817,22 +817,32 @@ def _profile_ml_state_batch_schur(
     # Gradient term: y'PMPy using Schur-decomposed moments to avoid building
     # the full (n x m) residual matrix.
     coeff = m_diag * (inv_var * inv_var)
-    r0 = y - (X @ a_inv_q)
-    np.multiply(coeff, r0, out=coeff_r0)
-    c0 = float(np.dot(r0, coeff_r0))
+    # Some NumPy+Accelerate builds can emit spurious RuntimeWarning
+    # "... encountered in matmul" while still producing valid outputs.
+    # Suppress only those warnings for this local block.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*encountered in matmul",
+            category=RuntimeWarning,
+        )
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            r0 = y - (X @ a_inv_q)
+            np.multiply(coeff, r0, out=coeff_r0)
+            c0 = float(np.dot(r0, coeff_r0))
 
-    # Reuse weighted genotype buffer for coeff-weighted terms.
-    np.multiply(coeff[:, np.newaxis], G, out=weighted_g)
-    d = weighted_g.T @ r0
-    k = X.T @ coeff_r0
-    c1 = d - np.sum(a_inv_B * k[:, np.newaxis], axis=0)
+            # Reuse weighted genotype buffer for coeff-weighted terms.
+            np.multiply(coeff[:, np.newaxis], G, out=weighted_g)
+            d = weighted_g.T @ r0
+            k = X.T @ coeff_r0
+            c1 = d - np.sum(a_inv_B * k[:, np.newaxis], axis=0)
 
-    g2 = np.sum(G * weighted_g, axis=0)
-    xcg = X.T @ weighted_g
-    term2 = np.sum(a_inv_B * xcg, axis=0)
-    xcx = X.T @ (coeff[:, np.newaxis] * X)
-    term3 = np.sum(a_inv_B * (xcx @ a_inv_B), axis=0)
-    c2 = g2 - (2.0 * term2) + term3
+            g2 = np.sum(G * weighted_g, axis=0)
+            xcg = X.T @ weighted_g
+            term2 = np.sum(a_inv_B * xcg, axis=0)
+            xcx = X.T @ (coeff[:, np.newaxis] * X)
+            term3 = np.sum(a_inv_B * (xcx @ a_inv_B), axis=0)
+            c2 = g2 - (2.0 * term2) + term3
 
     beta_sq = beta_marker * beta_marker
     a1 = c0 - (2.0 * beta_marker * c1) + (beta_sq * c2)

@@ -484,10 +484,21 @@ def PANICLE_MLM(phe: np.ndarray,
     V_eigenvals = eig_safe + delta_hat
     weights_f32 = (1.0 / V_eigenvals).astype(np.float32)
 
-    # Pre-compute weighted design terms (constant across batches)
+    # Pre-compute weighted design terms (constant across batches).
     XTW_f32 = X_f32.T * weights_f32
-    UXWUX_f32 = XTW_f32 @ X_f32
-    UXWy_f32 = XTW_f32 @ y_f32
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*encountered in matmul",
+            category=RuntimeWarning,
+        )
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            UXWUX_f32 = XTW_f32 @ X_f32
+            UXWy_f32 = XTW_f32 @ y_f32
+    # Keep fast float32 path by default, but fall back if output is non-finite.
+    if (not np.all(np.isfinite(UXWUX_f32))) or (not np.all(np.isfinite(UXWy_f32))):
+        UXWUX_f32 = (XTW_f32.astype(np.float64) @ X_f32.astype(np.float64)).astype(np.float32)
+        UXWy_f32 = (XTW_f32.astype(np.float64) @ y_f32.astype(np.float64)).astype(np.float32)
     UXWUX_f64 = UXWUX_f32.astype(np.float64)
     UXWy_f64 = UXWy_f32.astype(np.float64)
     wy_f32 = weights_f32 * y_f32
