@@ -23,7 +23,14 @@ try:
     import numpy as np
 except Exception:
     raise ImportError("NumPy is required: pip install numpy")
-from panicle.utils.data_types import impute_major_allele_inplace
+from panicle.utils.data_types import (
+    CHROM_COLUMN,
+    LEGACY_MARKER_ID_COLUMN,
+    MARKER_ID_COLUMN,
+    POS_COLUMN,
+    canonicalize_genotype_map_dataframe,
+    impute_major_allele_inplace,
+)
 
 MISSING = -9
 
@@ -150,6 +157,7 @@ def load_genotype_hapmap(
                         individual_ids = [line.strip() for line in f]
                     import pandas as pd  # type: ignore
                     geno_map = pd.read_csv(cache_map)
+                    geno_map = canonicalize_genotype_map_dataframe(geno_map)
                     geno_map.attrs["is_imputed"] = True
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:
@@ -216,9 +224,10 @@ def load_genotype_hapmap(
 
             columns.append(geno.astype(np.int8, copy=False))
             map_rows.append({
-                'SNP': rsid,
-                'CHROM': str(chrom),
-                'POS': int(pos),
+                MARKER_ID_COLUMN: rsid,
+                LEGACY_MARKER_ID_COLUMN: rsid,
+                CHROM_COLUMN: str(chrom),
+                POS_COLUMN: int(pos),
                 'REF': a_ref,
                 'ALT': a_alt,
             })
@@ -233,7 +242,18 @@ def load_genotype_hapmap(
     if return_pandas:
         try:
             import pandas as pd  # type: ignore
-            geno_map = pd.DataFrame(map_rows, columns=['SNP','CHROM','POS','REF','ALT'])
+            geno_map = pd.DataFrame(
+                map_rows,
+                columns=[
+                    MARKER_ID_COLUMN,
+                    LEGACY_MARKER_ID_COLUMN,
+                    CHROM_COLUMN,
+                    POS_COLUMN,
+                    'REF',
+                    'ALT',
+                ],
+            )
+            geno_map = canonicalize_genotype_map_dataframe(geno_map)
         except Exception:
             geno_map = map_rows
     else:

@@ -7,7 +7,7 @@ Dependencies:
 
 Conventions:
     - Genotypes coded 0/1/2 for copies of ALT allele; missing as -9 (int8)
-    - .bim columns used to build map with columns ['SNP','CHROM','POS','REF','ALT']
+    - .bim columns used to build map with columns ['MARKER','CHROM','POS','REF','ALT']
       where REF = A2 and ALT = A1 from BIM (PLINK convention)
     - .fam provides sample IDs (IID by default)
 
@@ -24,7 +24,14 @@ try:
     import numpy as np
 except Exception:
     raise ImportError("NumPy is required: pip install numpy")
-from panicle.utils.data_types import impute_major_allele_inplace
+from panicle.utils.data_types import (
+    CHROM_COLUMN,
+    LEGACY_MARKER_ID_COLUMN,
+    MARKER_ID_COLUMN,
+    POS_COLUMN,
+    canonicalize_genotype_map_dataframe,
+    impute_major_allele_inplace,
+)
 
 MISSING = -9
 
@@ -76,16 +83,28 @@ def _read_bim_map(bim_path: Path, return_pandas: bool):
                 continue
             chrom, snp, _cm, pos, a1, a2 = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
             rows.append({
-                'SNP': snp,
-                'CHROM': str(chrom),
-                'POS': int(float(pos)),
+                MARKER_ID_COLUMN: snp,
+                LEGACY_MARKER_ID_COLUMN: snp,
+                CHROM_COLUMN: str(chrom),
+                POS_COLUMN: int(float(pos)),
                 'REF': a2,
                 'ALT': a1,
             })
     if return_pandas:
         try:
             import pandas as pd  # type: ignore
-            return pd.DataFrame(rows, columns=['SNP', 'CHROM', 'POS', 'REF', 'ALT'])
+            map_df = pd.DataFrame(
+                rows,
+                columns=[
+                    MARKER_ID_COLUMN,
+                    LEGACY_MARKER_ID_COLUMN,
+                    CHROM_COLUMN,
+                    POS_COLUMN,
+                    'REF',
+                    'ALT',
+                ],
+            )
+            return canonicalize_genotype_map_dataframe(map_df)
         except Exception:
             pass
     return rows
@@ -142,6 +161,7 @@ def load_genotype_plink(
                         individual_ids = [line.strip() for line in f]
                     import pandas as pd  # type: ignore
                     geno_map = pd.read_csv(cache_map)
+                    geno_map = canonicalize_genotype_map_dataframe(geno_map)
                     geno_map.attrs["is_imputed"] = True
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:

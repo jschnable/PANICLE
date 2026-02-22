@@ -70,7 +70,7 @@ Supported formats:
 - **Plink**: Binary plink format (.bed/.bim/.fam)
 
 ### Genetic Map File Format (Optional but recommended)
-CSV/TSV with `SNP`, `CHROM`, and `POS` columns (case-insensitive aliases like `Chr`, `Pos` are accepted).
+CSV/TSV with `MARKER`, `CHROM`, and `POS` columns (legacy `SNP` and aliases like `Chr`, `Pos` are accepted).
 Recommended for numeric genotype matrices and for LOCO-based methods like `MLM`.
 
 ## Understanding the Output
@@ -80,7 +80,7 @@ After running the analysis, your output directory will contain:
 ```
 my_gwas_results/
 ├── GWAS_Height_all_results.csv        # Full results for Height
-├── GWAS_Height_significant.csv           # Only significant SNPs
+├── GWAS_Height_significant.csv           # Only significant markers
 ├── GWAS_Height_GLM_manhattan.png         # Manhattan plot
 ├── GWAS_Height_GLM_qq.png                # QQ plot
 ├── GWAS_FloweringTime_all_results.csv # Full results for FloweringTime
@@ -98,7 +98,7 @@ import pandas as pd
 results = pd.read_csv('my_gwas_results/GWAS_Height_all_results.csv')
 
 # Results contain:
-# - SNP: Marker ID
+# - MARKER: Marker ID (legacy SNP alias also present)
 # - CHROM: Chromosome
 # - POS: Position
 # - MAF: Minor allele frequency
@@ -107,13 +107,13 @@ results = pd.read_csv('my_gwas_results/GWAS_Height_all_results.csv')
 # - MLM_P: P-values from MLM (if you ran it)
 # - MLM_Effect: Effect sizes from MLM
 
-# Get significant SNPs (p < 0.05/n_markers Bonferroni)
-sig_snps = results[results['GLM_P'] < 0.05 / len(results)]
-print(f"Found {len(sig_snps)} significant SNPs")
+# Get significant markers (p < 0.05/n_markers Bonferroni)
+sig_markers = results[results['GLM_P'] < 0.05 / len(results)]
+print(f"Found {len(sig_markers)} significant markers")
 
 # Top 10 most significant
-top_snps = results.nsmallest(10, 'GLM_P')
-print(top_snps[['SNP', 'CHROM', 'POS', 'GLM_P', 'GLM_Effect']])
+top_markers = results.nsmallest(10, 'GLM_P')
+print(top_markers[['MARKER', 'CHROM', 'POS', 'GLM_P', 'GLM_Effect']])
 ```
 
 ## Common Analysis Scenarios
@@ -233,7 +233,7 @@ pipeline.load_data(
     }
 )
 
-# The pipeline will use M_eff instead of total SNPs for Bonferroni
+# The pipeline will use M_eff instead of total markers for Bonferroni
 pipeline.run_analysis(
     traits=['MyTrait'],
     methods=['MLM'],
@@ -323,7 +323,7 @@ do it ahead of time.
 
 ## Next Steps
 
-- **Try the [Sorghum GWAS Tutorial](sorghum_gwas_tutorial.ipynb)**: Interactive Jupyter notebook with real data
+- **Try the [Sorghum GWAS Tutorial](gwas_sorghum_tutorial.ipynb)**: Interactive Jupyter notebook with real data
 - **See [examples/](../examples/)**: More detailed example scripts with test data
 - **See [api_reference.md](api_reference.md)**: Complete API documentation
 - **See [output_files.md](output_files.md)**: Detailed output format specifications

@@ -33,7 +33,14 @@ try:
     import numpy as np
 except Exception as e:  # pragma: no cover
     raise ImportError("NumPy is required: pip install numpy")
-from panicle.utils.data_types import impute_major_allele_inplace
+from panicle.utils.data_types import (
+    CHROM_COLUMN,
+    LEGACY_MARKER_ID_COLUMN,
+    MARKER_ID_COLUMN,
+    POS_COLUMN,
+    canonicalize_genotype_map_dataframe,
+    impute_major_allele_inplace,
+)
 
 
 MISSING = -9
@@ -373,6 +380,7 @@ def load_genotype_vcf(
 
                     # Load Map
                     geno_map = pd.read_csv(cache_map)
+                    geno_map = canonicalize_genotype_map_dataframe(geno_map)
 
                     # Mark that this data is from v2 cache (pre-imputed, no -9 values)
                     geno_map.attrs['is_imputed'] = True
@@ -476,10 +484,12 @@ def load_genotype_vcf(
         if writer is None:
             writer = _DynamicInt8MatrixWriter(len(individual_ids))
         writer.append(col)
+        marker_id = _build_snp_id(chrom, pos, vid, ref, alt)
         map_rows.append({
-            'SNP': _build_snp_id(chrom, pos, vid, ref, alt),
-            'CHROM': str(chrom),
-            'POS': int(pos),
+            MARKER_ID_COLUMN: marker_id,
+            LEGACY_MARKER_ID_COLUMN: marker_id,
+            CHROM_COLUMN: str(chrom),
+            POS_COLUMN: int(pos),
             'REF': ref,
             'ALT': alt,
         })
@@ -524,10 +534,12 @@ def load_genotype_vcf(
             if writer is None:
                 writer = _DynamicInt8MatrixWriter(len(individual_ids))
             writer.append(col)
+            marker_id = _build_snp_id(chrom, pos, vid, ref, alt)
             map_rows.append({
-                'SNP': _build_snp_id(chrom, pos, vid, ref, alt),
-                'CHROM': str(chrom),
-                'POS': int(pos),
+                MARKER_ID_COLUMN: marker_id,
+                LEGACY_MARKER_ID_COLUMN: marker_id,
+                CHROM_COLUMN: str(chrom),
+                POS_COLUMN: int(pos),
                 'REF': ref,
                 'ALT': alt,
             })
@@ -832,7 +844,18 @@ def load_genotype_vcf(
     if return_pandas:
         try:
             import pandas as pd  # type: ignore
-            geno_map = pd.DataFrame(map_rows, columns=['SNP', 'CHROM', 'POS', 'REF', 'ALT'])
+            geno_map = pd.DataFrame(
+                map_rows,
+                columns=[
+                    MARKER_ID_COLUMN,
+                    LEGACY_MARKER_ID_COLUMN,
+                    CHROM_COLUMN,
+                    POS_COLUMN,
+                    'REF',
+                    'ALT',
+                ],
+            )
+            geno_map = canonicalize_genotype_map_dataframe(geno_map)
         except Exception:
             geno_map = map_rows
     else:

@@ -116,11 +116,11 @@ def _numeric_chromosomes(chrom_series: "pd.Series") -> np.ndarray:
 #         .subset_individuals(indices) -> new GenotypeMatrix for subset
 #
 # GenotypeMap:
-#     SNP map information with chromosome and position data.
-#     - Required columns in underlying DataFrame: ['SNP', 'CHROM', 'POS']
+#     Marker map information with chromosome and position data.
+#     - Required columns in underlying DataFrame: ['MARKER', 'CHROM', 'POS']
 #     - Optional columns: 'REF', 'ALT'
 #     - Key properties:
-#         .snp_ids -> pd.Series of SNP identifiers
+#         .marker_ids -> pd.Series of marker identifiers
 #         .chromosomes -> pd.Series of chromosome values
 #         .positions -> pd.Series of physical positions (bp)
 #         .n_markers -> int
@@ -135,11 +135,11 @@ def _numeric_chromosomes(chrom_series: "pd.Series") -> np.ndarray:
 #         .effects -> np.ndarray of effect sizes (beta coefficients)
 #         .se -> np.ndarray of standard errors
 #         .pvalues -> np.ndarray of p-values
-#         .snp_map -> Optional[GenotypeMap] for SNP annotations
+#         .snp_map -> Optional[GenotypeMap] for marker annotations
 #         .n_markers -> int
 #     - Key methods:
 #         .to_dataframe() -> pd.DataFrame with columns:
-#             If snp_map provided: ['SNP', 'Chr', 'Pos', 'Effect', 'SE', 'P-value']
+#             If snp_map provided: ['MARKER', 'SNP', 'Chr', 'Pos', 'Effect', 'SE', 'P-value']
 #             Otherwise: ['Effect', 'SE', 'P-value']
 #         .to_numpy() -> np.ndarray of shape (n_markers, 3) [Effect, SE, P-value]
 #
@@ -235,7 +235,7 @@ def _farmcpu_specify(
     use_t_stats: bool = False,
     _cached_bin_ids: np.ndarray = None
 ) -> np.ndarray:
-    """Identify representative SNPs from genomic bins.
+    """Identify representative markers from genomic bins.
 
     Optimized strategy using argsort + segment-wise reduction (~17x faster than lexsort):
     1. Sort markers by bin_id only (not lexsort on two keys)
@@ -243,7 +243,7 @@ def _farmcpu_specify(
     3. Find marker indices for best stats using vectorized operations
 
     Args:
-        map_data: SNP map with chromosome and position info
+        map_data: Marker map with chromosome and position info
         P: P-values (or |t|-statistics if use_t_stats=True) for all markers
         bin_size: Size of genomic bins in base pairs
         inclosure_size: Maximum number of bins to select
@@ -337,7 +337,7 @@ def _farmcpu_remove(
 
     Args:
         geno: Genotype matrix (n_individuals × n_markers)
-        map_data: SNP map information
+        map_data: Marker map information
         seq_qtn: Indices of candidate pseudo-QTNs
         seq_qtn_p: P-values (or |t|-statistics if use_t_stats=True) for candidate pseudo-QTNs
         threshold: Correlation threshold for removing markers
@@ -450,7 +450,7 @@ def _farmcpu_bin(
     Args:
         phe: Phenotype matrix
         geno: Genotype matrix
-        map_data: SNP map information
+        map_data: Marker map information
         CV: Covariates
         P: Current p-values (or |t|-statistics if use_t_stats=True)
         method: Binning method ("static", "EMMA", "FaST-LMM")
@@ -757,7 +757,7 @@ def PANICLE_FarmCPU(phe: np.ndarray,
     Args:
         phe: Phenotype matrix (n_individuals × 2), columns [ID, trait_value]
         geno: Genotype matrix (n_individuals × n_markers)
-        map_data: Genetic map with SNP positions
+        map_data: Genetic map with marker positions
         CV: Covariate matrix (n_individuals × n_covariates), optional
         maxLoop: Maximum number of iterations
         p_threshold: P-value threshold for significance in first iteration.
@@ -911,7 +911,7 @@ def PANICLE_FarmCPU(phe: np.ndarray,
             seq_qtn = np.array([], dtype=int)
 
         # Step 3: Early stopping check (R: theLoop==2 check)
-        # Now uses t-statistics: max(|t|) < t_critical means no significant SNPs
+        # Now uses t-statistics: max(|t|) < t_critical means no significant markers
         if the_loop == 2:
             if my_prior is not None:
                 max_t = np.nanmax(my_prior)  # my_prior contains |t|-statistics
@@ -923,7 +923,7 @@ def PANICLE_FarmCPU(phe: np.ndarray,
                 if max_t < t_crit_early_stop:
                     seq_qtn = np.array([], dtype=int)
                     if verbose:
-                        print("Top SNPs have little effect, set seqQTN to NULL!")
+                        print("Top markers have little effect, set seqQTN to NULL!")
 
             # If no QTNs after early stopping check, return first iteration's GLM results
             if len(seq_qtn) == 0:

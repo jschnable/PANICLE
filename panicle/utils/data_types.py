@@ -4,8 +4,91 @@ Core data structures for PANICLE package
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Union, Tuple, Dict, Any, List
+from typing import Optional, Union, Tuple, Dict, Any, List, Sequence
 from pathlib import Path
+
+
+MARKER_ID_COLUMN = "MARKER"
+LEGACY_MARKER_ID_COLUMN = "SNP"
+CHROM_COLUMN = "CHROM"
+POS_COLUMN = "POS"
+
+_MARKER_COLUMN_ALIASES = ("MARKER", "marker", "Marker", "SNP", "snp", "rs", "RS")
+_CHROM_COLUMN_ALIASES = ("CHROM", "Chr", "chr", "chromosome", "CHR")
+_POS_COLUMN_ALIASES = ("POS", "Pos", "pos", "position", "bp")
+
+
+def _first_present(columns: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def infer_marker_id_column(columns: Sequence[str]) -> Optional[str]:
+    """Return the first marker-ID column name found in ``columns``."""
+    return _first_present(columns, _MARKER_COLUMN_ALIASES)
+
+
+def canonicalize_genotype_map_dataframe(
+    df: pd.DataFrame,
+    *,
+    include_legacy_snp_alias: bool = True,
+) -> pd.DataFrame:
+    """Normalize map column names to PANICLE's canonical marker schema.
+
+    Canonical required columns are ``MARKER``, ``CHROM``, and ``POS``.
+    For compatibility, the legacy ``SNP`` alias can be retained.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError("Genotype map data must be a pandas DataFrame")
+
+    out = df.copy()
+    cols = list(out.columns)
+
+    marker_col = _first_present(cols, _MARKER_COLUMN_ALIASES)
+    chrom_col = _first_present(cols, _CHROM_COLUMN_ALIASES)
+    pos_col = _first_present(cols, _POS_COLUMN_ALIASES)
+
+    if marker_col is None:
+        raise ValueError(
+            f"Missing required marker ID column. Accepted aliases: {list(_MARKER_COLUMN_ALIASES)}"
+        )
+    if chrom_col is None:
+        raise ValueError(
+            f"Missing required chromosome column. Accepted aliases: {list(_CHROM_COLUMN_ALIASES)}"
+        )
+    if pos_col is None:
+        raise ValueError(
+            f"Missing required position column. Accepted aliases: {list(_POS_COLUMN_ALIASES)}"
+        )
+
+    rename_map: Dict[str, str] = {}
+    if marker_col != MARKER_ID_COLUMN:
+        rename_map[marker_col] = MARKER_ID_COLUMN
+    if chrom_col != CHROM_COLUMN:
+        rename_map[chrom_col] = CHROM_COLUMN
+    if pos_col != POS_COLUMN:
+        rename_map[pos_col] = POS_COLUMN
+    if rename_map:
+        out = out.rename(columns=rename_map)
+
+    if LEGACY_MARKER_ID_COLUMN in out.columns:
+        marker_equal = out[MARKER_ID_COLUMN].astype(str).equals(
+            out[LEGACY_MARKER_ID_COLUMN].astype(str)
+        )
+        if not marker_equal:
+            raise ValueError(
+                f"Columns '{MARKER_ID_COLUMN}' and '{LEGACY_MARKER_ID_COLUMN}' contain different values"
+            )
+    elif include_legacy_snp_alias:
+        out[LEGACY_MARKER_ID_COLUMN] = out[MARKER_ID_COLUMN].astype(str)
+
+    base_cols = [MARKER_ID_COLUMN, CHROM_COLUMN, POS_COLUMN]
+    if LEGACY_MARKER_ID_COLUMN in out.columns:
+        base_cols.append(LEGACY_MARKER_ID_COLUMN)
+    remaining_cols = [c for c in out.columns if c not in base_cols]
+    return out[base_cols + remaining_cols]
 
 class Phenotype:
     """Phenotype data structure compatible with R rMVP format
@@ -107,42 +190,46 @@ class Phenotype:
 
 
 class GenotypeMap:
-    """SNP map information compatible with R rMVP format
+    """Marker map information compatible with R rMVP format.
 
-    Required columns: [SNP, CHROM, POS]
+    Required columns: [MARKER, CHROM, POS]
     Optional columns: [REF, ALT]
     """
     
     def __init__(self, data: Union[pd.DataFrame, str, Path], metadata: Optional[Dict[str, Any]] = None):
         if isinstance(data, (str, Path)):
-            self.data = pd.read_csv(data)
+            raw_df = pd.read_csv(data)
         elif isinstance(data, pd.DataFrame):
-            self.data = data.copy()
+            raw_df = data.copy()
         else:
             raise ValueError("Data must be DataFrame or file path")
 
         self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
-            
-        # Validate required columns
-        required_cols = ['SNP', 'CHROM', 'POS']
-        for col in required_cols:
-            if col not in self.data.columns:
-                raise ValueError(f"Missing required column: {col}")
+
+        self.data = canonicalize_genotype_map_dataframe(
+            raw_df,
+            include_legacy_snp_alias=True,
+        )
     
     @property
+    def marker_ids(self) -> pd.Series:
+        """Marker identifiers."""
+        return self.data[MARKER_ID_COLUMN]
+
+    @property
     def snp_ids(self) -> pd.Series:
-        """SNP identifiers"""
-        return self.data['SNP']
+        """Legacy alias for marker identifiers."""
+        return self.marker_ids
     
     @property
     def chromosomes(self) -> pd.Series:
         """Chromosome numbers"""
-        return self.data['CHROM']
+        return self.data[CHROM_COLUMN]
     
     @property
     def positions(self) -> pd.Series:
         """Physical positions"""
-        return self.data['POS']
+        return self.data[POS_COLUMN]
     
     @property
     def n_markers(self) -> int:
@@ -577,7 +664,7 @@ class GenotypeMatrix:
                              dtype: np.dtype = np.float64) -> np.ndarray:
         """Get arbitrary marker columns with missing data imputed.
 
-        Optimized for fetching non-contiguous SNPs (e.g., pseudo-QTNs) in one call.
+        Optimized for fetching non-contiguous markers (e.g., pseudo-QTNs) in one call.
         Returns an array of shape (n_individuals, len(indices)) with requested dtype.
         """
         if isinstance(indices, list):
@@ -655,10 +742,22 @@ class AssociationResults:
         })
         
         if self.snp_map is not None:
-            df['SNP'] = self.snp_map.snp_ids.values
+            marker_values = self.snp_map.marker_ids.values
+            df[MARKER_ID_COLUMN] = marker_values
+            # Keep legacy column for backward compatibility.
+            df[LEGACY_MARKER_ID_COLUMN] = marker_values
             df['Chr'] = self.snp_map.chromosomes.values  
             df['Pos'] = self.snp_map.positions.values
-            df = df[['SNP', 'Chr', 'Pos', 'Effect', 'SE', 'P-value']]
+            ordered_cols = [
+                MARKER_ID_COLUMN,
+                LEGACY_MARKER_ID_COLUMN,
+                'Chr',
+                'Pos',
+                'Effect',
+                'SE',
+                'P-value',
+            ]
+            df = df[ordered_cols]
             
         return df
     

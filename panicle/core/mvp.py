@@ -9,7 +9,16 @@ from typing import Optional, List, Dict, Union, Any, Tuple
 from pathlib import Path
 import warnings
 
-from ..utils.data_types import Phenotype, GenotypeMatrix, GenotypeMap, KinshipMatrix, AssociationResults
+from ..utils.data_types import (
+    MARKER_ID_COLUMN,
+    LEGACY_MARKER_ID_COLUMN,
+    infer_marker_id_column,
+    Phenotype,
+    GenotypeMatrix,
+    GenotypeMap,
+    KinshipMatrix,
+    AssociationResults,
+)
 from ..data.loaders import load_genotype_file
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
@@ -753,8 +762,12 @@ def save_results_to_files(results: Dict[str, Any],
 
                 # Add map information if available
                 if map_df is not None:
-                    if 'SNP' not in result_df.columns:
-                        result_df['SNP'] = map_df['SNP'].values[:len(result_df)]
+                    marker_col = infer_marker_id_column(map_df.columns)
+                    if marker_col is not None:
+                        if MARKER_ID_COLUMN not in result_df.columns:
+                            result_df[MARKER_ID_COLUMN] = map_df[marker_col].values[:len(result_df)]
+                        if LEGACY_MARKER_ID_COLUMN not in result_df.columns:
+                            result_df[LEGACY_MARKER_ID_COLUMN] = result_df[MARKER_ID_COLUMN].astype(str)
                     if 'Chr' not in result_df.columns and 'CHROM' in map_df.columns:
                         result_df['Chr'] = map_df['CHROM'].values[:len(result_df)]
                     if 'Pos' not in result_df.columns and 'POS' in map_df.columns:

@@ -17,7 +17,13 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from scipy import stats
 
-from ..utils.data_types import AssociationResults, GenotypeMap, GenotypeMatrix
+from ..utils.data_types import (
+    MARKER_ID_COLUMN,
+    AssociationResults,
+    GenotypeMap,
+    GenotypeMatrix,
+    infer_marker_id_column,
+)
 from ..utils.stats import calculate_maf_from_genotypes
 from .glm import PANICLE_GLM
 
@@ -66,7 +72,7 @@ def PANICLE_BLINK(
     Args:
         phe: Phenotype matrix (n_individuals × 2), columns [ID, trait_value]
         geno: Genotype matrix (n_individuals × n_markers) or GenotypeMatrix
-        map_data: Genetic map describing SNPs
+        map_data: Genetic map describing markers
         CV: Optional covariates (n_individuals × n_covariates)
         Prior: Optional prior information (SNP, Chr, Pos, weight)
         maxLoop: Maximum BLINK iterations
@@ -706,9 +712,9 @@ def _farmcpu_prior_simple(
     Apply prior information matching R reference FarmCPU.Prior logic.
 
     Args:
-        genetic_map: Genetic map DataFrame with SNP column
+        genetic_map: Genetic map DataFrame with marker ID column
         pvalues: P-values array to modify
-        prior_info: Prior information with SNP names and weights
+        prior_info: Prior information with marker names and weights
         kinship_algorithm: Algorithm name (used for early returns)
 
     Returns:
@@ -739,17 +745,20 @@ def _farmcpu_prior_simple(
             return pvalues
 
         # Ensure proper column names
-        prior_df.columns = ["SNP", "Chr", "Pos", "Weight"] + list(prior_df.columns[4:])
+        prior_df.columns = [MARKER_ID_COLUMN, "Chr", "Pos", "Weight"] + list(prior_df.columns[4:])
+        marker_col = infer_marker_id_column(genetic_map.columns)
+        if marker_col is None:
+            raise ValueError("genetic_map must contain a marker ID column")
 
         # R reference: index=match(Prior[,1],GM[,1],nomatch = 0)
         updated_pvalues = pvalues.copy()
 
         for _, prior_row in prior_df.iterrows():
-            prior_snp = prior_row["SNP"]
+            prior_snp = prior_row[MARKER_ID_COLUMN]
             weight = float(prior_row["Weight"])
 
-            # Find matching SNP in genetic map - R uses nomatch=0 (no match)
-            matches = genetic_map["SNP"] == prior_snp
+            # Find matching marker in genetic map - R uses nomatch=0 (no match)
+            matches = genetic_map[marker_col] == prior_snp
             if matches.any():
                 matching_indices = np.where(matches)[0]
                 for idx in matching_indices:
@@ -1322,7 +1331,7 @@ def _apply_substitution_r_style(
     Args:
         result_array: GLM results matrix (n_markers x n_columns)
         selected_qtns: List of selected QTN indices
-        genetic_map: Genetic map array with SNP names
+        genetic_map: Genetic map array with marker names
         qtn_history: History of QTN statistics across iterations
         method_sub: Substitution method ("reward", "penalty", "mean", "median", "onsite")
         model: Model type ("A" for additive)

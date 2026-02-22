@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from ..utils.data_types import GenotypeMap, GenotypeMatrix
+from ..utils.data_types import LEGACY_MARKER_ID_COLUMN, MARKER_ID_COLUMN, GenotypeMap, GenotypeMatrix
 from .farmcpu import PANICLE_FarmCPU
 
 
@@ -27,7 +27,8 @@ class FarmCPUResamplingEntry:
 
     def to_row(self, trait_name: str, include_cluster_details: bool) -> Dict[str, Union[str, int, float]]:
         row = {
-            "SNP": self.snp,
+            MARKER_ID_COLUMN: self.snp,
+            LEGACY_MARKER_ID_COLUMN: self.snp,
             "Chr": self.chrom,
             "Pos": self.pos,
             "RMIP": float(self.rmip),
@@ -82,7 +83,7 @@ class FarmCPUResamplingResults:
         include_cluster_details = self.cluster_mode
         rows = [entry.to_row(self.trait_name, include_cluster_details) for entry in self.entries]
         if not rows:
-            columns = ["SNP", "Chr", "Pos", "RMIP", "Trait"]
+            columns = [MARKER_ID_COLUMN, LEGACY_MARKER_ID_COLUMN, "Chr", "Pos", "RMIP", "Trait"]
             if include_cluster_details:
                 columns.append("ClusterMembers")
             return pd.DataFrame(columns=columns)
@@ -99,7 +100,7 @@ class FarmCPUResamplingResults:
 
 
 def _ensure_map_arrays(map_data: GenotypeMap) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    snp_ids = map_data.snp_ids.values
+    snp_ids = map_data.marker_ids.values
     chroms = map_data.chromosomes.values
     positions = map_data.positions.values
     return snp_ids, chroms, positions

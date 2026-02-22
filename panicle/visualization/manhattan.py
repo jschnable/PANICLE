@@ -9,7 +9,11 @@ from typing import Optional, Union, Dict, List, Tuple
 import warnings
 import re
 
-from ..utils.data_types import AssociationResults, GenotypeMap
+from ..utils.data_types import (
+    AssociationResults,
+    GenotypeMap,
+    infer_marker_id_column,
+)
 from ..association.farmcpu_resampling import FarmCPUResamplingResults
 from ..utils.stats import genomic_inflation_factor
 
@@ -760,10 +764,13 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
     if true_qtns is not None and map_data is not None:
         try:
             map_df = map_data.to_dataframe()
-            snp_names = map_df['SNP'].values[:len(log_pvalues)]
+            marker_col = infer_marker_id_column(map_df.columns)
+            if marker_col is None:
+                raise KeyError("Map data does not contain a marker ID column")
+            marker_names = map_df[marker_col].values[:len(log_pvalues)]
             
             # Find true QTNs in the data
-            qtn_mask = np.isin(snp_names, true_qtns)
+            qtn_mask = np.isin(marker_names, true_qtns)
             if np.any(qtn_mask):
                 qtn_positions = cumulative_pos[qtn_mask]
                 qtn_log_pvals = log_pvalues[qtn_mask]

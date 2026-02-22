@@ -22,7 +22,7 @@ Welcome to the PANICLE documentation! This guide will help you perform genome-wi
   - Working with output in Python/R
 
 ### Tutorials & Examples
-- **[Sorghum GWAS Tutorial](sorghum_gwas_tutorial.ipynb)** - Interactive Jupyter notebook
+- **[Sorghum GWAS Tutorial](gwas_sorghum_tutorial.ipynb)** - Interactive Jupyter notebook
   - Complete GWAS workflow with real sorghum data (725 samples, 170K markers)
   - Demonstrates GLM, MLM, FarmCPU, and BLINK methods
   - Visualizations and result interpretation
@@ -116,13 +116,13 @@ Sample2,B,2023
 ```
 
 **Genetic Map (CSV/TSV, optional but recommended)**
-CSV/TSV with `SNP`, `CHROM`, and `POS` columns (case-insensitive aliases like `Chr`, `Pos` are accepted).
+CSV/TSV with `MARKER`, `CHROM`, and `POS` columns (legacy `SNP` and aliases like `Chr`, `Pos` are accepted).
 Recommended for numeric genotype matrices and for LOCO-based methods like `MLM_Hybrid`.
 
 ### Output Files
 
 - `GWAS_{trait}_all_results.csv` - Full association results
-- `GWAS_{trait}_significant.csv` - Significant SNPs only
+- `GWAS_{trait}_significant.csv` - Significant markers only
 - `GWAS_{trait}_{method}_manhattan.png` - Manhattan plot
 - `GWAS_{trait}_{method}_qq.png` - QQ plot
 
@@ -143,7 +143,7 @@ See [Output Files](output_files.md) for detailed format specifications.
 ### Q: Why are my results files large?
 - Full results contain all markers × all methods
 - Compress with `gzip`: `gzip GWAS_*_all_results.csv`
-- Or only output significant SNPs: `outputs=['significant_marker_pvalues']`
+- Or only output significant markers: `outputs=['significant_marker_pvalues']`
 
 ### Q: Sample IDs don't match?
 - IDs must match **exactly** (case-sensitive)

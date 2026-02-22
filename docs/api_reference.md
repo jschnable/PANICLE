@@ -25,7 +25,7 @@ GWASPipeline(output_dir='./GWAS_results')
 
 **Attributes:**
 - `genotype_matrix` (GenotypeMatrix): Aligned genotype data (n_individuals × n_markers)
-- `geno_map` (GenotypeMap): Genetic map with SNP information (ID, chromosome, position)
+- `geno_map` (GenotypeMap): Genetic map with marker information (ID, chromosome, position)
 - `phenotype_df` (DataFrame): Aligned phenotype data with 'ID' column + trait columns
 - `covariate_df` (DataFrame): External covariates (if loaded)
 - `pcs` (ndarray): Principal components (n_individuals × n_pcs)
@@ -191,7 +191,7 @@ pipeline.run_analysis(
 - `blink_params` (dict, optional): Parameters for BLINK
 - `outputs` (list): Which outputs to generate. Options:
   - `'all_marker_pvalues'`: Full results CSV
-  - `'significant_marker_pvalues'`: Significant SNPs only CSV
+  - `'significant_marker_pvalues'`: Significant markers only CSV
   - `'manhattan'`: Manhattan plot PNG
   - `'qq'`: QQ plot PNG
 
@@ -321,7 +321,7 @@ from panicle.association.farmcpu import PANICLE_FarmCPU
 results = PANICLE_FarmCPU(
     phe,                    # Phenotype array (n × 2)
     geno,                   # Genotype matrix (n × m)
-    map_data,               # Genetic map (SNP, Chr, Pos)
+    map_data,               # Genetic map (MARKER, Chr, Pos; legacy SNP accepted)
     CV=None,                # Covariates (n × p)
     maxLoop=10,             # Maximum iterations
     p_threshold=0.05,       # P-value threshold for QTN selection
@@ -349,7 +349,7 @@ from panicle.association.blink import PANICLE_BLINK
 results = PANICLE_BLINK(
     phe,                    # Phenotype array (n × 2)
     geno,                   # Genotype matrix (n × m)
-    map_data,               # Genetic map (SNP, Chr, Pos)
+    map_data,               # Genetic map (MARKER, Chr, Pos; legacy SNP accepted)
     CV=None,                # Covariates (n × p)
     maxLoop=10,             # Maximum iterations
     converge=1.0,           # Jaccard similarity threshold for convergence
@@ -474,7 +474,7 @@ eff_info = estimate_effective_tests_from_genotype(
 
 # Returns dict with:
 # - 'Me': Effective number of independent tests
-# - 'total_snps': Total number of SNPs
+# - 'total_snps': Total number of markers
 # - 'ld_blocks': Number of LD blocks detected
 ```
 
@@ -572,7 +572,7 @@ K = PANICLE_K_VanRaden(genotype_matrix)
 # Run MLM
 results = PANICLE_MLM(phe, genotype_matrix, K)
 
-# Get significant SNPs
+# Get significant markers
 sig_indices = results.pvalues < 0.05/len(results.pvalues)
 ```
 

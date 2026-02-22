@@ -78,7 +78,7 @@ from panicle import load_genotype_vcf, load_phenotype_file, match_individuals
 from panicle import PANICLE_MLM, PANICLE_K_VanRaden, PANICLE_PCA
 
 # Load data
-genotype, sample_ids, snp_map = load_genotype_vcf("data/genotypes.vcf.gz")
+genotype, sample_ids, marker_map = load_genotype_vcf("data/genotypes.vcf.gz")
 phenotypes = load_phenotype_file("data/phenotype.csv")
 
 # Align samples and loop over traits
@@ -128,12 +128,12 @@ python scripts/run_GWAS.py \
 | **`--phenotype`** | Path to phenotype CSV/TSV (must contain ID column). | **Required** |
 | **`--phenotype-id-column`** | ID column name in phenotype file. | ID |
 | **`--genotype`** | Path to genotype VCF/BCF/CSV. | **Required** |
-| **`--map`** | Optional map file (SNP, CHROM, POS). Recommended for numeric CSV/TSV and LOCO methods. | None |
+| **`--map`** | Optional map file (MARKER, CHROM, POS). Legacy `SNP` is also accepted. Recommended for numeric CSV/TSV and LOCO methods. | None |
 | **`--format`** | Genotype format override: `vcf`, `plink`, `hapmap`, `csv`, `tsv`, `numeric`. | Auto |
 | **`--traits`** | Comma-separated list of columns to analyze. | All numeric |
 | **`--methods`** | GWAS methods: `GLM`, `MLM`, `FarmCPU`, `BLINK`, `FarmCPUResampling`. | GLM,MLM,FarmCPU,BLINK |
 | **`--n-pcs`** | Number of Principal Components for population structure. | 3 |
-| **`--compute-effective-tests`** | Calculate Effective SNP Number (Me) and use it for Bonferroni correction. | False |
+| **`--compute-effective-tests`** | Calculate Effective Marker Number (Me) and use it for Bonferroni correction. | False |
 | **`--alpha`** | Significance level (e.g., 0.05). Threshold = `alpha / Me` (or `M`). | 0.05 |
 | **`--significance`** | Fixed p-value threshold (overrides Bonferroni). | None |
 | **`--n-eff`** | Effective number of markers (overrides Me). | None |
@@ -187,7 +187,7 @@ CSV or TSV files with an **ID column** and numeric columns for traits/covariates
 
 ### Genotype
 *   **VCF/BCF**: `.vcf`, `.vcf.gz`, `.bcf` (Preferred for performance).
-*   **CSV/TSV**: Numeric matrix (rows=samples, cols=markers) + genetic map file with `SNP`, `CHROM`, and `POS` columns (case-insensitive aliases like `Chr`, `Pos` are accepted).
+*   **CSV/TSV**: Numeric matrix (rows=samples, cols=markers) + genetic map file with `MARKER`, `CHROM`, and `POS` columns (legacy `SNP` and aliases like `Chr`, `Pos` are accepted).
 *   **PLINK**: `.bed` + `.bim` + `.fam`.
 *   **HapMap**: `.hmp.txt`.
 
@@ -210,7 +210,7 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 
 ### Interactive Tutorial
 
-- **[Sorghum GWAS Tutorial](docs/sorghum_gwas_tutorial.ipynb)** - Jupyter notebook with complete GWAS workflow
+- **[Sorghum GWAS Tutorial](docs/gwas_sorghum_tutorial.ipynb)** - Jupyter notebook with complete GWAS workflow
 
 ### Example Scripts
 

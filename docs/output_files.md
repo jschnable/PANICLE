@@ -9,7 +9,7 @@ When you run a GWAS analysis, PANICLE creates the following files in your specif
 ```
 output_dir/
 ├── GWAS_{trait}_all_results.csv                 # Full results for each trait
-├── GWAS_{trait}_significant.csv                    # Significant SNPs only
+├── GWAS_{trait}_significant.csv                    # Significant markers only
 ├── GWAS_{trait}_{method}_manhattan.png             # Manhattan plot per method
 ├── GWAS_{trait}_{method}_qq.png                    # QQ plot per method
 └── GWAS_summary_by_traits_methods.csv              # Overall summary table
@@ -41,7 +41,8 @@ Contains association statistics for **all markers** across **all methods** run f
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `SNP` | string | Marker ID/name |
+| `MARKER` | string | Canonical marker ID/name |
+| `SNP` | string | Legacy alias of `MARKER` (included for compatibility) |
 | `CHROM` | string | Chromosome name (as in VCF file, e.g., 'Chr01', '1') |
 | `POS` | integer | Physical position on chromosome (base pairs) |
 | `REF` | string | Reference allele |
@@ -63,10 +64,10 @@ Contains association statistics for **all markers** across **all methods** run f
 #### Example File Content:
 
 ```csv
-SNP,CHROM,POS,REF,ALT,MAF,GLM_P,GLM_Effect,MLM_P,MLM_Effect
-rs123,Chr01,100234,A,G,0.23,0.0000012,0.045,0.0000089,0.042
-rs456,Chr01,150987,C,T,0.45,0.234,0.0012,-0.189,0.0009
-rs789,Chr02,50432,G,A,0.12,0.045,-0.023,0.067,-0.019
+MARKER,CHROM,POS,SNP,REF,ALT,MAF,GLM_P,GLM_Effect,MLM_P,MLM_Effect
+rs123,Chr01,100234,rs123,A,G,0.23,0.0000012,0.045,0.0000089,0.042
+rs456,Chr01,150987,rs456,C,T,0.45,0.234,0.0012,-0.189,0.0009
+rs789,Chr02,50432,rs789,G,A,0.12,0.045,-0.023,0.067,-0.019
 ```
 
 #### Reading in Python:
@@ -77,15 +78,15 @@ import pandas as pd
 # Load results
 results = pd.read_csv('my_results/GWAS_Height_all_results.csv')
 
-# Get top 10 SNPs by MLM p-value
-top_snps = results.nsmallest(10, 'MLM_P')
+# Get top 10 markers by MLM p-value
+top_markers = results.nsmallest(10, 'MLM_P')
 
-# Get all significant SNPs (Bonferroni)
+# Get all significant markers (Bonferroni)
 bonferroni = 0.05 / len(results)
-sig_snps = results[results['MLM_P'] < bonferroni]
+sig_markers = results[results['MLM_P'] < bonferroni]
 
 # Extract specific columns
-snp_info = results[['SNP', 'CHROM', 'POS', 'MLM_P', 'MLM_Effect']]
+marker_info = results[['MARKER', 'CHROM', 'POS', 'MLM_P', 'MLM_Effect']]
 ```
 
 ---
@@ -100,19 +101,19 @@ Same columns as `all_results.csv`, plus:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `Method` | string | Methods that detected this SNP as significant (pipe-separated) |
+| `Method` | string | Methods that detected this marker as significant (pipe-separated) |
 
 #### Notes:
-- Each SNP appears once; the `Method` column lists all significant methods separated by `|`
+- Each marker appears once; the `Method` column lists all significant methods separated by `|`
 - Threshold used is shown in the summary file
 - Default threshold: Bonferroni correction (0.05 / n_markers)
 
 #### Example:
 
 ```csv
-SNP,CHROM,POS,REF,ALT,MAF,GLM_P,GLM_Effect,MLM_P,MLM_Effect,Method
-rs123,Chr01,100234,A,G,0.23,0.0000012,0.045,0.0000089,0.042,GLM|MLM
-rs456,Chr05,892341,T,C,0.31,0.089,0.012,0.0000023,0.051,MLM
+MARKER,CHROM,POS,SNP,REF,ALT,MAF,GLM_P,GLM_Effect,MLM_P,MLM_Effect,Method
+rs123,Chr01,100234,rs123,A,G,0.23,0.0000012,0.045,0.0000089,0.042,GLM|MLM
+rs456,Chr05,892341,rs456,T,C,0.31,0.089,0.012,0.0000023,0.051,MLM
 ```
 
 ---
@@ -199,18 +200,19 @@ Contains Resample Model Inclusion Probability (RMIP) for each marker.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `SNP` | string | Marker ID |
+| `MARKER` | string | Marker ID |
+| `SNP` | string | Legacy alias of `MARKER` |
 | `CHROM` | string | Chromosome |
 | `POS` | integer | Position |
-| `RMIP` | float | Fraction of resampling runs where SNP was selected (0.0 to 1.0) |
+| `RMIP` | float | Fraction of resampling runs where marker was selected (0.0 to 1.0) |
 | `Trait` | string | Trait name |
 | `ClusterMembers` | string | Cluster membership details (only when clustering is enabled) |
 
 **Example:**
 ```csv
-SNP,CHROM,POS,RMIP,Trait
-rs123,Chr01,100234,0.95,FloweringTime
-rs456,Chr05,892341,0.72,FloweringTime
+MARKER,CHROM,POS,SNP,RMIP,Trait
+rs123,Chr01,100234,rs123,0.95,FloweringTime
+rs456,Chr05,892341,rs456,0.72,FloweringTime
 ```
 
 **Notes:**
@@ -269,19 +271,19 @@ import numpy as np
 df = pd.read_csv('results/GWAS_Height_all_results.csv')
 
 # Filter by chromosome
-chr1_snps = df[df['CHROM'] == 'Chr01']
+chr1_markers = df[df['CHROM'] == 'Chr01']
 
 # Filter by MAF
-common_snps = df[df['MAF'] > 0.05]
+common_markers = df[df['MAF'] > 0.05]
 
-# Get significant SNPs
+# Get significant markers
 bonferroni = 0.05 / len(df)
-sig_snps = df[df['MLM_P'] < bonferroni]
+sig_markers = df[df['MLM_P'] < bonferroni]
 
 # Sort by p-value
 df_sorted = df.sort_values('MLM_P')
 
-# Get top 100 SNPs
+# Get top 100 markers
 top100 = df.nsmallest(100, 'MLM_P')
 ```
 
@@ -291,7 +293,7 @@ top100 = df.nsmallest(100, 'MLM_P')
 # Load results from multiple methods
 df = pd.read_csv('results/GWAS_Height_all_results.csv')
 
-# Find SNPs significant in MLM but not GLM
+# Find markers significant in MLM but not GLM
 bonf = 0.05 / len(df)
 mlm_only = df[(df['MLM_P'] < bonf) & (df['GLM_P'] >= bonf)]
 
@@ -317,7 +319,7 @@ log_p = -np.log10(df['MLM_P'])
 plt.figure(figsize=(12, 4))
 plt.scatter(range(len(df)), log_p, s=2, alpha=0.5)
 plt.axhline(-np.log10(0.05/len(df)), color='red', linestyle='--')
-plt.xlabel('SNP Index')
+plt.xlabel('Marker Index')
 plt.ylabel('-log10(P)')
 plt.title('Manhattan Plot - Height MLM')
 plt.tight_layout()
@@ -334,11 +336,11 @@ plt.savefig('custom_manhattan.png', dpi=300)
 # Load results
 results <- read.csv('results/GWAS_Height_all_results.csv')
 
-# Filter significant SNPs
+# Filter significant markers
 bonferroni <- 0.05 / nrow(results)
-sig_snps <- results[results$MLM_P < bonferroni, ]
+sig_markers <- results[results$MLM_P < bonferroni, ]
 
-# Top 20 SNPs
+# Top 20 markers
 top20 <- results[order(results$MLM_P), ][1:20, ]
 
 # Summary statistics
@@ -388,7 +390,7 @@ Typical file sizes for different analysis scales:
 ## Troubleshooting
 
 ### Problem: Empty significant results file
-**Cause:** No SNPs passed the significance threshold
+**Cause:** No markers passed the significance threshold
 **Solution:** Check the threshold in summary file. Consider:
 - Using less stringent threshold: `significance=1e-5`
 - Checking if analysis ran correctly (QQ plot, lambda GC)

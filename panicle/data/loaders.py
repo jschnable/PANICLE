@@ -14,7 +14,15 @@ import os
 
 logger = logging.getLogger(__name__)
 
-from ..utils.data_types import GenotypeMatrix, GenotypeMap, impute_major_allele_inplace
+from ..utils.data_types import (
+    CHROM_COLUMN,
+    MARKER_ID_COLUMN,
+    POS_COLUMN,
+    canonicalize_genotype_map_dataframe,
+    GenotypeMatrix,
+    GenotypeMap,
+    impute_major_allele_inplace,
+)
 from ..utils.memmap_utils import load_full_from_metadata
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
 try:
@@ -596,10 +604,11 @@ def load_genotype_file(filepath: Union[str, Path],
 
             # Create basic GenotypeMap (assumes no map file provided)
             geno_map_df = pd.DataFrame({
-                'SNP': marker_names,
-                'CHROM': [1] * len(marker_names),  # Default to chromosome 1
-                'POS': list(range(1, len(marker_names) + 1))  # Sequential positions
+                MARKER_ID_COLUMN: marker_names,
+                CHROM_COLUMN: [1] * len(marker_names),  # Default to chromosome 1
+                POS_COLUMN: list(range(1, len(marker_names) + 1))  # Sequential positions
             })
+            geno_map_df = canonicalize_genotype_map_dataframe(geno_map_df)
             geno_map_df.attrs["is_imputed"] = True
 
             try:
@@ -684,17 +693,7 @@ def load_map_file(filepath: Union[str, Path]) -> GenotypeMap:
         except:
             df = pd.read_csv(filepath, sep='\t')
     
-    # Standardize column names
-    col_mapping = {
-        'Chr': 'CHROM', 'chr': 'CHROM', 'chromosome': 'CHROM',
-        'Pos': 'POS', 'pos': 'POS', 'position': 'POS', 'bp': 'POS',
-        'snp': 'SNP', 'marker': 'SNP', 'rs': 'SNP'
-    }
-    
-    for old_name, new_name in col_mapping.items():
-        if old_name in df.columns and new_name not in df.columns:
-            df = df.rename(columns={old_name: new_name})
-    
+    df = canonicalize_genotype_map_dataframe(df)
     return GenotypeMap(df)
 
 

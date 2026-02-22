@@ -9,7 +9,13 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Tuple, Union, Sequence
 import pandas as pd
-from .data_types import GenotypeMatrix, GenotypeMap
+from .data_types import (
+    CHROM_COLUMN,
+    MARKER_ID_COLUMN,
+    canonicalize_genotype_map_dataframe,
+    GenotypeMatrix,
+    GenotypeMap,
+)
 
 
 def save_genotype_to_memmap(genotype: Union[GenotypeMatrix, np.ndarray],
@@ -134,7 +140,17 @@ def load_full_from_metadata(metadata_path: Union[str, Path],
     if map_file is not None:
         map_path_str = map_file.item()
         if map_path_str:
-            map_df = pd.read_csv(map_path_str, dtype={'SNP': str, 'CHROM': str, 'REF': str, 'ALT': str})
+            map_df = pd.read_csv(
+                map_path_str,
+                dtype={
+                    MARKER_ID_COLUMN: str,
+                    'SNP': str,
+                    CHROM_COLUMN: str,
+                    'REF': str,
+                    'ALT': str,
+                },
+            )
+            map_df = canonicalize_genotype_map_dataframe(map_df)
             geno_map = GenotypeMap(map_df)
         else:
             geno_map = None

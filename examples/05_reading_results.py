@@ -59,6 +59,14 @@ def load_and_explore(results_path: Path):
     return results
 
 
+def _marker_column(df: pd.DataFrame) -> str:
+    if "MARKER" in df.columns:
+        return "MARKER"
+    if "SNP" in df.columns:
+        return "SNP"
+    raise KeyError("Expected a marker ID column ('MARKER' or legacy 'SNP')")
+
+
 def filter_and_sort(results, method):
     """Demonstrate filtering and sorting operations."""
     print("\n" + "=" * 70)
@@ -69,16 +77,17 @@ def filter_and_sort(results, method):
     bonferroni = 0.05 / len(results)
     print(f"\nBonferroni threshold (0.05/{len(results):,}): {bonferroni:.2e}")
 
-    # Get significant SNPs
+    # Get significant markers
     p_col = f"{method}_P"
-    sig_snps = results[results[p_col] < bonferroni].copy()
-    print(f"Significant SNPs: {len(sig_snps)}")
+    marker_col = _marker_column(results)
+    sig_markers = results[results[p_col] < bonferroni].copy()
+    print(f"Significant markers: {len(sig_markers)}")
 
-    if len(sig_snps) > 0:
-        print("\nTop 5 significant SNPs:")
-        top5 = sig_snps.nsmallest(5, p_col)
+    if len(sig_markers) > 0:
+        print("\nTop 5 significant markers:")
+        top5 = sig_markers.nsmallest(5, p_col)
         effect_col = f"{method}_Effect"
-        print(top5[['SNP', 'CHROM', 'POS', p_col, effect_col, 'MAF']])
+        print(top5[[marker_col, 'CHROM', 'POS', p_col, effect_col, 'MAF']])
 
     # Filter by chromosome
     chr1 = results[results['CHROM'] == 'Chr01']
@@ -88,7 +97,7 @@ def filter_and_sort(results, method):
     common = results[results['MAF'] >= 0.05]
     print(f"Common variants (MAF >= 0.05): {len(common):,}")
 
-    return sig_snps
+    return sig_markers
 
 
 def compare_methods(results, method):
@@ -119,35 +128,36 @@ def compare_methods(results, method):
         print("\nOnly one method found in results")
 
 
-def extract_candidate_regions(results, sig_snps):
-    """Extract genomic regions around significant SNPs."""
+def extract_candidate_regions(results, sig_markers):
+    """Extract genomic regions around significant markers."""
     print("\n" + "=" * 70)
     print("4. Extracting Candidate Regions")
     print("=" * 70)
 
-    if len(sig_snps) == 0:
-        print("\nNo significant SNPs to extract regions for")
+    if len(sig_markers) == 0:
+        print("\nNo significant markers to extract regions for")
         return
 
     # Define window size (e.g., ±100kb)
     window = 100000  # 100 kb
 
-    print(f"\nExtracting regions ±{window/1000:.0f}kb around significant SNPs:")
+    print(f"\nExtracting regions ±{window/1000:.0f}kb around significant markers:")
+    marker_col = _marker_column(results)
 
-    for idx, snp in sig_snps.head(3).iterrows():
-        chrom = snp['CHROM']
-        pos = snp['POS']
+    for idx, marker in sig_markers.head(3).iterrows():
+        chrom = marker['CHROM']
+        pos = marker['POS']
 
         # Get markers in window
-        window_snps = results[
+        window_markers = results[
             (results['CHROM'] == chrom) &
             (results['POS'] >= pos - window) &
             (results['POS'] <= pos + window)
         ]
 
-        print(f"\n  {snp['SNP']} ({chrom}:{pos:,})")
-        print(f"    Markers in region: {len(window_snps)}")
-        print(f"    Position range: {window_snps['POS'].min():,} - {window_snps['POS'].max():,}")
+        print(f"\n  {marker[marker_col]} ({chrom}:{pos:,})")
+        print(f"    Markers in region: {len(window_markers)}")
+        print(f"    Position range: {window_markers['POS'].min():,} - {window_markers['POS'].max():,}")
 
 
 def create_custom_plots(results, method, output_dir: Path):
@@ -200,32 +210,33 @@ def create_custom_plots(results, method, output_dir: Path):
     plt.close()
 
 
-def export_for_external_tools(sig_snps, output_dir: Path, method):
+def export_for_external_tools(sig_markers, output_dir: Path, method):
     """Export results in formats useful for other tools."""
     print("\n" + "=" * 70)
     print("6. Exporting for External Tools")
     print("=" * 70)
 
-    if len(sig_snps) == 0:
-        print("\nNo significant SNPs to export")
+    if len(sig_markers) == 0:
+        print("\nNo significant markers to export")
         return
 
     # BED format (for genome browsers)
-    bed = sig_snps[['CHROM', 'POS']].copy()
+    marker_col = _marker_column(sig_markers)
+    bed = sig_markers[['CHROM', 'POS']].copy()
     bed['END'] = bed['POS'] + 1
-    bed['NAME'] = sig_snps['SNP']
+    bed['NAME'] = sig_markers[marker_col]
     p_col = f"{method}_P"
-    bed['SCORE'] = (-np.log10(sig_snps[p_col]) * 10).astype(int)
+    bed['SCORE'] = (-np.log10(sig_markers[p_col]) * 10).astype(int)
     bed = bed[['CHROM', 'POS', 'END', 'NAME', 'SCORE']]
     output_dir.mkdir(parents=True, exist_ok=True)
-    bed_path = output_dir / "significant_snps.bed"
+    bed_path = output_dir / "significant_markers.bed"
     bed.to_csv(bed_path, sep='\t', header=False, index=False)
     print(f"\nExported to BED format: {bed_path}")
 
-    # Simple list of SNP IDs
-    snp_path = output_dir / "significant_snp_ids.txt"
-    sig_snps['SNP'].to_csv(snp_path, index=False, header=False)
-    print(f"Exported SNP IDs: {snp_path}")
+    # Simple list of marker IDs
+    marker_path = output_dir / "significant_marker_ids.txt"
+    sig_markers[marker_col].to_csv(marker_path, index=False, header=False)
+    print(f"Exported marker IDs: {marker_path}")
 
 
 def main():
@@ -244,19 +255,19 @@ def main():
     results = load_and_explore(results_path)
 
     # Filter and sort
-    sig_snps = filter_and_sort(results, args.method)
+    sig_markers = filter_and_sort(results, args.method)
 
     # Compare methods (if multiple available)
     compare_methods(results, args.method)
 
     # Extract candidate regions
-    extract_candidate_regions(results, sig_snps)
+    extract_candidate_regions(results, sig_markers)
 
     # Create custom plots
     create_custom_plots(results, args.method, output_dir)
 
     # Export for external tools
-    export_for_external_tools(sig_snps, output_dir, args.method)
+    export_for_external_tools(sig_markers, output_dir, args.method)
 
     print("\n" + "=" * 70)
     print("Analysis Complete!")

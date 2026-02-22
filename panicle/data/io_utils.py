@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Union, Tuple, Optional
 import h5py
 
+from ..utils.data_types import canonicalize_genotype_map_dataframe
+
 def read_phenotype(file_path: Union[str, Path]) -> pd.DataFrame:
     """Read phenotype file in rMVP format
     
@@ -47,9 +49,10 @@ def read_phenotype(file_path: Union[str, Path]) -> pd.DataFrame:
 
 
 def read_genotype_map(file_path: Union[str, Path]) -> pd.DataFrame:
-    """Read SNP map file in rMVP format
+    """Read marker map file in rMVP format.
     
-    Expected columns: [SNP, Chr, Pos] minimum
+    Expected columns include marker ID, chromosome, and position.
+    Accepted marker aliases include ``MARKER`` and legacy ``SNP``.
     """
     file_path = Path(file_path)
     
@@ -58,26 +61,7 @@ def read_genotype_map(file_path: Union[str, Path]) -> pd.DataFrame:
     
     df = pd.read_csv(file_path)
     
-    # Validate required columns
-    required = ['SNP', 'CHROM', 'POS']
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        # Try alternative names
-        alt_names = {'SNP': ['snp', 'marker', 'rs'], 
-                     'CHROM': ['chr', 'chromosome', 'CHR'],
-                     'POS': ['pos', 'position', 'bp']}
-        
-        for req_col in missing:
-            found = False
-            for alt in alt_names.get(req_col, []):
-                if alt in df.columns:
-                    df = df.rename(columns={alt: req_col})
-                    found = True
-                    break
-            if not found:
-                raise ValueError(f"Required column {req_col} not found in map file")
-    
-    return df
+    return canonicalize_genotype_map_dataframe(df)
 
 
 def write_binary_genotype(genotype: np.ndarray, output_prefix: str, 

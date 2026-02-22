@@ -23,7 +23,13 @@ from ..utils.stats import (
     calculate_maf_from_genotypes,
     genomic_inflation_factor
 )
-from ..utils.data_types import GenotypeMatrix, AssociationResults
+from ..utils.data_types import (
+    LEGACY_MARKER_ID_COLUMN,
+    MARKER_ID_COLUMN,
+    GenotypeMatrix,
+    AssociationResults,
+    infer_marker_id_column,
+)
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
 from ..association.farmcpu_resampling import (
     PANICLE_FarmCPUResampling,
@@ -224,7 +230,7 @@ class GWASPipeline:
 
     Attributes:
         genotype_matrix (GenotypeMatrix): Aligned genotype data (n_individuals × n_markers)
-        geno_map (GenotypeMap): Genetic map with SNP information (ID, CHROM, POS)
+        geno_map (GenotypeMap): Genetic map with marker information (ID, CHROM, POS)
         phenotype_df (DataFrame): Aligned phenotype data with 'ID' column + trait columns
         covariate_df (DataFrame): External covariates (if loaded)
         pcs (ndarray): Principal components (n_individuals × n_pcs)
@@ -419,7 +425,7 @@ class GWASPipeline:
         Sets:
             self.phenotype_df: DataFrame with 'ID' column + trait columns
             self.genotype_matrix: GenotypeMatrix (n_individuals × n_markers)
-            self.geno_map: GenotypeMap with SNP information
+            self.geno_map: GenotypeMap with marker information
             self.individual_ids: List of individual IDs from genotype file
             self.covariate_df: DataFrame with covariates (if covariate_file provided)
             self.effective_tests_info: Dict with M_eff if computed
@@ -501,7 +507,7 @@ class GWASPipeline:
             if self.effective_tests_info:
                 me_value = int(self.effective_tests_info.get("Me", 0))
                 total_snps = self.effective_tests_info.get("total_snps", self.geno_map.n_markers)
-                self.log(f"   Effective tests (Li et al. 2012): {me_value:,} across {total_snps:,} SNPs")
+                self.log(f"   Effective tests (Li et al. 2012): {me_value:,} across {total_snps:,} markers")
 
         except Exception as e:
             raise ValueError(f"Error loading genotype file: {e}")
@@ -1175,6 +1181,13 @@ class GWASPipeline:
         
         summary_data = []
         base_df = self.geno_map.to_dataframe().copy() if hasattr(self.geno_map, 'to_dataframe') else pd.DataFrame()
+        marker_id_col = infer_marker_id_column(base_df.columns)
+        if marker_id_col is None and not base_df.empty:
+            raise ValueError("Genotype map is missing a marker ID column")
+        if marker_id_col is not None and marker_id_col != MARKER_ID_COLUMN:
+            base_df[MARKER_ID_COLUMN] = base_df[marker_id_col].astype(str)
+        if not base_df.empty and LEGACY_MARKER_ID_COLUMN not in base_df.columns:
+            base_df[LEGACY_MARKER_ID_COLUMN] = base_df[MARKER_ID_COLUMN].astype(str)
 
         base_columns = base_df.columns.tolist()
 
@@ -1243,8 +1256,11 @@ class GWASPipeline:
                 if 'Chr' in df.columns or 'Pos' in df.columns:
                     df = df.rename(columns={'Chr': 'CHROM', 'Pos': 'POS'})
                 if 'RMIP' in df.columns:
+                    resampling_marker_col = infer_marker_id_column(df.columns)
+                    if resampling_marker_col is None:
+                        raise ValueError("Resampling results are missing a marker ID column")
                     resampling_hit_snps = set(
-                        df.loc[df['RMIP'] >= rmip_hit_threshold, 'SNP'].astype(str)
+                        df.loc[df['RMIP'] >= rmip_hit_threshold, resampling_marker_col].astype(str)
                     )
                 df.to_csv(res_file, index=False)
                 summary_data.append({
@@ -1354,7 +1370,10 @@ class GWASPipeline:
             all_res_df.to_csv(self.output_dir / f"GWAS_{trait_name}_all_results.csv", index=False)
             
         if resampling_hit_snps:
-            resampling_mask = all_res_df['SNP'].astype(str).isin(resampling_hit_snps).to_numpy()
+            all_res_marker_col = infer_marker_id_column(all_res_df.columns)
+            if all_res_marker_col is None:
+                raise ValueError("Merged results are missing a marker ID column")
+            resampling_mask = all_res_df[all_res_marker_col].astype(str).isin(resampling_hit_snps).to_numpy()
             hits_by_method['FarmCPUResampling'] = resampling_mask
 
         if hits_by_method and 'significant_marker_pvalues' in outputs:
