@@ -11,6 +11,7 @@ import warnings
 import time
 import sys
 import os
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +408,7 @@ def _wrap_loaded_genotype(
     precompute_alleles: bool = True,
     compute_effective_tests: bool = False,
     effective_test_kwargs: Optional[Dict[str, Any]] = None,
+    cache_base: Optional[str] = None,
 ) -> Tuple[GenotypeMatrix, List[str], GenotypeMap]:
     """Shared post-processing for format-specific genotype loaders.
 
@@ -421,12 +423,86 @@ def _wrap_loaded_genotype(
     )
     if compute_effective_tests:
         et_kwargs = effective_test_kwargs or {}
-        geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-            geno_matrix,
-            geno_map,
-            **et_kwargs,
-        )
+        cached_et = _load_effective_tests_cache(cache_base, geno_matrix.n_markers)
+        if cached_et is not None:
+            geno_map.metadata["effective_tests"] = cached_et
+        else:
+            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
+                geno_matrix,
+                geno_map,
+                **et_kwargs,
+            )
+            _save_effective_tests_cache(cache_base, geno_map.metadata["effective_tests"])
     return geno_matrix, individual_ids, geno_map
+
+
+def _load_effective_tests_cache(
+    cache_base: Optional[str],
+    n_markers: int,
+) -> Optional[Dict[str, Any]]:
+    """Load cached effective tests result if available and matching."""
+    if cache_base is None:
+        return None
+    cache_path = cache_base + '.panicle.v2.effective_tests.json'
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r') as f:
+                cached = json.load(f)
+            # Validate the cache matches the current genotype data
+            cached_n = cached.get('n_markers') or cached.get('total_snps')
+            if cached_n == n_markers and cached.get('Me') is not None:
+                logger.info("[Cache] Using cached effective tests (Me=%s) from %s",
+                           cached['Me'], cache_path)
+                # Ensure the returned dict has the fields the pipeline expects
+                cached.setdefault('total_snps', n_markers)
+                cached.setdefault('n_markers', n_markers)
+                cached.setdefault('block_stats', [])
+                return cached
+            else:
+                logger.info("[Cache] Effective tests cache stale (n_markers mismatch: "
+                           "cached=%s, current=%s); recomputing.",
+                           cached_n, n_markers)
+    except Exception as e:
+        logger.warning("[Cache] Failed to load effective tests cache: %s", e)
+    return None
+
+
+def _save_effective_tests_cache(
+    cache_base: Optional[str],
+    effective_tests: Dict[str, Any],
+) -> None:
+    """Save effective tests result to cache.
+
+    Only stores the essential summary fields (Me, total_snps, parameters,
+    per-chromosome Me) to keep the cache file small.  The full block_stats
+    are omitted as they can be millions of entries.
+    """
+    if cache_base is None:
+        return
+    cache_path = cache_base + '.panicle.v2.effective_tests.json'
+    try:
+        # Store only what's needed to reconstruct the threshold
+        per_chrom_summary = {}
+        if "per_chromosome" in effective_tests:
+            for chrom, info in effective_tests["per_chromosome"].items():
+                per_chrom_summary[str(chrom)] = {
+                    "Me": int(info["Me"]) if isinstance(info.get("Me"), (int, float, np.integer, np.floating)) else info.get("Me"),
+                    "n_snps": int(info["n_snps"]) if isinstance(info.get("n_snps"), (int, float, np.integer, np.floating)) else info.get("n_snps"),
+                }
+
+        serializable = {
+            "Me": int(effective_tests["Me"]),
+            "n_markers": int(effective_tests.get("total_snps", 0)),
+            "total_snps": int(effective_tests.get("total_snps", 0)),
+            "per_chromosome": per_chrom_summary,
+            "parameters": effective_tests.get("parameters", {}),
+        }
+        with open(cache_path, 'w') as f:
+            json.dump(serializable, f, indent=2)
+        logger.info("[Cache] Saved effective tests (Me=%s) to %s",
+                    serializable["Me"], cache_path)
+    except Exception as e:
+        logger.warning("[Cache] Failed to save effective tests cache: %s", e)
 
 
 def _deduplicate_genotype_samples(individual_ids: List[str], geno_np: np.ndarray) -> Tuple[List[str], np.ndarray]:
@@ -491,11 +567,16 @@ def load_genotype_file(filepath: Union[str, Path],
         _maybe_warn(elapsed)
         if compute_effective_tests:
             effective_tests_kwargs = effective_test_kwargs or {}
-            geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
-                genotype,
-                geno_map,
-                **effective_tests_kwargs,
-            )
+            cached_et = _load_effective_tests_cache(str(filepath), genotype.n_markers)
+            if cached_et is not None:
+                geno_map.metadata["effective_tests"] = cached_et
+            else:
+                geno_map.metadata["effective_tests"] = estimate_effective_tests_from_genotype(
+                    genotype,
+                    geno_map,
+                    **effective_tests_kwargs,
+                )
+                _save_effective_tests_cache(str(filepath), geno_map.metadata["effective_tests"])
         return genotype, individual_ids, geno_map
 
     if file_format == 'vcf':
@@ -504,7 +585,8 @@ def load_genotype_file(filepath: Union[str, Path],
                               " Ensure panicle/data/load_genotype_vcf.py is present.")
         geno_np, individual_ids, geno_map_df = _load_genotype_vcf(str(filepath), **kwargs)
         result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
-                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs,
+                                       cache_base=str(filepath))
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
         return result
@@ -515,7 +597,8 @@ def load_genotype_file(filepath: Union[str, Path],
                               " pip install bed-reader.")
         geno_np, individual_ids, geno_map_df = _load_genotype_plink(str(filepath), **kwargs)
         result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
-                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs,
+                                       cache_base=str(filepath))
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
         return result
@@ -525,7 +608,8 @@ def load_genotype_file(filepath: Union[str, Path],
             raise ImportError("HapMap loading requires 'load_genotype_hapmap' module.")
         geno_np, individual_ids, geno_map_df = _load_genotype_hapmap(str(filepath), **kwargs)
         result = _wrap_loaded_genotype(geno_np, individual_ids, geno_map_df,
-                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs,
+                                       cache_base=str(filepath))
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
         return result
@@ -627,7 +711,8 @@ def load_genotype_file(filepath: Union[str, Path],
         # CSV/TSV data is already imputed above; mark it so the wrapper preserves the flag.
         geno_map_df.attrs["is_imputed"] = True
         result = _wrap_loaded_genotype(geno_np, individual_ids_csv, geno_map_df,
-                                       precompute_alleles, compute_effective_tests, effective_test_kwargs)
+                                       precompute_alleles, compute_effective_tests, effective_test_kwargs,
+                                       cache_base=cache_base)
 
         elapsed = time.time() - load_start
         _maybe_warn(elapsed)
