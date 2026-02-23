@@ -24,6 +24,8 @@ try:
     from joblib import Parallel, delayed
     HAS_JOBLIB = True
 except ImportError:
+    Parallel = None  # type: ignore[assignment,misc]
+    delayed = None  # type: ignore[assignment,misc]
     HAS_JOBLIB = False
 
 
