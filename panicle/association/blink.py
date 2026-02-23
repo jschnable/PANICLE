@@ -467,7 +467,12 @@ def _precompute_map_coordinates(map_df: "pd.DataFrame") -> Tuple[np.ndarray, np.
     import pandas as pd  # noqa: F401 - preserved for type checking parity
 
     chrom_series = map_df["CHROM"]
-    if np.issubdtype(chrom_series.dtype, np.number):
+    try:
+        is_numeric = np.issubdtype(chrom_series.dtype, np.number)
+    except TypeError:
+        # pandas StringDtype or other non-numpy dtype
+        is_numeric = False
+    if is_numeric:
         chrom_values = chrom_series.to_numpy(dtype=float, copy=False)
     else:
         chrom_as_str = chrom_series.astype(str)
