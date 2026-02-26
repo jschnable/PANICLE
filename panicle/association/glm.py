@@ -8,11 +8,11 @@ Implementation details:
 - panicle.association.glm_fwl_qr: Fast vectorized implementation (default).
 """
 
-from typing import Optional, Union
+from typing import Optional, Union, Dict, List
 import numpy as np
 
 from ..utils.data_types import GenotypeMatrix, AssociationResults
-from .glm_fwl_qr import PANICLE_GLM_ultrafast
+from .glm_fwl_qr import PANICLE_GLM_ultrafast, PANICLE_GLM_multi_ultrafast
 
 def PANICLE_GLM(phe: np.ndarray,
            geno: Union[GenotypeMatrix, np.ndarray],
@@ -66,4 +66,29 @@ def PANICLE_GLM(phe: np.ndarray,
         return_cov_stats=return_cov_stats,
         cov_pvalue_agg=cov_pvalue_agg,
         return_t_stats=return_t_stats
+    )
+
+
+def PANICLE_GLM_MULTI(
+    phe: np.ndarray,
+    geno: Union[GenotypeMatrix, np.ndarray],
+    trait_names: Optional[List[str]] = None,
+    CV: Optional[np.ndarray] = None,
+    maxLine: int = 5000,
+    cpu: int = 1,
+    verbose: bool = True,
+    missing_fill_value: float = 1.0,
+    return_t_stats: bool = False,
+) -> Dict[str, AssociationResults]:
+    """Multi-trait GLM entry point optimized for shared genotype scans."""
+    return PANICLE_GLM_multi_ultrafast(
+        phe=phe,
+        geno=geno,
+        trait_names=trait_names,
+        CV=CV,
+        maxLine=maxLine,
+        cpu=cpu,
+        verbose=verbose,
+        missing_fill_value=missing_fill_value,
+        return_t_stats=return_t_stats,
     )

@@ -36,7 +36,7 @@ __author__ = "James C. Schnable"
 from .core.mvp import PANICLE
 from .matrix.kinship import PANICLE_K_VanRaden, PANICLE_K_IBS
 from .matrix.pca import PANICLE_PCA
-from .association.glm import PANICLE_GLM
+from .association.glm import PANICLE_GLM, PANICLE_GLM_MULTI
 from .association.mlm import PANICLE_MLM
 from .association.farmcpu import PANICLE_FarmCPU
 from .association.blink import PANICLE_BLINK
@@ -59,6 +59,7 @@ __all__ = [
     'PANICLE_K_IBS',
     'PANICLE_PCA',
     'PANICLE_GLM',
+    'PANICLE_GLM_MULTI',
     'PANICLE_MLM',
     'PANICLE_FarmCPU',
     'PANICLE_BLINK',

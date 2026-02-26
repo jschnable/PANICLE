@@ -481,3 +481,42 @@ def test_gwas_pipeline_uses_grouped_multi_trait_loco_runner(synthetic_data, tmp_
 
     assert multi_calls["count"] == 1
     assert single_calls["count"] == 0
+
+
+def test_gwas_pipeline_uses_grouped_multi_trait_glm_runner(synthetic_data, tmp_path, monkeypatch):
+    output_dir = tmp_path / "gwas_glm_grouped"
+    pipeline = GWASPipeline(output_dir=str(output_dir))
+
+    pipeline.load_data(
+        phenotype_file=str(synthetic_data["phenotype_file"]),
+        genotype_file=str(synthetic_data["genotype_file"]),
+        map_file=str(synthetic_data["map_file"]),
+        trait_columns=["Height", "Yield"],
+        genotype_format="csv",
+    )
+    pipeline.align_samples()
+
+    multi_calls = {"count": 0}
+    single_calls = {"count": 0}
+    real_multi = gwas_module.PANICLE_GLM_MULTI
+    real_single = gwas_module.PANICLE_GLM
+
+    def wrapped_multi(*args, **kwargs):
+        multi_calls["count"] += 1
+        return real_multi(*args, **kwargs)
+
+    def wrapped_single(*args, **kwargs):
+        single_calls["count"] += 1
+        return real_single(*args, **kwargs)
+
+    monkeypatch.setattr(gwas_module, "PANICLE_GLM_MULTI", wrapped_multi)
+    monkeypatch.setattr(gwas_module, "PANICLE_GLM", wrapped_single)
+
+    pipeline.run_analysis(
+        traits=["Height", "Yield"],
+        methods=["GLM"],
+        outputs=["all_marker_pvalues"],
+    )
+
+    assert multi_calls["count"] == 1
+    assert single_calls["count"] == 0

@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from panicle.association import glm_fwl_qr, mlm, mlm_loco
+from panicle.association.glm import PANICLE_GLM, PANICLE_GLM_MULTI
 from panicle.association.mlm import PANICLE_MLM, estimate_variance_components_brent, compute_fast_pvalues
 from panicle.association.mlm_loco import PANICLE_MLM_LOCO, PANICLE_MLM_LOCO_MULTI
 from panicle.matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
@@ -278,6 +279,55 @@ def test_mlm_loco_multi_matches_single_trait_runs() -> None:
         )
         np.testing.assert_allclose(
             multi_results[trait_name].pvalues,
+            single.pvalues,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
+
+
+def test_glm_multi_matches_single_trait_runs() -> None:
+    rng = np.random.default_rng(131)
+    n, m, t = 24, 30, 3
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    cv = rng.normal(size=(n, 2))
+    y_matrix = rng.normal(size=(n, t))
+    trait_names = [f"Trait{i+1}" for i in range(t)]
+
+    multi = PANICLE_GLM_MULTI(
+        phe=y_matrix,
+        geno=geno,
+        trait_names=trait_names,
+        CV=cv,
+        maxLine=8,
+        verbose=False,
+    )
+
+    for idx, trait_name in enumerate(trait_names):
+        phe_single = np.column_stack([np.arange(n), y_matrix[:, idx]])
+        single = PANICLE_GLM(
+            phe=phe_single,
+            geno=geno,
+            CV=cv,
+            maxLine=8,
+            verbose=False,
+        )
+        np.testing.assert_allclose(
+            multi[trait_name].effects,
+            single.effects,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            multi[trait_name].se,
+            single.se,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            multi[trait_name].pvalues,
             single.pvalues,
             rtol=1e-6,
             atol=1e-6,

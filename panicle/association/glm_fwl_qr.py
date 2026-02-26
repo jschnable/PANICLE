@@ -24,7 +24,7 @@ This file exposes MVP_GLM_ultrafast with the same signature as MVP_GLM.
 Use tests/quick_validation_test.py to validate before integration.
 """
 
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Dict, List
 from concurrent.futures import ThreadPoolExecutor
 import os
 import time
@@ -390,6 +390,294 @@ def PANICLE_GLM_ultrafast(phe: np.ndarray,
             result.cov_se_summary = cov_se_pooled
 
     return result
+
+
+def PANICLE_GLM_multi_ultrafast(
+    phe: np.ndarray,
+    geno: Union[GenotypeMatrix, np.ndarray],
+    trait_names: Optional[List[str]] = None,
+    CV: Optional[np.ndarray] = None,
+    maxLine: int = 5000,
+    cpu: int = 1,
+    verbose: bool = True,
+    missing_fill_value: float = 1.0,
+    return_t_stats: bool = False,
+) -> Dict[str, AssociationResults]:
+    """Multi-trait FWL+QR GLM with shared genotype-batch residualization.
+
+    This function is optimized for many traits with identical samples/covariates.
+    It processes each genotype batch once and computes marker statistics across all
+    traits in a vectorized manner.
+
+    Args:
+        phe: Phenotype matrix of shape (n_individuals, n_traits), trait values only.
+        geno: GenotypeMatrix or numpy array (n_individuals x n_markers)
+        trait_names: Optional trait names (length n_traits)
+        CV: n x k covariates (optional)
+        maxLine: batch size (markers per block)
+        cpu: unused (kept for API compatibility)
+        verbose: print brief progress
+        missing_fill_value: value to impute for missing genotypes
+        return_t_stats: if True, return absolute t-statistics instead of p-values
+
+    Returns:
+        Dict mapping trait name to AssociationResults.
+    """
+    if not isinstance(phe, np.ndarray) or phe.ndim != 2:
+        raise ValueError("Phenotype must be a 2D numpy array (n_individuals x n_traits)")
+    if phe.shape[1] < 1:
+        raise ValueError("Phenotype matrix must contain at least one trait column")
+    if not np.all(np.isfinite(phe)):
+        raise ValueError("Phenotype matrix contains missing/non-finite values")
+
+    Y = np.asarray(phe, dtype=np.float32)
+    n, n_traits = Y.shape
+    if trait_names is None:
+        resolved_trait_names = [f"Trait{i + 1}" for i in range(n_traits)]
+    else:
+        resolved_trait_names = [str(name) for name in trait_names]
+        if len(resolved_trait_names) != n_traits:
+            raise ValueError("trait_names length must match number of phenotype columns")
+
+    # Dimensions and genotype accessor
+    if isinstance(geno, GenotypeMatrix):
+        n_geno, m = geno.n_individuals, geno.n_markers
+        use_gm = True
+    elif isinstance(geno, np.ndarray):
+        n_geno, m = geno.shape
+        use_gm = False
+    else:
+        raise ValueError("Genotype must be GenotypeMatrix or numpy array")
+    if n_geno != n:
+        raise ValueError("Number of phenotype observations must match genotype individuals")
+
+    # Build covariate matrix with intercept
+    if CV is not None:
+        if CV.shape[0] != n:
+            raise ValueError("Covariate matrix must have same number of rows as phenotypes")
+        CV_f32 = np.asarray(CV, dtype=np.float32)
+        X = np.column_stack([np.ones(n, dtype=np.float32), CV_f32])
+    else:
+        X = np.ones((n, 1), dtype=np.float32)
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    XT = X.T
+
+    # Shared covariate-system setup across all traits
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        XtX = XT @ X
+        try:
+            iXX = np.linalg.inv(XtX)
+        except np.linalg.LinAlgError:
+            iXX = np.linalg.pinv(XtX, rcond=1e-10)
+        XY = XT @ Y  # shape (p, t)
+        beta_cov = iXX @ XY  # shape (p, t)
+    p = X.shape[1]
+
+    iXX = iXX.astype(np.float32, copy=False)
+    beta_cov = beta_cov.astype(np.float32, copy=False)
+    beta_cov_f64 = beta_cov.astype(np.float64, copy=False)
+    XY_f64 = XY.astype(np.float64, copy=False)
+    yy_f64 = np.einsum("nt,nt->t", Y, Y).astype(np.float64, copy=False)
+    rhs0 = np.sum(beta_cov_f64 * XY_f64, axis=0)
+
+    df_full = int(n - p - 1)
+    df_reduced = int(n - p)
+    if df_full <= 0:
+        raise ValueError("Degrees of freedom must be positive; check covariates")
+
+    effects = np.zeros((m, n_traits), dtype=np.float64)
+    ses = np.zeros((m, n_traits), dtype=np.float64)
+    pvals = np.ones((m, n_traits), dtype=np.float64)
+
+    batch_size = max(1, min(maxLine, m))
+    is_imputed = use_gm and geno.is_imputed
+    printed_layout = False
+
+    # Use prefetching for large datasets to overlap I/O with computation
+    use_prefetch = m > batch_size * 2
+
+    if use_prefetch:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            G = _load_genotype_batch(
+                geno, 0, min(batch_size, m), use_gm, is_imputed, missing_fill_value
+            )
+            if _DEBUG_GLM_LAYOUT and not printed_layout:
+                print(
+                    "GLM multi layout: X.shape={}, X.dtype={}, X.C={}, X.F={}; "
+                    "G.shape={}, G.dtype={}, G.C={}, G.F={}; Y.shape={}".format(
+                        X.shape, X.dtype, X.flags["C_CONTIGUOUS"], X.flags["F_CONTIGUOUS"],
+                        G.shape, G.dtype, G.flags["C_CONTIGUOUS"], G.flags["F_CONTIGUOUS"],
+                        Y.shape,
+                    )
+                )
+                printed_layout = True
+            next_future = None
+
+            for start in range(0, m, batch_size):
+                end = min(start + batch_size, m)
+                if next_future is not None:
+                    G = next_future.result()
+
+                next_start = start + batch_size
+                if next_start < m:
+                    next_end = min(next_start + batch_size, m)
+                    next_future = executor.submit(
+                        _load_genotype_batch,
+                        geno,
+                        next_start,
+                        next_end,
+                        use_gm,
+                        is_imputed,
+                        missing_fill_value,
+                    )
+                else:
+                    next_future = None
+
+                _process_glm_batch_multi(
+                    G,
+                    start,
+                    end,
+                    XT,
+                    iXX,
+                    beta_cov,
+                    XY_f64,
+                    rhs0,
+                    Y,
+                    yy_f64,
+                    df_full,
+                    df_reduced,
+                    effects,
+                    ses,
+                    pvals,
+                    return_t_stats,
+                )
+    else:
+        for start in range(0, m, batch_size):
+            end = min(start + batch_size, m)
+            G = _load_genotype_batch(
+                geno, start, end, use_gm, is_imputed, missing_fill_value
+            )
+            if _DEBUG_GLM_LAYOUT and not printed_layout:
+                print(
+                    "GLM multi layout: X.shape={}, X.dtype={}, X.C={}, X.F={}; "
+                    "G.shape={}, G.dtype={}, G.C={}, G.F={}; Y.shape={}".format(
+                        X.shape, X.dtype, X.flags["C_CONTIGUOUS"], X.flags["F_CONTIGUOUS"],
+                        G.shape, G.dtype, G.flags["C_CONTIGUOUS"], G.flags["F_CONTIGUOUS"],
+                        Y.shape,
+                    )
+                )
+                printed_layout = True
+
+            _process_glm_batch_multi(
+                G,
+                start,
+                end,
+                XT,
+                iXX,
+                beta_cov,
+                XY_f64,
+                rhs0,
+                Y,
+                yy_f64,
+                df_full,
+                df_reduced,
+                effects,
+                ses,
+                pvals,
+                return_t_stats,
+            )
+
+    if verbose:
+        valid_tests = np.sum(np.isfinite(ses))
+        print(f"FWL-QR GLM multi complete. {valid_tests}/{m * n_traits} marker-trait tests")
+        if valid_tests > 0:
+            print(f"Minimum value: {np.nanmin(pvals):.2e}")
+
+    return {
+        trait_name: AssociationResults(
+            effects=effects[:, idx],
+            se=ses[:, idx],
+            pvalues=pvals[:, idx],
+        )
+        for idx, trait_name in enumerate(resolved_trait_names)
+    }
+
+
+def _process_glm_batch_multi(
+    G: np.ndarray,
+    start: int,
+    end: int,
+    XT: np.ndarray,
+    iXX: np.ndarray,
+    beta_cov: np.ndarray,
+    xy_f64: np.ndarray,
+    rhs0: np.ndarray,
+    Y: np.ndarray,
+    yy_f64: np.ndarray,
+    df_full: int,
+    df_reduced: int,
+    effects: np.ndarray,
+    ses: np.ndarray,
+    pvals: np.ndarray,
+    return_t_stats: bool,
+) -> None:
+    """Process one genotype batch across all traits."""
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        xs = XT @ G                        # (p, b)
+        xst = xs.T                         # (b, p)
+        sy = G.T @ Y                       # (b, t)
+        ss = np.einsum("ij,ij->j", G, G)   # (b,)
+        B21 = xst @ iXX                    # (b, p)
+        tmp = sy - (xst @ beta_cov)        # (b, t)
+        t2_block = np.einsum("ij,ij->i", B21, xst)
+        B22 = ss - t2_block                # (b,)
+
+    B21 = B21.astype(np.float64, copy=False)
+    tmp = tmp.astype(np.float64, copy=False)
+    B22 = B22.astype(np.float64, copy=False)
+    sy = sy.astype(np.float64, copy=False)
+
+    valid = B22 > 1e-8
+    invB22 = np.zeros_like(B22, dtype=np.float64)
+    invB22[valid] = 1.0 / B22[valid]
+
+    beta_marker = invB22[:, np.newaxis] * tmp  # (b, t)
+    b21_xy = B21 @ xy_f64                        # (b, t)
+    rhs_cov = rhs0[np.newaxis, :] - (beta_marker * b21_xy)
+
+    df_array = np.full(B22.shape[0], df_full, dtype=np.float64)
+    df_array[~valid] = df_reduced
+
+    ve = (yy_f64[np.newaxis, :] - (rhs_cov + beta_marker * sy)) / df_array[:, np.newaxis]
+    ve = np.maximum(ve, 0.0)
+    se_marker = np.sqrt(ve * invB22[:, np.newaxis])
+
+    t_stats = np.zeros_like(beta_marker, dtype=np.float64)
+    finite_mask = (se_marker > 0) & np.isfinite(se_marker)
+    t_stats[finite_mask] = np.abs(beta_marker[finite_mask] / se_marker[finite_mask])
+
+    if return_t_stats:
+        p_batch = t_stats.copy()
+        p_batch[~finite_mask] = 0.0
+    else:
+        p_batch = np.ones_like(beta_marker, dtype=np.float64)
+        if np.any(finite_mask):
+            df_expanded = np.broadcast_to(df_array[:, np.newaxis], t_stats.shape)
+            p_batch[finite_mask] = _fast_t_pvalue(
+                t_stats[finite_mask], df_expanded[finite_mask]
+            )
+
+    beta_marker[~valid, :] = 0.0
+    se_marker[~valid, :] = np.nan
+    if return_t_stats:
+        p_batch[~valid, :] = 0.0
+    else:
+        p_batch[~valid, :] = 1.0
+
+    effects[start:end, :] = beta_marker
+    ses[start:end, :] = se_marker
+    pvals[start:end, :] = p_batch
 
 
 def _process_glm_batch(
