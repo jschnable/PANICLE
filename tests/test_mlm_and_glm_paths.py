@@ -4,7 +4,7 @@ import pytest
 
 from panicle.association import glm_fwl_qr, mlm, mlm_loco
 from panicle.association.mlm import PANICLE_MLM, estimate_variance_components_brent, compute_fast_pvalues
-from panicle.association.mlm_loco import PANICLE_MLM_LOCO
+from panicle.association.mlm_loco import PANICLE_MLM_LOCO, PANICLE_MLM_LOCO_MULTI
 from panicle.matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from panicle.utils.data_types import GenotypeMatrix, KinshipMatrix
 
@@ -217,6 +217,72 @@ def test_mlm_loco_numpy_missing_matches_genotype_matrix_missing() -> None:
     np.testing.assert_allclose(res_np.effects, res_gm.effects, rtol=1e-8, atol=1e-8, equal_nan=True)
     np.testing.assert_allclose(res_np.se, res_gm.se, rtol=1e-8, atol=1e-8, equal_nan=True)
     np.testing.assert_allclose(res_np.pvalues, res_gm.pvalues, rtol=1e-8, atol=1e-8, equal_nan=True)
+
+
+def test_mlm_loco_multi_matches_single_trait_runs() -> None:
+    rng = np.random.default_rng(101)
+    n, m = 14, 10
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+
+    trait1 = rng.normal(size=n)
+    trait2 = 0.2 * geno[:, 0].astype(np.float64) + rng.normal(scale=0.5, size=n)
+    phe_multi = np.column_stack([trait1, trait2]).astype(np.float64)
+
+    geno_matrix = GenotypeMatrix(geno)
+    loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=4, verbose=False)
+    trait_names = ["Trait1", "Trait2"]
+    multi_results = PANICLE_MLM_LOCO_MULTI(
+        phe=phe_multi,
+        geno=geno_matrix,
+        map_data=map_df,
+        trait_names=trait_names,
+        loco_kinship=loco,
+        maxLine=4,
+        cpu=1,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    for trait_idx, trait_name in enumerate(trait_names):
+        phe_single = np.column_stack([np.arange(n), phe_multi[:, trait_idx]])
+        single = PANICLE_MLM_LOCO(
+            phe=phe_single,
+            geno=geno_matrix,
+            map_data=map_df,
+            loco_kinship=loco,
+            maxLine=4,
+            cpu=1,
+            lrt_refinement=False,
+            verbose=False,
+        )
+        np.testing.assert_allclose(
+            multi_results[trait_name].effects,
+            single.effects,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            multi_results[trait_name].se,
+            single.se,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            multi_results[trait_name].pvalues,
+            single.pvalues,
+            rtol=1e-6,
+            atol=1e-6,
+            equal_nan=True,
+        )
 
 
 def test_mlm_errors_on_invalid_inputs() -> None:

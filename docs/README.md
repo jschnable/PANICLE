@@ -27,6 +27,11 @@ Welcome to the PANICLE documentation! This guide will help you perform genome-wi
   - Demonstrates GLM, MLM, FarmCPU, and BLINK methods
   - Visualizations and result interpretation
 
+- **[Multi-Trait eQTL Acceleration Tutorial](eqtl_multitrait_acceleration_tutorial.ipynb)** - Interactive Jupyter notebook
+  - Demonstrates eQTL-style many-traits LOCO MLM workflow
+  - Shows chromosome-major acceleration (`PANICLE_MLM_LOCO_MULTI`)
+  - Includes writing top QTL hits to CSV output
+
 - **[Example Scripts](../examples/README.md)** - Runnable Python scripts
   - 01: Basic GWAS with GLM
   - 02: MLM with population structure

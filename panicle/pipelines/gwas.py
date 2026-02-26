@@ -37,7 +37,7 @@ from ..association.farmcpu_resampling import (
 )
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
-from ..association.mlm_loco import PANICLE_MLM_LOCO
+from ..association.mlm_loco import PANICLE_MLM_LOCO, PANICLE_MLM_LOCO_MULTI
 from ..association.bayes_loco import PANICLE_BayesLOCO
 from ..association.bayes_loco.config import BayesLocoConfig
 from ..association.farmcpu import PANICLE_FarmCPU
@@ -796,7 +796,8 @@ class GWASPipeline:
                     "BAYESLOCO unrelated_subset calibration requires unrelated_subset_indices in bayesloco_params"
                 )
 
-        need_kinship = 'MLM' in methods_upper_check
+        # Global kinship is only required for non-LOCO MLM runs.
+        need_kinship = 'MLM' in methods_upper_check and self.geno_map is None
         structure_n_pcs = self._structure_n_pcs
 
         # 2. Bonferroni / Thresholding Logic
@@ -825,12 +826,18 @@ class GWASPipeline:
 
         # 3. Main Loop over Traits
         summary_rows = []
-        
-        for trait_name in selected_traits:
-            self.log(f"\n-- Analyzing Trait: {trait_name} --")
-            trait_start_time = time.time()
+        prepared_traits: List[
+            Tuple[
+                str,
+                np.ndarray,
+                GenotypeMatrix,
+                Optional[np.ndarray],
+                Optional[np.ndarray],
+                np.ndarray,
+            ]
+        ] = []
 
-            # Prepare Trait-Specific Data (remove missing pheno/covs)
+        for trait_name in selected_traits:
             trait_data = self._prepare_trait_data(
                 trait_name,
                 n_pcs=structure_n_pcs,
@@ -838,8 +845,62 @@ class GWASPipeline:
             )
             if not trait_data:
                 continue
-
             y_sub, g_sub, cov_sub, k_sub, trait_geno_idx = trait_data
+            prepared_traits.append(
+                (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx)
+            )
+
+        grouped_mlm_results: Dict[str, AssociationResults] = {}
+        if "MLM" in methods_upper_check and self.geno_map is not None and len(prepared_traits) >= 2:
+            subset_groups: Dict[
+                Tuple[int, int],
+                List[
+                    Tuple[
+                        str,
+                        np.ndarray,
+                        GenotypeMatrix,
+                        Optional[np.ndarray],
+                        Optional[np.ndarray],
+                        np.ndarray,
+                    ]
+                ],
+            ] = {}
+            for item in prepared_traits:
+                subset_key = self._sample_subset_cache_key(item[5])
+                subset_groups.setdefault(subset_key, []).append(item)
+
+            for group_items in subset_groups.values():
+                if len(group_items) < 2:
+                    continue
+                group_trait_names = [item[0] for item in group_items]
+                y_matrix = np.column_stack([item[1][:, 1].astype(np.float64) for item in group_items])
+                group_geno = group_items[0][2]
+                group_cov = group_items[0][3]
+                group_indices = group_items[0][5]
+                self.log(
+                    "   Running grouped MLM LOCO for "
+                    f"{len(group_items)} traits sharing {group_indices.size} samples"
+                )
+                group_loco_kinship = self._get_or_create_loco_kinship(
+                    group_geno,
+                    group_indices,
+                    maxLine=5000,
+                )
+                grouped_results = PANICLE_MLM_LOCO_MULTI(
+                    phe=y_matrix,
+                    geno=group_geno,
+                    map_data=self.geno_map,
+                    trait_names=group_trait_names,
+                    loco_kinship=group_loco_kinship,
+                    CV=group_cov,
+                    cpu=method_cpus,
+                    verbose=False,
+                )
+                grouped_mlm_results.update(grouped_results)
+
+        for trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx in prepared_traits:
+            self.log(f"\n-- Analyzing Trait: {trait_name} --")
+            trait_start_time = time.time()
             n_samples_trait = y_sub.shape[0]
 
             # Run methods in deterministic order. Method engines may still use
@@ -919,7 +980,8 @@ class GWASPipeline:
 
             mlm_loco_kinship = None
             mlm_kwargs = {"cpu": method_cpus}
-            if 'MLM' in ordered_methods and self.geno_map is not None:
+            use_grouped_mlm = "MLM" in ordered_methods and trait_name in grouped_mlm_results
+            if "MLM" in ordered_methods and self.geno_map is not None and not use_grouped_mlm:
                 # Keep MLM in-process so LOCO kinship/eigens can be cached across traits.
                 self.log("   Running MLM in main process (reusing LOCO cache)")
                 mlm_loco_kinship = self._get_or_create_loco_kinship(
@@ -931,27 +993,33 @@ class GWASPipeline:
             if ordered_methods:
                 self.log(f"   Running analysis for: {ordered_methods}")
                 for method in ordered_methods:
-                    loco_arg = mlm_loco_kinship if method == 'MLM' else None
-                    mlm_kw_arg = mlm_kwargs if method == 'MLM' else None
-                    res_name, res_obj, lambda_gc, error = _run_single_method(
-                        method,
-                        y_sub,
-                        g_sub,
-                        cov_sub,
-                        k_sub,
-                        self.geno_map,
-                        fc_params,
-                        blk_params,
-                        bl_params,
-                        max_iterations,
-                        base_threshold,
-                        n_markers,
-                        effective_n,
-                        alpha,
-                        loco_arg,
-                        mlm_kw_arg,
-                        ncpus=method_cpus,
-                    )
+                    if method == "MLM" and use_grouped_mlm:
+                        res_name = "MLM"
+                        res_obj = grouped_mlm_results[trait_name]
+                        lambda_gc = genomic_inflation_factor(res_obj.pvalues)
+                        error = None
+                    else:
+                        loco_arg = mlm_loco_kinship if method == "MLM" else None
+                        mlm_kw_arg = mlm_kwargs if method == "MLM" else None
+                        res_name, res_obj, lambda_gc, error = _run_single_method(
+                            method,
+                            y_sub,
+                            g_sub,
+                            cov_sub,
+                            k_sub,
+                            self.geno_map,
+                            fc_params,
+                            blk_params,
+                            bl_params,
+                            max_iterations,
+                            base_threshold,
+                            n_markers,
+                            effective_n,
+                            alpha,
+                            loco_arg,
+                            mlm_kw_arg,
+                            ncpus=method_cpus,
+                        )
                     if error:
                         self.log(f"   {method} Failed: {error}")
                         continue
