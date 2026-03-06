@@ -19,6 +19,7 @@ from ..utils.data_types import (
     GenotypeMatrix,
     KinshipMatrix,
     AssociationResults,
+    ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
 from ..utils.perf import warn_if_potential_single_thread_blas
@@ -361,6 +362,8 @@ def PANICLE_MLM(phe: np.ndarray,
             raise ValueError("Phenotype must be a 1D trait array or a 2D [ID, trait_value] array")
     else:
         raise ValueError("Phenotype must be numpy array")
+
+    geno = ensure_eager_genotype(geno)
     
     # Handle genotype input
     if isinstance(geno, GenotypeMatrix):

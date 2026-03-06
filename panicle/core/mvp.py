@@ -324,7 +324,11 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
 
             valid_indices = np.where(valid_mask)[0]
             phenotype_array = np.column_stack([trait_ids[valid_mask], raw_trait[valid_mask]])
-            trait_genotype = genotype if n_valid == genotype.n_individuals else genotype.subset_individuals(valid_indices)
+            trait_genotype = (
+                genotype
+                if n_valid == genotype.n_individuals
+                else genotype.subset_individuals(valid_indices, materialize=True)
+            )
             trait_covariates = covariates[valid_mask, :] if covariates is not None else None
             analysis_results['summary']['trait_sample_sizes'][trait_name] = n_valid
 
@@ -670,8 +674,8 @@ def _align_samples_to_genotype(
 ) -> Tuple[Phenotype, GenotypeMatrix, Optional[np.ndarray], Dict[str, int]]:
     """Align phenotype (and optional covariates) to genotype sample IDs.
 
-    Keeps phenotype row order, subsets genotype to matching rows, and reports
-    how many IDs were retained/dropped.
+    Uses genotype sample order for the aligned outputs so downstream genotype
+    subsetting can stay monotonic and cache-friendly.
     """
     phenotype_df = phenotype.data.copy()
     phenotype_df['ID'] = phenotype_df['ID'].astype(str)
@@ -680,20 +684,21 @@ def _align_samples_to_genotype(
     id_to_genotype_index = {sample_id: idx for idx, sample_id in enumerate(genotype_ids_str)}
 
     phe_ids = phenotype_df['ID'].to_numpy()
-    keep_mask = np.array([sample_id in id_to_genotype_index for sample_id in phe_ids], dtype=bool)
-
-    n_common = int(keep_mask.sum())
+    phe_id_set = set(phe_ids.tolist())
+    ordered_common_ids = [gid for gid in genotype_ids_str if gid in phe_id_set]
+    n_common = len(ordered_common_ids)
     if n_common == 0:
         raise ValueError("No common sample IDs between phenotype and genotype data")
 
-    aligned_phenotype_df = phenotype_df.loc[keep_mask].reset_index(drop=True)
-    aligned_ids = aligned_phenotype_df['ID'].tolist()
-    genotype_indices = np.array([id_to_genotype_index[sample_id] for sample_id in aligned_ids], dtype=int)
-    aligned_genotype = genotype.subset_individuals(genotype_indices)
+    aligned_phenotype_df = phenotype_df.set_index('ID').loc[ordered_common_ids].reset_index()
+    genotype_indices = np.array([id_to_genotype_index[sample_id] for sample_id in ordered_common_ids], dtype=int)
+    aligned_genotype = genotype.subset_individuals(genotype_indices, materialize=True)
 
     aligned_covariates = None
     if covariates is not None:
-        aligned_covariates = covariates[keep_mask, :]
+        id_to_phe_row = {sample_id: idx for idx, sample_id in enumerate(phe_ids.tolist())}
+        phe_row_indices = np.array([id_to_phe_row[sample_id] for sample_id in ordered_common_ids], dtype=int)
+        aligned_covariates = covariates[phe_row_indices, :]
 
     unique_phe = set(phe_ids.tolist())
     unique_geno = set(genotype_ids_str)

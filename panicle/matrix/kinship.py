@@ -8,6 +8,7 @@ from typing import Optional, Union, Tuple
 from ..utils.data_types import (
     GenotypeMatrix,
     KinshipMatrix,
+    ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
 import warnings
@@ -40,6 +41,8 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
     Returns:
         KinshipMatrix object or tuple (KinshipMatrix, eigendecomposition_dict)
     """
+    M = ensure_eager_genotype(M)
+
     # Handle different input types
     if isinstance(M, GenotypeMatrix):
         genotype = M
@@ -160,6 +163,8 @@ def PANICLE_K_IBS(M: Union[GenotypeMatrix, np.ndarray],
     Returns:
         KinshipMatrix object
     """
+    M = ensure_eager_genotype(M)
+
     # Handle input types
     if isinstance(M, GenotypeMatrix):
         genotype = M

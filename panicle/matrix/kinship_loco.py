@@ -11,7 +11,15 @@ import numpy as np
 import warnings
 import pandas as pd
 
-from ..utils.data_types import GenotypeMatrix, GenotypeMap, KinshipMatrix
+from ..utils.data_types import (
+    CHROM_COLUMN,
+    GenotypeMatrix,
+    GenotypeMap,
+    KinshipMatrix,
+    attach_genotype_map_metadata,
+    ensure_eager_genotype,
+    group_marker_indices_by_labels,
+)
 
 # Check for joblib availability
 try:
@@ -49,23 +57,59 @@ def _group_markers_by_chrom(chrom_values: np.ndarray) -> Dict[str, np.ndarray]:
 
     Uses vectorized numpy operations for speed instead of Python loops.
     """
-    # Get unique chromosomes in order of first appearance
-    unique_chroms, inverse_indices = np.unique(chrom_values, return_inverse=True)
+    return group_marker_indices_by_labels(chrom_values)
 
-    # Use argsort to group indices by chromosome efficiently
-    sorted_order = np.argsort(inverse_indices, kind='stable')
 
-    # Find boundaries between chromosome groups
-    sorted_inverse = inverse_indices[sorted_order]
-    boundaries = np.concatenate([[0], np.where(np.diff(sorted_inverse) != 0)[0] + 1, [len(chrom_values)]])
+def _resolve_chromosome_groups(
+    map_data: Union[GenotypeMap, pd.DataFrame, np.ndarray, List],
+    n_markers: int,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], List[str]]:
+    """Resolve chromosome labels and cached marker-group indices."""
+    chrom_values = _extract_chromosomes(map_data, n_markers)
 
-    # Build result dictionary
-    result = {}
-    for i, chrom in enumerate(unique_chroms):
-        start, end = boundaries[i], boundaries[i + 1]
-        result[str(chrom)] = sorted_order[start:end]
+    if isinstance(map_data, GenotypeMap):
+        chrom_groups = map_data.get_chromosome_groups()
+        chrom_order = map_data.get_chromosome_order()
+    elif isinstance(map_data, pd.DataFrame):
+        if CHROM_COLUMN not in map_data.columns:
+            raise ValueError("map_data is missing required column 'CHROM'")
+        attach_genotype_map_metadata(map_data)
+        chrom_groups = map_data.attrs.get("chromosome_groups") or _group_markers_by_chrom(chrom_values)
+        chrom_order = list(map_data.attrs.get("chromosome_order") or chrom_groups.keys())
+    elif hasattr(map_data, "to_dataframe"):
+        map_df = map_data.to_dataframe()
+        if CHROM_COLUMN not in map_df.columns:
+            raise ValueError("map_data is missing required column 'CHROM'")
+        attach_genotype_map_metadata(map_df)
+        chrom_groups = map_df.attrs.get("chromosome_groups") or _group_markers_by_chrom(chrom_values)
+        chrom_order = list(map_df.attrs.get("chromosome_order") or chrom_groups.keys())
+    else:
+        chrom_groups = _group_markers_by_chrom(chrom_values)
+        chrom_order = list(chrom_groups.keys())
 
-    return result
+    normalized_groups: Dict[str, np.ndarray] = {}
+    total_markers = 0
+    for chrom in chrom_order:
+        indices = np.asarray(chrom_groups[str(chrom)], dtype=np.int64)
+        normalized_groups[str(chrom)] = indices
+        total_markers += int(indices.size)
+
+    if total_markers != n_markers:
+        raise ValueError("Chromosome groups must cover all genotype markers exactly once")
+
+    return chrom_values, normalized_groups, [str(chrom) for chrom in chrom_order]
+
+
+def _get_genotype_columns(
+    genotype: Union[GenotypeMatrix, np.ndarray],
+    indices: np.ndarray,
+    *,
+    dtype: np.dtype = np.float32,
+) -> np.ndarray:
+    """Fetch marker columns in individual-major order without mutating source storage."""
+    if isinstance(genotype, GenotypeMatrix):
+        return np.array(genotype.get_columns(indices), dtype=dtype, copy=True)
+    return np.array(genotype[:, indices], dtype=dtype, copy=True)
 
 
 class LocoKinship:
@@ -148,8 +192,9 @@ class LocoKinship:
 
 def _compute_chrom_kinship(chrom: str,
                            indices: np.ndarray,
-                           genotype: np.ndarray,
-                           n_individuals: int) -> Tuple[str, np.ndarray, np.ndarray]:
+                           genotype: Union[GenotypeMatrix, np.ndarray],
+                           n_individuals: int,
+                           is_imputed: bool) -> Tuple[str, np.ndarray, np.ndarray]:
     """Compute kinship contribution for a single chromosome.
 
     This function is designed to be called in parallel.
@@ -159,21 +204,21 @@ def _compute_chrom_kinship(chrom: str,
         Tuple of (chrom, raw_kinship, diag) as float32 arrays
     """
     # Get genotype data for this chromosome (float32 for faster matmul)
-    Z = genotype[:, indices].astype(np.float32)
+    Z = _get_genotype_columns(genotype, indices, dtype=np.float32)
 
-    # Handle missing values: -9 sentinel and NaN
-    # Convert -9 to NaN so nanmean excludes them from mean calculation
-    missing_mask = (Z == -9) | np.isnan(Z)
-    if missing_mask.any():
-        Z[missing_mask] = np.nan
-
-    # Center by column means (nanmean excludes NaN/missing)
-    means = np.nanmean(Z, axis=0)
-    means[np.isnan(means)] = 0.0
+    if is_imputed:
+        means = np.mean(Z, axis=0)
+    else:
+        # Convert -9 to NaN so nanmean excludes them from mean calculation.
+        missing_mask = (Z == -9) | np.isnan(Z)
+        if missing_mask.any():
+            Z[missing_mask] = np.nan
+        means = np.nanmean(Z, axis=0)
+        means[np.isnan(means)] = 0.0
     Z -= means[np.newaxis, :]
 
-    # Replace missing values with 0 (centered mean) for kinship calculation
-    if not np.all(np.isfinite(Z)):
+    # Replace missing values with 0 (centered mean) for kinship calculation.
+    if not is_imputed and not np.all(np.isfinite(Z)):
         Z[~np.isfinite(Z)] = 0.0
 
     # Compute raw kinship contribution
@@ -202,8 +247,10 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
     Returns:
         LocoKinship object with total and per-chromosome kinship data
     """
+    M = ensure_eager_genotype(M)
+
     if isinstance(M, GenotypeMatrix):
-        genotype_data = M._data
+        genotype_data = M
         n_individuals = M.n_individuals
         n_markers = M.n_markers
         is_imputed = M.is_imputed
@@ -214,9 +261,7 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
     else:
         raise ValueError("M must be GenotypeMatrix or numpy array")
 
-    chrom_values = _extract_chromosomes(map_data, n_markers)
-    chrom_groups = _group_markers_by_chrom(chrom_values)
-    chrom_order = list(chrom_groups.keys())
+    _, chrom_groups, chrom_order = _resolve_chromosome_groups(map_data, n_markers)
     n_chroms = len(chrom_order)
 
     if verbose:
@@ -253,7 +298,7 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
             pre_dispatch=n_workers,
             batch_size=1,
         )(
-            delayed(_compute_chrom_kinship)(chrom, indices, genotype_data, n_individuals)
+            delayed(_compute_chrom_kinship)(chrom, indices, genotype_data, n_individuals, is_imputed)
             for chrom, indices in chrom_groups.items()
         )
 
@@ -302,11 +347,7 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
                 batch_indices = indices[start_idx:end_idx]
 
                 # Get genotype data for this batch (float32 for faster matmul)
-                if isinstance(M, GenotypeMatrix):
-                    # For GenotypeMatrix, need to handle non-contiguous indices
-                    Z_batch = M._data[:, batch_indices].astype(np.float32)
-                else:
-                    Z_batch = genotype_data[:, batch_indices].astype(np.float32)
+                Z_batch = _get_genotype_columns(genotype_data, batch_indices, dtype=np.float32)
 
                 # Handle missing values only if data is not pre-imputed
                 if is_imputed:

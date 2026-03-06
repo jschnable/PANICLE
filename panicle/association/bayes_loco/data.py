@@ -6,7 +6,7 @@ from typing import Optional, Union, Dict, List
 import numpy as np
 
 from ...utils.data_types import GenotypeMatrix, impute_numpy_batch_major_allele
-from ...matrix.kinship_loco import _extract_chromosomes, _group_markers_by_chrom
+from ...matrix.kinship_loco import _resolve_chromosome_groups
 from .config import BayesLocoConfig
 
 
@@ -38,9 +38,10 @@ class BayesLocoData:
         else:
             raise ValueError("geno must be GenotypeMatrix or numpy.ndarray")
 
-        self.chrom_values = _extract_chromosomes(map_data, self.m)
-        self.chrom_groups = _group_markers_by_chrom(self.chrom_values)
-        self.chrom_order: List[str] = list(self.chrom_groups.keys())
+        self.chrom_values, self.chrom_groups, self.chrom_order = _resolve_chromosome_groups(
+            map_data,
+            self.m,
+        )
 
         self.X, self.Q, self.r = self._build_fwl()
         self.var_r = float(np.var(self.r, ddof=1)) if self.n > 1 else float(np.var(self.r))

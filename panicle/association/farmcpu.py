@@ -31,7 +31,12 @@ from typing import Optional, Union, List, Tuple, Dict, Any
 import numpy as np
 from scipy import linalg, special, stats
 
-from ..utils.data_types import GenotypeMatrix, GenotypeMap, AssociationResults
+from ..utils.data_types import (
+    GenotypeMatrix,
+    GenotypeMap,
+    AssociationResults,
+    ensure_eager_genotype,
+)
 from .glm import PANICLE_GLM
 
 
@@ -210,8 +215,10 @@ def _validate_genotype(
         wrapped for numpy arrays if needed)
     """
     if isinstance(geno, GenotypeMatrix):
-        # Keep memory-mapped/lazy-loaded data as-is
-        # GLM will handle batched imputation efficiently
+        if geno.has_row_subset:
+            if verbose:
+                print("FarmCPU: materializing row-subset genotype for association scan")
+            geno = ensure_eager_genotype(geno)
         if verbose and not geno.is_imputed:
             print("FarmCPU: Using streaming mode for genotype processing (memory-efficient)")
         return geno

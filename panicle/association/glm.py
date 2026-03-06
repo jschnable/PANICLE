@@ -11,7 +11,7 @@ Implementation details:
 from typing import Optional, Union, Dict, List
 import numpy as np
 
-from ..utils.data_types import GenotypeMatrix, AssociationResults
+from ..utils.data_types import GenotypeMatrix, AssociationResults, ensure_eager_genotype
 from .glm_fwl_qr import PANICLE_GLM_ultrafast, PANICLE_GLM_multi_ultrafast
 
 def PANICLE_GLM(phe: np.ndarray,
@@ -55,6 +55,7 @@ def PANICLE_GLM(phe: np.ndarray,
         If return_cov_stats is True, results arrays will be 2D (markers x terms).
         If cov_pvalue_agg is set, arrays are 1D with cov_pvalue_summary metadata.
     """
+    geno = ensure_eager_genotype(geno)
     return PANICLE_GLM_ultrafast(
         phe=phe,
         geno=geno,
@@ -81,6 +82,7 @@ def PANICLE_GLM_MULTI(
     return_t_stats: bool = False,
 ) -> Dict[str, AssociationResults]:
     """Multi-trait GLM entry point optimized for shared genotype scans."""
+    geno = ensure_eager_genotype(geno)
     return PANICLE_GLM_multi_ultrafast(
         phe=phe,
         geno=geno,

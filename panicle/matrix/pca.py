@@ -2,6 +2,7 @@
 Principal Component Analysis for GWAS
 """
 
+import os
 import numpy as np
 from typing import Optional, Union, Tuple
 from ..utils.data_types import GenotypeMatrix, KinshipMatrix
@@ -10,6 +11,13 @@ import warnings
 PCA_MARKER_SAMPLE_THRESHOLD = 500_000
 PCA_MARKER_SAMPLE_SIZE = 200_000
 PCA_MARKER_SAMPLE_SEED = 0
+PCA_MATERIALIZE_MAX_BYTES = int(
+    os.getenv("PANICLE_PCA_MATERIALIZE_MAX_BYTES", str(6 * 1024 ** 3))
+)
+_PCA_MATERIALIZE_ENV = os.getenv(
+    "PANICLE_PCA_MATERIALIZE_SPARSE_MEMMAP",
+    "auto",
+).strip().lower()
 
 def PANICLE_PCA(M: Optional[Union[GenotypeMatrix, np.ndarray]] = None,
            K: Optional[Union[KinshipMatrix, np.ndarray]] = None, 
@@ -148,6 +156,27 @@ def PANICLE_PCA_genotype(M: Union[GenotypeMatrix, np.ndarray],
             print(
                 f"Sampling {markers_used} of {n_markers} markers for PCA "
                 f"(seed={PCA_MARKER_SAMPLE_SEED})"
+            )
+
+    if (
+        sample_indices is not None
+        and isinstance(genotype, GenotypeMatrix)
+        and genotype.is_memmap
+    ):
+        materialize_allowed = _PCA_MATERIALIZE_ENV not in {"0", "false", "no", "off"}
+        materialize_forced = _PCA_MATERIALIZE_ENV in {"1", "true", "yes", "on"}
+        if materialize_allowed and (
+            materialize_forced or genotype.estimated_nbytes <= PCA_MATERIALIZE_MAX_BYTES
+        ):
+            if verbose:
+                print(
+                    "Materializing genotype rows for sparse PCA marker access "
+                    f"({genotype.estimated_nbytes / (1024 ** 3):.2f} GiB)"
+                )
+            genotype = genotype.subset_individuals(
+                np.arange(genotype.n_individuals, dtype=np.int64),
+                materialize=True,
+                precompute_alleles=not genotype.is_imputed,
             )
 
     if verbose:

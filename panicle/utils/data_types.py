@@ -91,6 +91,292 @@ def canonicalize_genotype_map_dataframe(
     return out[base_cols + remaining_cols]
 
 
+def group_marker_indices_by_labels(labels: np.ndarray) -> Dict[str, np.ndarray]:
+    """Return ordered marker indices grouped by chromosome/label."""
+    values = np.asarray(labels).astype(str, copy=False)
+    if values.ndim != 1:
+        raise ValueError("Marker labels must be a 1D array")
+    if values.size == 0:
+        return {}
+
+    unique_values, inverse_indices = np.unique(values, return_inverse=True)
+    sorted_order = np.argsort(inverse_indices, kind="stable")
+    sorted_inverse = inverse_indices[sorted_order]
+    boundaries = np.concatenate(
+        [[0], np.where(np.diff(sorted_inverse) != 0)[0] + 1, [values.size]]
+    )
+
+    grouped: Dict[str, np.ndarray] = {}
+    for idx, label in enumerate(unique_values):
+        start, end = boundaries[idx], boundaries[idx + 1]
+        grouped[str(label)] = sorted_order[start:end]
+    return grouped
+
+
+def attach_genotype_map_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach reusable chromosome-group metadata to a canonical map DataFrame."""
+    attrs = getattr(df, "attrs", {})
+    if attrs.get("chromosome_groups") and attrs.get("chromosome_order"):
+        return df
+
+    chrom_values = np.asarray(df[CHROM_COLUMN]).astype(str, copy=False)
+    chrom_groups = group_marker_indices_by_labels(chrom_values)
+    df.attrs["chromosome_groups"] = chrom_groups
+    df.attrs["chromosome_order"] = list(chrom_groups.keys())
+    return df
+
+
+def _pack_chromosome_groups(
+    chrom_groups: Dict[str, np.ndarray]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    order = np.array(list(chrom_groups.keys()), dtype=str)
+    offsets = np.zeros(len(order) + 1, dtype=np.int64)
+    for idx, chrom in enumerate(order):
+        offsets[idx + 1] = offsets[idx] + int(len(chrom_groups[str(chrom)]))
+    flat_indices = np.empty(int(offsets[-1]), dtype=np.int64)
+    for idx, chrom in enumerate(order):
+        start, end = int(offsets[idx]), int(offsets[idx + 1])
+        flat_indices[start:end] = np.asarray(chrom_groups[str(chrom)], dtype=np.int64)
+    return order, offsets, flat_indices
+
+
+def _unpack_chromosome_groups(
+    order: Sequence[str],
+    offsets: np.ndarray,
+    flat_indices: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    chrom_groups: Dict[str, np.ndarray] = {}
+    for idx, chrom in enumerate(order):
+        start = int(offsets[idx])
+        end = int(offsets[idx + 1])
+        chrom_groups[str(chrom)] = np.asarray(flat_indices[start:end], dtype=np.int64)
+    return chrom_groups
+
+
+class _PackedUtf8Column:
+    """Lazy UTF-8 string column stored as a byte blob plus offsets."""
+
+    def __init__(self, offsets: np.ndarray, data: np.ndarray):
+        self.offsets = np.asarray(offsets, dtype=np.int64)
+        self.data = np.asarray(data, dtype=np.uint8)
+        self._decoded: Optional[np.ndarray] = None
+
+    def __len__(self) -> int:
+        return max(0, int(self.offsets.size) - 1)
+
+    def to_numpy(self) -> np.ndarray:
+        if self._decoded is None:
+            buffer = memoryview(self.data)
+            out = np.empty(len(self), dtype=object)
+            for idx in range(len(out)):
+                start = int(self.offsets[idx])
+                end = int(self.offsets[idx + 1])
+                out[idx] = bytes(buffer[start:end]).decode("utf-8")
+            self._decoded = out
+        return self._decoded
+
+
+class _CategoricalUtf8Column:
+    """Lazy low-cardinality string column stored as category codes."""
+
+    def __init__(self, codes: np.ndarray, categories: np.ndarray):
+        self.codes = np.asarray(codes, dtype=np.int32)
+        self.categories = np.asarray(categories, dtype=object)
+        self._decoded: Optional[np.ndarray] = None
+
+    def __len__(self) -> int:
+        return int(self.codes.size)
+
+    def to_numpy(self) -> np.ndarray:
+        if self._decoded is None:
+            self._decoded = np.asarray(self.categories[self.codes], dtype=object)
+        return self._decoded
+
+
+def _pack_utf8_column(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Encode a string column as UTF-8 bytes with offsets."""
+    offsets = np.zeros(len(values) + 1, dtype=np.int64)
+    payload = bytearray()
+    for idx, value in enumerate(values):
+        encoded = str(value).encode("utf-8")
+        payload.extend(encoded)
+        offsets[idx + 1] = len(payload)
+    data = np.frombuffer(bytes(payload), dtype=np.uint8)
+    return offsets, data
+
+
+def _materialize_lazy_column(
+    column: Union[np.ndarray, "_PackedUtf8Column", "_CategoricalUtf8Column"]
+) -> np.ndarray:
+    if hasattr(column, "to_numpy"):
+        return column.to_numpy()  # type: ignore[return-value]
+    return np.asarray(column)
+
+
+def save_genotype_map_cache(
+    cache_path: Union[str, Path],
+    map_data: Union[pd.DataFrame, "GenotypeMap"],
+) -> None:
+    """Persist genotype-map metadata to a fast binary cache."""
+    if isinstance(map_data, GenotypeMap):
+        map_df = map_data.to_dataframe()
+        metadata = map_data.metadata
+    else:
+        map_df = map_data.copy()
+        metadata = getattr(map_df, "attrs", {})
+
+    map_df = canonicalize_genotype_map_dataframe(map_df)
+    map_df = attach_genotype_map_metadata(map_df)
+
+    arrays: Dict[str, np.ndarray] = {
+        "format_version": np.asarray(2, dtype=np.int16),
+        "columns": np.asarray(map_df.columns, dtype=str),
+        "is_imputed": np.asarray(bool(metadata.get("is_imputed", map_df.attrs.get("is_imputed", False)))),
+    }
+    column_kinds = np.empty(len(map_df.columns), dtype="<U24")
+    alias_of = np.full(len(map_df.columns), -1, dtype=np.int64)
+
+    for idx, column in enumerate(map_df.columns):
+        series = map_df[column]
+        values = series.to_numpy(copy=False)
+        if (
+            column == LEGACY_MARKER_ID_COLUMN
+            and MARKER_ID_COLUMN in map_df.columns
+            and series.astype(str).equals(map_df[MARKER_ID_COLUMN].astype(str))
+        ):
+            column_kinds[idx] = "alias"
+            alias_of[idx] = int(list(map_df.columns).index(MARKER_ID_COLUMN))
+            continue
+
+        if pd.api.types.is_bool_dtype(series.dtype) or pd.api.types.is_numeric_dtype(series.dtype):
+            column_kinds[idx] = "numeric"
+            arrays[f"col_{idx}"] = np.asarray(values)
+            continue
+
+        string_values = series.astype(str).to_numpy(dtype=object, copy=False)
+        if column == CHROM_COLUMN:
+            categories, codes = np.unique(string_values, return_inverse=True)
+            column_kinds[idx] = "categorical_utf8"
+            arrays[f"col_{idx}_codes"] = np.asarray(codes, dtype=np.int32)
+            arrays[f"col_{idx}_categories"] = np.asarray(categories, dtype=str)
+            continue
+
+        column_kinds[idx] = "packed_utf8"
+        offsets, data = _pack_utf8_column(string_values)
+        arrays[f"col_{idx}_offsets"] = offsets
+        arrays[f"col_{idx}_data"] = data
+
+    arrays["column_kinds"] = column_kinds
+    arrays["column_alias_of"] = alias_of
+
+    chrom_groups = map_df.attrs.get("chromosome_groups") or metadata.get("chromosome_groups")
+    if chrom_groups is None:
+        chrom_groups = group_marker_indices_by_labels(
+            np.asarray(map_df[CHROM_COLUMN]).astype(str, copy=False)
+        )
+    order, offsets, flat_indices = _pack_chromosome_groups(chrom_groups)
+    arrays["chrom_group_keys"] = order
+    arrays["chrom_group_offsets"] = offsets
+    arrays["chrom_group_indices"] = flat_indices
+
+    np.savez(cache_path, **arrays)
+
+
+def load_genotype_map_cache(
+    cache_path: Union[str, Path],
+    *,
+    legacy_csv_path: Optional[Union[str, Path]] = None,
+    migrate_legacy: bool = False,
+    legacy_is_imputed: Optional[bool] = None,
+) -> "GenotypeMap":
+    """Load genotype-map metadata from a binary cache or legacy CSV cache."""
+    cache_path = Path(cache_path)
+    if cache_path.exists():
+        with np.load(cache_path, allow_pickle=False) as archive:
+            if "format_version" in archive and "column_kinds" in archive:
+                columns = archive["columns"].astype(str).tolist()
+                column_kinds = archive["column_kinds"].astype(str).tolist()
+                if "column_alias_of" in archive:
+                    alias_of = np.asarray(archive["column_alias_of"], dtype=np.int64)
+                else:
+                    alias_of = np.full(len(columns), -1, dtype=np.int64)
+                column_data: Dict[str, Any] = {}
+                for idx, column in enumerate(columns):
+                    kind = column_kinds[idx]
+                    if kind == "alias":
+                        source_idx = int(alias_of[idx])
+                        if source_idx < 0:
+                            raise ValueError(f"Invalid alias mapping for cached column '{column}'")
+                        column_data[column] = column_data[columns[source_idx]]
+                    elif kind == "numeric":
+                        column_data[column] = archive[f"col_{idx}"]
+                    elif kind == "packed_utf8":
+                        column_data[column] = _PackedUtf8Column(
+                            archive[f"col_{idx}_offsets"],
+                            archive[f"col_{idx}_data"],
+                        )
+                    elif kind == "categorical_utf8":
+                        column_data[column] = _CategoricalUtf8Column(
+                            archive[f"col_{idx}_codes"],
+                            archive[f"col_{idx}_categories"],
+                        )
+                    else:
+                        raise ValueError(f"Unknown cached column kind: {kind}")
+
+                metadata: Dict[str, Any] = {}
+                if "is_imputed" in archive:
+                    metadata["is_imputed"] = bool(np.asarray(archive["is_imputed"]).item())
+                if (
+                    "chrom_group_keys" in archive
+                    and "chrom_group_offsets" in archive
+                    and "chrom_group_indices" in archive
+                ):
+                    order = archive["chrom_group_keys"].astype(str).tolist()
+                    offsets = np.asarray(archive["chrom_group_offsets"], dtype=np.int64)
+                    flat = np.asarray(archive["chrom_group_indices"], dtype=np.int64)
+                    metadata["chromosome_order"] = order
+                    metadata["chromosome_groups"] = _unpack_chromosome_groups(
+                        order,
+                        offsets,
+                        flat,
+                    )
+                return GenotypeMap.from_columns(
+                    column_data,
+                    column_order=columns,
+                    metadata=metadata,
+                )
+
+            if legacy_csv_path is None:
+                columns = archive["columns"].astype(str).tolist()
+                frame_data = {
+                    column: archive[f"col_{idx}"]
+                    for idx, column in enumerate(columns)
+                }
+                map_df = canonicalize_genotype_map_dataframe(pd.DataFrame(frame_data, copy=False))
+                attach_genotype_map_metadata(map_df)
+                if "is_imputed" in archive:
+                    map_df.attrs["is_imputed"] = bool(np.asarray(archive["is_imputed"]).item())
+                return GenotypeMap(map_df, metadata=dict(map_df.attrs))
+
+    if legacy_csv_path is None:
+        raise FileNotFoundError(f"Genotype map cache not found: {cache_path}")
+
+    legacy_path = Path(legacy_csv_path)
+    if not legacy_path.exists():
+        raise FileNotFoundError(f"Genotype map cache not found: {cache_path}")
+
+    map_df = canonicalize_genotype_map_dataframe(pd.read_csv(legacy_path))
+    map_df = attach_genotype_map_metadata(map_df)
+    if legacy_is_imputed is not None:
+        map_df.attrs["is_imputed"] = bool(legacy_is_imputed)
+    if migrate_legacy:
+        try:
+            save_genotype_map_cache(cache_path, map_df)
+        except Exception:
+            pass
+    return GenotypeMap(map_df, metadata=dict(map_df.attrs))
+
+
 def _read_table_with_auto_separator(path: Union[str, Path], *, header: Optional[int]) -> pd.DataFrame:
     """Read a small tabular file while auto-detecting common separators."""
     return pd.read_csv(path, sep=None, engine="python", header=header)
@@ -254,17 +540,78 @@ class GenotypeMap:
         else:
             raise ValueError("Data must be DataFrame or file path")
 
-        self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
-
-        self.data = canonicalize_genotype_map_dataframe(
+        attrs = getattr(raw_df, "attrs", {})
+        inherited_metadata = {
+            key: attrs[key]
+            for key in ("chromosome_groups", "chromosome_order")
+            if key in attrs
+        }
+        if metadata:
+            inherited_metadata.update(metadata)
+        self.metadata: Dict[str, Any] = inherited_metadata
+        self._dataframe_cache: Optional[pd.DataFrame] = canonicalize_genotype_map_dataframe(
             raw_df,
             include_legacy_snp_alias=True,
         )
+        attach_genotype_map_metadata(self._dataframe_cache)
+        self.metadata.setdefault("chromosome_groups", self._dataframe_cache.attrs.get("chromosome_groups"))
+        self.metadata.setdefault("chromosome_order", self._dataframe_cache.attrs.get("chromosome_order"))
+        self._column_order = list(self._dataframe_cache.columns)
+        self._column_data: Dict[str, Any] = {
+            column: self._dataframe_cache[column].to_numpy(copy=False)
+            for column in self._column_order
+        }
+
+    @classmethod
+    def from_columns(
+        cls,
+        column_data: Dict[str, Any],
+        *,
+        column_order: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "GenotypeMap":
+        obj = cls.__new__(cls)
+        obj.metadata = dict(metadata) if metadata is not None else {}
+        obj._dataframe_cache = None
+        obj._column_order = list(column_order) if column_order is not None else list(column_data.keys())
+        obj._column_data = dict(column_data)
+        if MARKER_ID_COLUMN not in obj._column_data:
+            raise ValueError(f"Missing required marker ID column '{MARKER_ID_COLUMN}'")
+        if CHROM_COLUMN not in obj._column_data:
+            raise ValueError(f"Missing required chromosome column '{CHROM_COLUMN}'")
+        if POS_COLUMN not in obj._column_data:
+            raise ValueError(f"Missing required position column '{POS_COLUMN}'")
+        if LEGACY_MARKER_ID_COLUMN not in obj._column_data:
+            obj._column_data[LEGACY_MARKER_ID_COLUMN] = obj._column_data[MARKER_ID_COLUMN]
+            if LEGACY_MARKER_ID_COLUMN not in obj._column_order:
+                insert_at = obj._column_order.index(POS_COLUMN) + 1 if POS_COLUMN in obj._column_order else 1
+                obj._column_order.insert(insert_at, LEGACY_MARKER_ID_COLUMN)
+        return obj
+
+    @property
+    def data(self) -> pd.DataFrame:
+        """Map data as a pandas DataFrame, materialized lazily if needed."""
+        if self._dataframe_cache is None:
+            frame_data = {
+                column: _materialize_lazy_column(self._column_data[column])
+                for column in self._column_order
+            }
+            self._dataframe_cache = pd.DataFrame(frame_data, copy=False)
+            if "chromosome_groups" in self.metadata:
+                self._dataframe_cache.attrs["chromosome_groups"] = self.metadata["chromosome_groups"]
+            if "chromosome_order" in self.metadata:
+                self._dataframe_cache.attrs["chromosome_order"] = self.metadata["chromosome_order"]
+            if "is_imputed" in self.metadata:
+                self._dataframe_cache.attrs["is_imputed"] = self.metadata["is_imputed"]
+        return self._dataframe_cache
+
+    def _get_column(self, column: str) -> np.ndarray:
+        return _materialize_lazy_column(self._column_data[column])
     
     @property
     def marker_ids(self) -> pd.Series:
         """Marker identifiers."""
-        return self.data[MARKER_ID_COLUMN]
+        return pd.Series(self._get_column(MARKER_ID_COLUMN), name=MARKER_ID_COLUMN)
 
     @property
     def snp_ids(self) -> pd.Series:
@@ -274,28 +621,55 @@ class GenotypeMap:
     @property
     def chromosomes(self) -> pd.Series:
         """Chromosome numbers"""
-        return self.data[CHROM_COLUMN]
+        return pd.Series(self._get_column(CHROM_COLUMN), name=CHROM_COLUMN)
     
     @property
     def positions(self) -> pd.Series:
         """Physical positions"""
-        return self.data[POS_COLUMN]
+        return pd.Series(self._get_column(POS_COLUMN), name=POS_COLUMN)
     
     @property
     def n_markers(self) -> int:
         """Number of markers"""
-        return len(self.data)
+        return len(self._column_data[POS_COLUMN])
     
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to pandas DataFrame"""
-        return self.data.copy()
+        out = self.data.copy()
+        if "chromosome_groups" in self.metadata:
+            out.attrs["chromosome_groups"] = self.metadata["chromosome_groups"]
+        if "chromosome_order" in self.metadata:
+            out.attrs["chromosome_order"] = self.metadata["chromosome_order"]
+        return out
 
     def with_metadata(self, **metadata: Any) -> "GenotypeMap":
         """Return a new GenotypeMap with merged metadata dictionary."""
         merged = dict(self.metadata)
         merged.update(metadata)
-        new_map = GenotypeMap(self.data.copy(), metadata=merged)
-        return new_map
+        return GenotypeMap.from_columns(
+            self._column_data,
+            column_order=self._column_order,
+            metadata=merged,
+        )
+
+    def get_chromosome_groups(self) -> Dict[str, np.ndarray]:
+        """Return cached chromosome-to-marker index groups."""
+        chrom_groups = self.metadata.get("chromosome_groups")
+        if chrom_groups is None:
+            chrom_groups = group_marker_indices_by_labels(
+                np.asarray(self.chromosomes).astype(str, copy=False)
+            )
+            self.metadata["chromosome_groups"] = chrom_groups
+            self.metadata["chromosome_order"] = list(chrom_groups.keys())
+        return chrom_groups
+
+    def get_chromosome_order(self) -> List[str]:
+        """Return chromosome labels in cached group order."""
+        order = self.metadata.get("chromosome_order")
+        if order is None:
+            order = list(self.get_chromosome_groups().keys())
+            self.metadata["chromosome_order"] = order
+        return list(order)
 
 
 def impute_major_allele_inplace(geno: np.ndarray, missing_value: int = -9) -> int:
@@ -394,7 +768,8 @@ class GenotypeMatrix:
                  dtype: np.dtype = np.int8,
                  precompute_alleles: bool = True,
                  is_imputed: bool = False,
-                 transposed: bool = False):
+                 transposed: bool = False,
+                 row_indexer: Optional[np.ndarray] = None):
         """Initialize GenotypeMatrix.
 
         Args:
@@ -424,6 +799,20 @@ class GenotypeMatrix:
         else:
             raise ValueError("Data must be array or file path")
 
+        base_n_individuals = self._data.shape[1] if self._transposed else self._data.shape[0]
+        if row_indexer is None:
+            self._row_indexer = None
+        else:
+            normalized_row_indexer = np.asarray(row_indexer, dtype=np.int64)
+            if normalized_row_indexer.ndim != 1:
+                raise ValueError("row_indexer must be a 1D array")
+            if normalized_row_indexer.size:
+                if normalized_row_indexer.min() < 0 or normalized_row_indexer.max() >= base_n_individuals:
+                    raise IndexError("row_indexer is out of bounds for genotype matrix")
+                if np.array_equal(normalized_row_indexer, np.arange(base_n_individuals, dtype=np.int64)):
+                    normalized_row_indexer = None
+            self._row_indexer = normalized_row_indexer
+
         # Track if data has been pre-imputed (no -9 values)
         # This allows downstream code to skip -9 checks for faster processing
         self._is_imputed = is_imputed
@@ -438,10 +827,11 @@ class GenotypeMatrix:
     @property
     def shape(self) -> Tuple[int, int]:
         """Matrix shape (n_individuals, n_markers)"""
-        if self._transposed:
-            # Internal storage is (n_markers, n_individuals)
-            return (self._data.shape[1], self._data.shape[0])
-        return self._data.shape
+        n_individuals = len(self._row_indexer) if self._row_indexer is not None else (
+            self._data.shape[1] if self._transposed else self._data.shape[0]
+        )
+        n_markers = self._data.shape[0] if self._transposed else self._data.shape[1]
+        return (n_individuals, n_markers)
 
     @property
     def n_individuals(self) -> int:
@@ -469,75 +859,210 @@ class GenotypeMatrix:
         """
         return self._transposed
 
+    @property
+    def is_memmap(self) -> bool:
+        """Whether the underlying storage is a numpy memmap."""
+        return self._is_memmap
+
+    @property
+    def estimated_nbytes(self) -> int:
+        """Estimated byte size of the matrix in API row-major shape."""
+        return int(self.n_individuals * self.n_markers * self._data.dtype.itemsize)
+
+    @property
+    def has_row_subset(self) -> bool:
+        """Whether this matrix lazily views a subset of individuals."""
+        return self._row_indexer is not None
+
+    def _normalize_subset_indices(self, indices: Union[np.ndarray, list]) -> np.ndarray:
+        if isinstance(indices, list):
+            indices = np.asarray(indices)
+        if isinstance(indices, np.ndarray) and indices.dtype == bool:
+            if indices.ndim != 1 or indices.size != self.n_individuals:
+                raise ValueError("Boolean individual indexer must match the number of individuals")
+            return np.flatnonzero(indices).astype(np.int64, copy=False)
+
+        normalized = np.asarray(indices, dtype=np.int64)
+        if normalized.ndim != 1:
+            raise ValueError("Individual indices must be a 1D array-like")
+        if normalized.size:
+            if normalized.min() < 0 or normalized.max() >= self.n_individuals:
+                raise IndexError("Individual indices are out of bounds")
+        return normalized
+
+    def _compose_row_indexer(self, indices: np.ndarray) -> np.ndarray:
+        if self._row_indexer is None:
+            return indices.astype(np.int64, copy=False)
+        return self._row_indexer[indices]
+
+    def _materialize_rows(self, row_indexer: np.ndarray) -> np.ndarray:
+        """Copy a row subset into a standalone ndarray in API row-major order."""
+        row_indexer = np.asarray(row_indexer, dtype=np.int64)
+        if row_indexer.ndim != 1:
+            raise ValueError("row_indexer must be a 1D array")
+        if self._transposed:
+            return np.array(self._data[:, row_indexer].T, copy=True)
+        if row_indexer.size == 0:
+            return np.empty((0, self.n_markers), dtype=self._data.dtype)
+
+        # Fast path for memmaps: when rows are monotonic and mostly contiguous
+        # (common after genotype-order alignment), copy long row runs directly.
+        if self._is_memmap and row_indexer.size > 1:
+            diffs = np.diff(row_indexer)
+            if np.all(diffs >= 0):
+                run_starts = np.concatenate(([0], np.flatnonzero(diffs != 1) + 1))
+                run_ends = np.concatenate((run_starts[1:], [row_indexer.size]))
+                n_runs = int(run_starts.size)
+                max_runs_for_chunk_copy = min(2048, max(32, row_indexer.size // 4))
+                if n_runs <= max_runs_for_chunk_copy:
+                    out = np.empty((row_indexer.size, self.n_markers), dtype=self._data.dtype)
+                    for start, end in zip(run_starts, run_ends):
+                        src_start = int(row_indexer[start])
+                        src_end = int(row_indexer[end - 1]) + 1
+                        out[start:end, :] = self._data[src_start:src_end, :]
+                    return out
+                out = np.empty((row_indexer.size, self.n_markers), dtype=self._data.dtype)
+                np.take(self._data, row_indexer, axis=0, out=out)
+                return out
+
+        return np.array(self._data[row_indexer, :], copy=True)
+
+    @staticmethod
+    def _as_contiguous_marker_slice(
+        indices: np.ndarray,
+    ) -> Optional[slice]:
+        """Return a slice when marker indices form one contiguous block."""
+        marker_idx = np.asarray(indices, dtype=np.int64)
+        if marker_idx.ndim != 1 or marker_idx.size == 0:
+            return None
+        if marker_idx.size == 1:
+            start = int(marker_idx[0])
+            return slice(start, start + 1)
+        if np.all(np.diff(marker_idx) == 1):
+            return slice(int(marker_idx[0]), int(marker_idx[-1]) + 1)
+        return None
+
+    def _select_marker_block(
+        self,
+        markers: Union[slice, np.ndarray],
+    ) -> np.ndarray:
+        if self._transposed:
+            if self._row_indexer is None:
+                return self._data[markers, :].T
+            if isinstance(markers, slice):
+                return self._data[markers, :][:, self._row_indexer].T
+            marker_idx = np.asarray(markers, dtype=np.int64)
+            return self._data[np.ix_(marker_idx, self._row_indexer)].T
+
+        if self._row_indexer is None:
+            return self._data[:, markers]
+        if isinstance(markers, slice):
+            # For row-major memmaps, slice markers first so numpy can use a
+            # contiguous view, then gather rows from the smaller block.
+            block = self._data[:, markers]
+            return block[self._row_indexer, :]
+        marker_idx = np.asarray(markers, dtype=np.int64)
+        return self._data[np.ix_(self._row_indexer, marker_idx)]
+
+    def get_columns(
+        self,
+        indices: Union[np.ndarray, list],
+        *,
+        dtype: Optional[np.dtype] = None,
+        copy: bool = False,
+    ) -> np.ndarray:
+        """Get arbitrary marker columns without altering missing values."""
+        if isinstance(indices, list):
+            indices = np.asarray(indices, dtype=np.int64)
+        marker_idx = np.asarray(indices, dtype=np.int64)
+        marker_slice = self._as_contiguous_marker_slice(marker_idx)
+        marker_block = self._select_marker_block(marker_slice if marker_slice is not None else marker_idx)
+        if dtype is not None:
+            return np.asarray(marker_block, dtype=np.dtype(dtype))
+        if copy:
+            return np.array(marker_block, copy=True)
+        return np.asarray(marker_block)
+
     def __getitem__(self, key):
         """Support array indexing - returns data in (individuals, markers) order"""
-        if self._transposed:
-            # Transpose the key for internal access
-            if isinstance(key, tuple) and len(key) == 2:
-                return self._data[key[1], key[0]].T if hasattr(self._data[key[1], key[0]], 'T') else self._data[key[1], key[0]]
-            # For simple indexing, return transposed view
-            return self._data.T[key]
-        return self._data[key]
+        if isinstance(key, tuple) and len(key) == 2:
+            row_key, col_key = key
+            if isinstance(col_key, (int, np.integer)):
+                return self.get_marker(int(col_key))[row_key]
+            if isinstance(col_key, slice):
+                start, stop, step = col_key.indices(self.n_markers)
+                batch = self.get_batch(start, stop)
+                return batch[row_key, ::step]
+            columns = np.arange(self.n_markers, dtype=np.int64)[col_key]
+            return self.get_columns(columns)[row_key]
+
+        if isinstance(key, (int, np.integer)):
+            return self.get_individual(int(key))
+
+        row_indices = np.arange(self.n_individuals, dtype=np.int64)[key]
+        return self.subset_individuals(row_indices).to_numpy(copy=False)
 
     def get_marker(self, marker_idx: int) -> np.ndarray:
         """Get genotypes for a specific marker"""
+        if self._row_indexer is None:
+            if self._transposed:
+                return self._data[marker_idx, :]
+            return self._data[:, marker_idx]
         if self._transposed:
-            return self._data[marker_idx, :]
-        return self._data[:, marker_idx]
+            return np.asarray(self._data[marker_idx, self._row_indexer])
+        column = self._data[:, marker_idx]
+        return np.asarray(column[self._row_indexer])
 
     def get_individual(self, ind_idx: int) -> np.ndarray:
         """Get genotypes for a specific individual"""
+        base_idx = int(self._row_indexer[ind_idx]) if self._row_indexer is not None else int(ind_idx)
         if self._transposed:
-            return self._data[:, ind_idx]
-        return self._data[ind_idx, :]
+            return self._data[:, base_idx]
+        return self._data[base_idx, :]
 
     def get_batch(self, marker_start: int, marker_end: int) -> np.ndarray:
         """Get batch of markers for efficient processing.
 
         Returns array of shape (n_individuals, n_markers_in_batch).
         """
-        if self._transposed:
-            # Internal: (markers, individuals), need to return (individuals, markers)
-            return self._data[marker_start:marker_end, :].T
-        return self._data[:, marker_start:marker_end]
+        return np.asarray(self._select_marker_block(slice(marker_start, marker_end)))
 
     def subset_individuals(
         self,
         indices: Union[np.ndarray, list],
         *,
         precompute_alleles: Optional[bool] = None,
+        materialize: bool = False,
     ) -> "GenotypeMatrix":
         """Return a GenotypeMatrix restricted to a subset of individuals.
 
         Preserves the is_imputed flag so downstream code can use fast paths
         when genotypes are already imputed.
 
-        When data is transposed (column-major), this is a fast column slice.
-        The returned GenotypeMatrix is NOT transposed (standard row-major).
+        When ``materialize=False`` (default), this returns a lazy row view.
+        When ``materialize=True``, it copies the subset into a standalone
+        row-major ndarray, which can still be useful for access patterns that
+        repeatedly touch many scattered markers.
         """
-        if isinstance(indices, list):
-            indices = np.asarray(indices)
-        if isinstance(indices, np.ndarray) and indices.dtype == bool:
-            indexer = indices
-        else:
-            indexer = np.asarray(indices, dtype=int)
-
-        if self._transposed:
-            # Fast path: column slice on transposed data
-            # Internal: (n_markers, n_individuals) -> slice columns
-            # Result needs to be (n_individuals_subset, n_markers) for standard format
-            subset = self._data[:, indexer].T.copy()
-        else:
-            # Slow path: row slice on row-major data
-            subset = self._data[indexer, :]
+        indexer = self._normalize_subset_indices(indices)
+        composed_row_indexer = self._compose_row_indexer(indexer)
 
         if precompute_alleles is None:
             precompute_alleles = not self._is_imputed
+        if materialize:
+            subset = self._materialize_rows(composed_row_indexer)
+            return GenotypeMatrix(
+                subset,
+                precompute_alleles=precompute_alleles,
+                is_imputed=self._is_imputed,
+                transposed=False,
+            )
         return GenotypeMatrix(
-            subset,
+            self._data,
             precompute_alleles=precompute_alleles,
             is_imputed=self._is_imputed,
-            transposed=False,  # Result is always standard format
+            transposed=self._transposed,
+            row_indexer=composed_row_indexer,
         )
     
     def calculate_allele_frequencies(
@@ -638,14 +1163,9 @@ class GenotypeMatrix:
         out_dtype = np.dtype(dtype)
         if self._is_imputed:
             # Fast path: data contains no missing values, so skip mask checks.
-            if self._transposed:
-                return self._data[marker_idx, :].astype(out_dtype, copy=True)
-            return self._data[:, marker_idx].astype(out_dtype, copy=True)
+            return self.get_marker(marker_idx).astype(out_dtype, copy=True)
 
-        if self._transposed:
-            marker = self._data[marker_idx, :].astype(out_dtype, copy=True)
-        else:
-            marker = self._data[:, marker_idx].astype(out_dtype, copy=True)
+        marker = self.get_marker(marker_idx).astype(out_dtype, copy=True)
 
         missing_mask = (marker == -9) | np.isnan(marker)
         if not missing_mask.any():
@@ -681,14 +1201,9 @@ class GenotypeMatrix:
         out_dtype = np.dtype(dtype)
         if self._is_imputed:
             # Fast path: pre-imputed data, no missing checks needed.
-            if self._transposed:
-                return self._data[marker_start:marker_end, :].T.astype(out_dtype, copy=True)
-            return self._data[:, marker_start:marker_end].astype(out_dtype, copy=True)
+            return self.get_batch(marker_start, marker_end).astype(out_dtype, copy=True)
 
-        if self._transposed:
-            batch = self._data[marker_start:marker_end, :].T.astype(out_dtype, copy=True)
-        else:
-            batch = self._data[:, marker_start:marker_end].astype(out_dtype, copy=True)
+        batch = self.get_batch(marker_start, marker_end).astype(out_dtype, copy=True)
 
         if batch.size == 0:
             return batch
@@ -722,15 +1237,10 @@ class GenotypeMatrix:
         out_dtype = np.dtype(dtype)
         if self._is_imputed:
             # Fast path: pre-imputed data, no missing checks needed.
-            if self._transposed:
-                return self._data[indices, :].T.astype(out_dtype, copy=True)
-            return self._data[:, indices].astype(out_dtype, copy=True)
+            return self.get_columns(indices, dtype=out_dtype)
 
         # Slice and copy to ensure we don't mutate underlying storage
-        if self._transposed:
-            batch = self._data[indices, :].T.astype(out_dtype, copy=True)
-        else:
-            batch = self._data[:, indices].astype(out_dtype, copy=True)
+        batch = self.get_columns(indices, dtype=out_dtype)
 
         if batch.size == 0:
             return batch
@@ -753,6 +1263,28 @@ class GenotypeMatrix:
     def major_alleles(self) -> Optional[np.ndarray]:
         """Pre-computed major alleles for all markers"""
         return self._major_alleles
+
+    def to_numpy(self, *, copy: bool = True) -> np.ndarray:
+        """Materialize the genotype matrix as a numpy array in API row order."""
+        if not copy and self._row_indexer is None and not self._transposed:
+            return np.asarray(self._data)
+        array = self.get_batch(0, self.n_markers)
+        if copy:
+            return np.array(array, copy=True)
+        return np.asarray(array)
+
+
+def ensure_eager_genotype(
+    geno: Union[GenotypeMatrix, np.ndarray],
+) -> Union[GenotypeMatrix, np.ndarray]:
+    """Materialize lazy genotype row subsets for scan-heavy GWAS methods."""
+    if isinstance(geno, GenotypeMatrix) and geno.has_row_subset:
+        return geno.subset_individuals(
+            np.arange(geno.n_individuals, dtype=np.int64),
+            materialize=True,
+            precompute_alleles=not geno.is_imputed,
+        )
+    return geno
 
 
 class AssociationResults:

@@ -19,10 +19,13 @@ from ..utils.data_types import (
     CHROM_COLUMN,
     MARKER_ID_COLUMN,
     POS_COLUMN,
+    attach_genotype_map_metadata,
     canonicalize_genotype_map_dataframe,
     GenotypeMatrix,
     GenotypeMap,
     impute_major_allele_inplace,
+    load_genotype_map_cache,
+    save_genotype_map_cache,
 )
 from ..utils.memmap_utils import load_full_from_metadata
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
@@ -404,7 +407,7 @@ def load_covariate_file(filepath: Union[str, Path],
 def _wrap_loaded_genotype(
     geno_np: np.ndarray,
     individual_ids: List[str],
-    geno_map_df: "pd.DataFrame",
+    geno_map_df: Union["pd.DataFrame", GenotypeMap],
     precompute_alleles: bool = True,
     compute_effective_tests: bool = False,
     effective_test_kwargs: Optional[Dict[str, Any]] = None,
@@ -416,11 +419,18 @@ def _wrap_loaded_genotype(
     ``GenotypeMap`` objects, and optionally computes effective tests.
     """
     individual_ids, geno_np = _deduplicate_genotype_samples(individual_ids, geno_np)
-    is_imputed = getattr(geno_map_df, 'attrs', {}).get('is_imputed', False)
+    if isinstance(geno_map_df, GenotypeMap):
+        geno_map = geno_map_df
+        is_imputed = bool(geno_map.metadata.get('is_imputed', False))
+    else:
+        if not isinstance(geno_map_df, pd.DataFrame):
+            geno_map_df = pd.DataFrame(geno_map_df)
+        geno_map_df = canonicalize_genotype_map_dataframe(geno_map_df)
+        attach_genotype_map_metadata(geno_map_df)
+        map_metadata = dict(getattr(geno_map_df, 'attrs', {}))
+        is_imputed = bool(map_metadata.get('is_imputed', False))
+        geno_map = GenotypeMap(geno_map_df, metadata=map_metadata)
     geno_matrix = GenotypeMatrix(geno_np, precompute_alleles=precompute_alleles, is_imputed=is_imputed)
-    geno_map = GenotypeMap(
-        geno_map_df if isinstance(geno_map_df, pd.DataFrame) else pd.DataFrame(geno_map_df)
-    )
     if compute_effective_tests:
         et_kwargs = effective_test_kwargs or {}
         cached_et = _load_effective_tests_cache(cache_base, geno_matrix.n_markers)
@@ -618,7 +628,8 @@ def load_genotype_file(filepath: Union[str, Path],
         cache_base = str(filepath)
         cache_geno = cache_base + '.panicle.v2.geno.npy'
         cache_ind = cache_base + '.panicle.v2.ind.txt'
-        cache_map = cache_base + '.panicle.v2.map.csv'
+        cache_map = cache_base + '.panicle.v2.map.npz'
+        legacy_cache_map = cache_base + '.panicle.v2.map.csv'
         force_recache = bool(kwargs.get('force_recache', False))
 
         min_maf = float(kwargs.get('min_maf', 0.0))
@@ -630,17 +641,23 @@ def load_genotype_file(filepath: Union[str, Path],
         loaded_from_cache = False
         try:
             if not force_recache:
-                if os.path.exists(cache_geno) and os.path.exists(cache_ind) and os.path.exists(cache_map):
+                map_cache_paths = [path for path in (cache_map, legacy_cache_map) if os.path.exists(path)]
+                if os.path.exists(cache_geno) and os.path.exists(cache_ind) and map_cache_paths:
                     src_mtime = os.path.getmtime(filepath)
+                    newest_map_cache = max(os.path.getmtime(path) for path in map_cache_paths)
                     if (os.path.getmtime(cache_geno) > src_mtime and
                         os.path.getmtime(cache_ind) > src_mtime and
-                        os.path.getmtime(cache_map) > src_mtime):
+                        newest_map_cache > src_mtime):
                         logger.info("[Cache] Loading binary cache for %s...", filepath)
                         geno_np = np.load(cache_geno, mmap_mode='r')
                         with open(cache_ind, 'r') as f:
                             individual_ids_csv = [line.strip() for line in f]
-                        geno_map_df = pd.read_csv(cache_map)
-                        geno_map_df.attrs["is_imputed"] = True
+                        geno_map_df = load_genotype_map_cache(
+                            cache_map,
+                            legacy_csv_path=legacy_cache_map,
+                            migrate_legacy=True,
+                            legacy_is_imputed=True,
+                        )
                         loaded_from_cache = True
                         if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
                             logger.warning(
@@ -701,7 +718,7 @@ def load_genotype_file(filepath: Union[str, Path],
                 with open(cache_ind, 'w') as f:
                     for ind in individual_ids_csv:
                         f.write(f"{ind}\n")
-                geno_map_df.to_csv(cache_map, index=False)
+                save_genotype_map_cache(cache_map, geno_map_df)
             except Exception as e:
                 logger.warning("[Cache] Failed to save cache: %s", e)
 
@@ -766,6 +783,8 @@ def load_map_file(filepath: Union[str, Path]) -> GenotypeMap:
         GenotypeMap object
     """
     filepath = Path(filepath)
+    if filepath.suffix.lower() == '.npz':
+        return load_genotype_map_cache(filepath)
     file_format = detect_file_format(filepath)
     
     if file_format == 'csv':
@@ -809,17 +828,18 @@ def match_individuals(phenotype_df: pd.DataFrame,
     if len(common_ids) == 0:
         raise ValueError("No common individuals found between phenotype and genotype data")
 
-    matched_phenotype = phenotype_df[phenotype_df['ID'].isin(common_ids)].copy()
-    matched_phenotype = matched_phenotype.sort_values('ID').reset_index(drop=True)
-    sorted_ids = matched_phenotype['ID'].tolist()
-
     id_to_index: Dict[str, int] = {}
     for idx, raw_id in enumerate(genotype_ids):
         if raw_id not in id_to_index:
             id_to_index[raw_id] = idx
 
+    # Preserve genotype order so subsequent genotype subsetting can use
+    # monotonic row indexers (faster eager materialization on memmaps).
+    ordered_ids = [gid for gid in genotype_ids if gid in common_ids]
+    matched_phenotype = phenotype_df.set_index('ID').loc[ordered_ids].reset_index()
+
     try:
-        matched_indices = [id_to_index[sid] for sid in sorted_ids]
+        matched_indices = [id_to_index[sid] for sid in ordered_ids]
     except KeyError as exc:
         missing_id = exc.args[0]
         raise RuntimeError(
@@ -859,10 +879,10 @@ def match_individuals(phenotype_df: pd.DataFrame,
                 f"Detected {n_dups} duplicated covariate records by ID; deduplicated by computing per-ID mean of covariate columns (missing values ignored)."
             )
 
-        matched_covariate = covariate_df.set_index('ID').loc[sorted_ids].reset_index()
+        matched_covariate = covariate_df.set_index('ID').loc[ordered_ids].reset_index()
         cov_cols = [c for c in matched_covariate.columns if c != 'ID']
         matched_covariate = matched_covariate[['ID'] + cov_cols]
-        summary['n_covariate_matched'] = len(sorted_ids)
+        summary['n_covariate_matched'] = len(ordered_ids)
     else:
         summary['n_covariate_provided'] = 0
         summary['n_covariate_unused'] = 0

@@ -14,13 +14,13 @@ import numpy as np
 from ..utils.data_types import (
     GenotypeMatrix,
     AssociationResults,
+    ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
 from ..matrix.kinship_loco import (
     PANICLE_K_VanRaden_LOCO,
     LocoKinship,
-    _extract_chromosomes,
-    _group_markers_by_chrom,
+    _resolve_chromosome_groups,
 )
 from .mlm import (
     PANICLE_MLM,
@@ -54,7 +54,7 @@ def _subset_genotypes(
     if isinstance(geno, GenotypeMatrix):
         if geno.is_imputed:
             # Data is pre-imputed, skip -9 checks for faster access
-            return geno._data[:, indices].astype(np.float32)
+            return geno.get_columns(indices, dtype=np.float32)
         return geno.get_columns_imputed(indices)
     # For numpy arrays, handle missing values
     subset = geno[:, indices]
@@ -446,6 +446,8 @@ def PANICLE_MLM_LOCO(
                 "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO"
             )
 
+    geno = ensure_eager_genotype(geno)
+
     if isinstance(geno, GenotypeMatrix):
         n_markers = geno.n_markers
     elif isinstance(geno, np.ndarray):
@@ -453,8 +455,7 @@ def PANICLE_MLM_LOCO(
     else:
         raise ValueError("Genotype must be GenotypeMatrix or numpy array")
 
-    chrom_values = _extract_chromosomes(map_data, n_markers)
-    chrom_groups = _group_markers_by_chrom(chrom_values)
+    chrom_values, chrom_groups, _ = _resolve_chromosome_groups(map_data, n_markers)
 
     lrt_solver_norm = str(lrt_solver).strip().upper()
     if lrt_solver_norm not in {"GEMMA", "BRENT", "AUTO"}:
@@ -618,6 +619,8 @@ def PANICLE_MLM_LOCO_MULTI(
                 "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO_MULTI"
             )
 
+    geno = ensure_eager_genotype(geno)
+
     if isinstance(geno, GenotypeMatrix):
         if geno.n_individuals != n_individuals:
             raise ValueError("Number of phenotype observations must match number of genotype individuals")
@@ -629,8 +632,7 @@ def PANICLE_MLM_LOCO_MULTI(
     else:
         raise ValueError("Genotype must be GenotypeMatrix or numpy array")
 
-    chrom_values = _extract_chromosomes(map_data, n_markers)
-    chrom_groups = _group_markers_by_chrom(chrom_values)
+    chrom_values, chrom_groups, _ = _resolve_chromosome_groups(map_data, n_markers)
     chrom_items = [(chrom, indices) for chrom, indices in chrom_groups.items() if indices.size > 0]
     n_chroms = len(chrom_items)
 

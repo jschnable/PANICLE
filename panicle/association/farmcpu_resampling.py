@@ -9,7 +9,13 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
-from ..utils.data_types import LEGACY_MARKER_ID_COLUMN, MARKER_ID_COLUMN, GenotypeMap, GenotypeMatrix
+from ..utils.data_types import (
+    LEGACY_MARKER_ID_COLUMN,
+    MARKER_ID_COLUMN,
+    GenotypeMap,
+    GenotypeMatrix,
+    ensure_eager_genotype,
+)
 from .farmcpu import PANICLE_FarmCPU
 
 
@@ -299,6 +305,8 @@ def PANICLE_FarmCPUResampling(
     if valid_trait_indices.size == 0:
         raise ValueError("No valid (non-missing) phenotype values available")
 
+    geno = ensure_eager_genotype(geno)
+
     if isinstance(geno, GenotypeMatrix):
         n_markers = geno.n_markers
     else:
@@ -333,7 +341,7 @@ def PANICLE_FarmCPUResampling(
 
         phe_run = phe[keep_indices]
         if isinstance(geno, GenotypeMatrix):
-            geno_run = geno[keep_indices, :]
+            geno_run = geno.subset_individuals(keep_indices, materialize=True)
         else:
             geno_run = geno[keep_indices, :]
         cv_run = _subset_covariates(CV, keep_indices)

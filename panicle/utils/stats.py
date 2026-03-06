@@ -69,14 +69,15 @@ def calculate_maf_from_genotypes(
         Array of minor allele frequencies for each marker
     """
     # Fast path for pre-imputed GenotypeMatrix (no missing values).
-    if hasattr(genotypes, '_data') and getattr(genotypes, 'is_imputed', False):
-        data = genotypes._data
-        allele_freq = data.mean(axis=0) / max(max_dosage, 1e-12)
+    if hasattr(genotypes, 'calculate_allele_frequencies') and getattr(genotypes, 'is_imputed', False):
+        allele_freq = genotypes.calculate_allele_frequencies(max_dosage=max_dosage)
         maf = np.minimum(allele_freq, 1.0 - allele_freq)
         return np.asarray(maf)
 
     # Handle GenotypeMatrix wrapper if present (uses _data internally)
-    if hasattr(genotypes, '_data'):
+    if hasattr(genotypes, 'to_numpy'):
+        genotypes = genotypes.to_numpy(copy=False)
+    elif hasattr(genotypes, '_data'):
         genotypes = genotypes._data
     elif hasattr(genotypes, 'data'):
         genotypes = genotypes.data

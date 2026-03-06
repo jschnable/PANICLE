@@ -31,6 +31,8 @@ from panicle.utils.data_types import (
     POS_COLUMN,
     canonicalize_genotype_map_dataframe,
     impute_major_allele_inplace,
+    load_genotype_map_cache,
+    save_genotype_map_cache,
 )
 
 MISSING = -9
@@ -138,15 +140,18 @@ def load_genotype_plink(
     cache_base = str(bed_path)
     cache_geno = cache_base + '.panicle.v2.geno.npy'
     cache_ind = cache_base + '.panicle.v2.ind.txt'
-    cache_map = cache_base + '.panicle.v2.map.csv'
+    cache_map = cache_base + '.panicle.v2.map.npz'
+    legacy_cache_map = cache_base + '.panicle.v2.map.csv'
 
     try:
         if not force_recache:
-            if os.path.exists(cache_geno) and os.path.exists(cache_ind) and os.path.exists(cache_map):
+            map_cache_paths = [path for path in (cache_map, legacy_cache_map) if os.path.exists(path)]
+            if os.path.exists(cache_geno) and os.path.exists(cache_ind) and map_cache_paths:
                 newest_src = max(os.path.getmtime(bed_path), os.path.getmtime(bim_path), os.path.getmtime(fam_path))
+                newest_map_cache = max(os.path.getmtime(path) for path in map_cache_paths)
                 if (os.path.getmtime(cache_geno) > newest_src and
                     os.path.getmtime(cache_ind) > newest_src and
-                    os.path.getmtime(cache_map) > newest_src):
+                    newest_map_cache > newest_src):
                     logger.info("[Cache] Loading binary cache for %s...", bed_path)
                     if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
                         logger.warning(
@@ -159,10 +164,12 @@ def load_genotype_plink(
                     geno_matrix = np.load(cache_geno, mmap_mode='r')
                     with open(cache_ind, 'r') as f:
                         individual_ids = [line.strip() for line in f]
-                    import pandas as pd  # type: ignore
-                    geno_map = pd.read_csv(cache_map)
-                    geno_map = canonicalize_genotype_map_dataframe(geno_map)
-                    geno_map.attrs["is_imputed"] = True
+                    geno_map = load_genotype_map_cache(
+                        cache_map,
+                        legacy_csv_path=legacy_cache_map,
+                        migrate_legacy=True,
+                        legacy_is_imputed=True,
+                    )
                     return geno_matrix, individual_ids, geno_map
     except Exception as e:
         logger.warning("[Cache] Failed to load cache: %s", e)
@@ -242,11 +249,14 @@ def load_genotype_plink(
         with open(cache_ind, 'w') as f:
             for ind in individual_ids:
                 f.write(f"{ind}\n")
-        import pandas as pd  # type: ignore
         if isinstance(geno_map, list):
-            pd.DataFrame(geno_map).to_csv(cache_map, index=False)
+            import pandas as pd  # type: ignore
+            map_df = pd.DataFrame(geno_map)
         else:
-            geno_map.to_csv(cache_map, index=False)
+            map_df = geno_map
+        if hasattr(map_df, "attrs"):
+            map_df.attrs["is_imputed"] = True
+        save_genotype_map_cache(cache_map, map_df)
     except Exception as e:
         logger.warning("[Cache] Failed to save cache: %s", e)
 

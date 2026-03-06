@@ -394,6 +394,17 @@ class GWASPipeline:
             del self._loco_kinship_cache[first_key]
 
         return loco_kinship
+
+    @staticmethod
+    def _ensure_gwas_eager_genotype(genotype_subset: GenotypeMatrix) -> GenotypeMatrix:
+        """Materialize genotype subsets for association scans."""
+        if genotype_subset.has_row_subset:
+            return genotype_subset.subset_individuals(
+                np.arange(genotype_subset.n_individuals, dtype=np.int64),
+                materialize=True,
+                precompute_alleles=not genotype_subset.is_imputed,
+            )
+        return genotype_subset
         
     def log(self, message: str):
         """Internal logger (can be replaced with standard logging later)"""
@@ -1192,7 +1203,7 @@ class GWASPipeline:
                 and np.array_equal(self._structure_indices, geno_idx)
             ):
                 # Exact match - reuse cached structure genotype directly
-                g_final = self._structure_genotype
+                g_final = self._ensure_gwas_eager_genotype(self._structure_genotype)
             elif (
                 self._structure_genotype is not None
                 and self._structure_indices is not None
@@ -1205,12 +1216,21 @@ class GWASPipeline:
                 if all(idx in structure_set for idx in geno_idx):
                     idx_map = {v: i for i, v in enumerate(self._structure_indices)}
                     local_indices = np.array([idx_map[idx] for idx in geno_idx], dtype=int)
-                    g_final = self._structure_genotype.subset_individuals(local_indices)
+                    g_final = self._structure_genotype.subset_individuals(
+                        local_indices,
+                        materialize=True,
+                    )
                 else:
                     # Fallback: some trait indices not in structure (shouldn't happen normally)
-                    g_final = self.genotype_matrix.subset_individuals(geno_idx)
+                    g_final = self.genotype_matrix.subset_individuals(
+                        geno_idx,
+                        materialize=True,
+                    )
             else:
-                g_final = self.genotype_matrix.subset_individuals(geno_idx)
+                g_final = self.genotype_matrix.subset_individuals(
+                    geno_idx,
+                    materialize=True,
+                )
 
             # Check if we can subset PCs/kinship from structure cache
             # (when trait indices are a subset of structure indices)

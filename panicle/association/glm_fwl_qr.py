@@ -50,6 +50,16 @@ _GLM_BATCH_PROFILE = {
 }
 
 
+def _should_use_prefetch(m: int, batch_size: int, cpu: int) -> bool:
+    """Decide whether GLM batch prefetching should run."""
+    override = os.getenv("PANICLE_GLM_PREFETCH", "").strip().lower()
+    if override in {"0", "false", "no", "off"}:
+        return False
+    if override in {"1", "true", "yes", "on"}:
+        return m > batch_size * 2
+    return cpu != 1 and m > batch_size * 2
+
+
 def _reset_glm_batch_profile() -> None:
     _GLM_BATCH_PROFILE.update(
         {
@@ -255,7 +265,7 @@ def PANICLE_GLM_ultrafast(phe: np.ndarray,
     printed_layout = False
 
     # Use prefetching for large datasets to overlap I/O with computation
-    use_prefetch = m > batch_size * 2  # Only prefetch if more than 2 batches
+    use_prefetch = _should_use_prefetch(m, batch_size, cpu)
 
     if use_prefetch:
         # Prefetch next batch while processing current batch
@@ -495,7 +505,7 @@ def PANICLE_GLM_multi_ultrafast(
     printed_layout = False
 
     # Use prefetching for large datasets to overlap I/O with computation
-    use_prefetch = m > batch_size * 2
+    use_prefetch = _should_use_prefetch(m, batch_size, cpu)
 
     if use_prefetch:
         with ThreadPoolExecutor(max_workers=1) as executor:

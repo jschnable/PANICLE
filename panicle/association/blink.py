@@ -22,6 +22,7 @@ from ..utils.data_types import (
     AssociationResults,
     GenotypeMap,
     GenotypeMatrix,
+    ensure_eager_genotype,
     infer_marker_id_column,
 )
 from ..utils.stats import calculate_maf_from_genotypes
@@ -451,7 +452,8 @@ def _ensure_numpy_genotype(
     geno: Union[GenotypeMatrix, np.ndarray]
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     if isinstance(geno, GenotypeMatrix):
-        genotype_array = np.asarray(geno._data)  # type: ignore[attr-defined]
+        geno = ensure_eager_genotype(geno)
+        genotype_array = geno.to_numpy(copy=False)
         major_alleles = geno.major_alleles
     else:
         genotype_array = np.asarray(geno)

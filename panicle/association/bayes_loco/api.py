@@ -6,7 +6,7 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
-from ...utils.data_types import GenotypeMatrix, AssociationResults
+from ...utils.data_types import GenotypeMatrix, AssociationResults, ensure_eager_genotype
 from .config import BayesLocoConfig
 from .engine import run_bayes_loco
 
@@ -61,6 +61,8 @@ def PANICLE_BayesLOCO(
         CV = CV.astype(np.float64, copy=False)
         if not np.all(np.isfinite(CV)):
             raise ValueError("Covariates contain missing/non-finite values; filter before BAYESLOCO")
+
+    geno = ensure_eager_genotype(geno)
 
     if isinstance(geno, GenotypeMatrix):
         n = geno.n_individuals

@@ -40,6 +40,8 @@ from panicle.utils.data_types import (
     POS_COLUMN,
     canonicalize_genotype_map_dataframe,
     impute_major_allele_inplace,
+    load_genotype_map_cache,
+    save_genotype_map_cache,
 )
 
 
@@ -350,16 +352,19 @@ def load_genotype_vcf(
     cache_base = str(vcf_path)
     cache_geno = cache_base + '.panicle.v2.geno.npy'
     cache_ind = cache_base + '.panicle.v2.ind.txt'
-    cache_map = cache_base + '.panicle.v2.map.csv'
+    cache_map = cache_base + '.panicle.v2.map.npz'
+    legacy_cache_map = cache_base + '.panicle.v2.map.csv'
 
     # Check if cache exists and is fresh
     try:
         if not force_recache:
-            if os.path.exists(cache_geno) and os.path.exists(cache_ind) and os.path.exists(cache_map):
+            map_cache_paths = [path for path in (cache_map, legacy_cache_map) if os.path.exists(path)]
+            if os.path.exists(cache_geno) and os.path.exists(cache_ind) and map_cache_paths:
                 vcf_mtime = os.path.getmtime(vcf_path)
+                newest_map_cache = max(os.path.getmtime(path) for path in map_cache_paths)
                 if (os.path.getmtime(cache_geno) > vcf_mtime and
                     os.path.getmtime(cache_ind) > vcf_mtime and
-                    os.path.getmtime(cache_map) > vcf_mtime):
+                    newest_map_cache > vcf_mtime):
 
                     logger.info("[Cache] Loading binary cache for %s...", vcf_path)
                     if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
@@ -379,11 +384,12 @@ def load_genotype_vcf(
                         individual_ids = [line.strip() for line in f]
 
                     # Load Map
-                    geno_map = pd.read_csv(cache_map)
-                    geno_map = canonicalize_genotype_map_dataframe(geno_map)
-
-                    # Mark that this data is from v2 cache (pre-imputed, no -9 values)
-                    geno_map.attrs['is_imputed'] = True
+                    geno_map = load_genotype_map_cache(
+                        cache_map,
+                        legacy_csv_path=legacy_cache_map,
+                        migrate_legacy=True,
+                        legacy_is_imputed=True,
+                    )
 
                     # If memmapped, we return it as is. GenotypeMatrix handles it.
                     return geno_matrix, individual_ids, geno_map
@@ -894,9 +900,12 @@ def load_genotype_vcf(
 
         # Save Map
         if isinstance(geno_map, list):
-             pd.DataFrame(geno_map).to_csv(cache_map, index=False)
+             map_df = pd.DataFrame(geno_map)
         else:
-             geno_map.to_csv(cache_map, index=False)
+             map_df = geno_map
+        if hasattr(map_df, "attrs"):
+            map_df.attrs["is_imputed"] = True
+        save_genotype_map_cache(cache_map, map_df)
 
     except Exception as e:
         logger.warning("[Cache] Failed to save cache: %s", e)
