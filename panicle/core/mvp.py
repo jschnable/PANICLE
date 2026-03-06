@@ -19,7 +19,7 @@ from ..utils.data_types import (
     KinshipMatrix,
     AssociationResults,
 )
-from ..data.loaders import load_genotype_file
+from ..data.loaders import load_genotype_file, load_map_file, load_phenotype_file
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
 from ..association.mlm_loco import PANICLE_MLM_LOCO
@@ -34,7 +34,7 @@ from ..visualization.manhattan import PANICLE_Report
 
 def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         geno: Union[str, Path, np.ndarray, GenotypeMatrix],
-        map_data: Union[str, Path, pd.DataFrame, GenotypeMap],
+        map_data: Optional[Union[str, Path, pd.DataFrame, GenotypeMap]],
         K: Optional[Union[KinshipMatrix, np.ndarray]] = None,
         CV: Optional[np.ndarray] = None,
         method: Optional[List[str]] = None,
@@ -124,7 +124,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         
         # Load phenotype data
         if isinstance(phe, (str, Path)):
-            phenotype = Phenotype(phe)
+            phenotype = Phenotype(load_phenotype_file(phe))
         elif isinstance(phe, np.ndarray):
             phenotype = Phenotype(phe)
         elif isinstance(phe, pd.DataFrame):
@@ -153,11 +153,15 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
 
         # Load genotype data
         genotype_ids = None
+        genotype_path = None
         if isinstance(geno, (str, Path)):
-            genotype, genotype_ids, loaded_map = load_genotype_file(geno)
+            genotype_path = Path(geno)
+            genotype, genotype_ids, loaded_map = load_genotype_file(genotype_path)
             # Use the map embedded in the genotype file when map_data is not
-            # explicitly provided (i.e. caller passed the same path or None).
-            if isinstance(map_data, (str, Path)) or map_data is None:
+            # explicitly provided (i.e. caller passed None or the genotype path).
+            if map_data is None:
+                map_data = loaded_map
+            elif isinstance(map_data, (str, Path)) and Path(map_data) == genotype_path:
                 map_data = loaded_map
         elif isinstance(geno, np.ndarray):
             genotype = GenotypeMatrix(geno)
@@ -168,7 +172,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
 
         # Load map data
         if isinstance(map_data, (str, Path)):
-            genetic_map = GenotypeMap(map_data)
+            genetic_map = load_map_file(map_data)
         elif isinstance(map_data, pd.DataFrame):
             genetic_map = GenotypeMap(map_data)
         elif isinstance(map_data, GenotypeMap):

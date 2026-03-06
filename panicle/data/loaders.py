@@ -236,8 +236,8 @@ def load_phenotype_file(filepath: Union[str, Path],
                 continue
             s = pd.to_numeric(df[col], errors='coerce')
             numeric_probe[col] = s
-        # Choose columns that are numeric after coercion
-        trait_columns = [col for col, s in numeric_probe.items() if pd.api.types.is_numeric_dtype(s)]
+        # Keep columns with at least one numeric observation after coercion.
+        trait_columns = [col for col, s in numeric_probe.items() if s.notna().any()]
         # Ensure stored df has numeric dtype for selected traits
         if trait_columns:
             df[trait_columns] = df[trait_columns].apply(pd.to_numeric, errors='coerce')

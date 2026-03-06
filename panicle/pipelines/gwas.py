@@ -168,9 +168,34 @@ def _run_single_method(
             return ('FarmCPU', res, lambda_gc, None)
 
         elif method == 'BLINK':
+            blink_kwargs = {
+                key: blk_params[key]
+                for key in (
+                    'Prior',
+                    'maxLoop',
+                    'converge',
+                    'ld_threshold',
+                    'maf_threshold',
+                    'bic_method',
+                    'method_sub',
+                    'p_threshold',
+                    'qtn_threshold',
+                    'cut_off',
+                    'fdr_cut',
+                    'maxLine',
+                    'max_genotype_dosage',
+                )
+                if key in blk_params
+            }
+            blink_kwargs.setdefault('maxLoop', max_iterations)
             res = PANICLE_BLINK(
-                phe=y_sub, geno=g_sub, map_data=map_data, CV=cov_sub,
-                maxLoop=max_iterations, cpu=ncpus, verbose=False
+                phe=y_sub,
+                geno=g_sub,
+                map_data=map_data,
+                CV=cov_sub,
+                cpu=ncpus,
+                verbose=False,
+                **blink_kwargs,
             )
             lambda_gc = genomic_inflation_factor(res.pvalues)
             return ('BLINK', res, lambda_gc, None)

@@ -90,6 +90,66 @@ def canonicalize_genotype_map_dataframe(
     remaining_cols = [c for c in out.columns if c not in base_cols]
     return out[base_cols + remaining_cols]
 
+
+def _read_table_with_auto_separator(path: Union[str, Path], *, header: Optional[int]) -> pd.DataFrame:
+    """Read a small tabular file while auto-detecting common separators."""
+    return pd.read_csv(path, sep=None, engine="python", header=header)
+
+
+def _normalize_phenotype_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize phenotype columns while preserving user-supplied trait names."""
+    if df.shape[1] < 2:
+        raise ValueError(
+            f"Phenotype must have at least 2 columns (ID + trait), got {df.shape[1]}"
+        )
+
+    out = df.copy()
+    default_columns = isinstance(out.columns, pd.RangeIndex) and list(out.columns) == list(range(out.shape[1]))
+
+    if "ID" in out.columns:
+        trait_columns = [col for col in out.columns if col != "ID"]
+        out = out[["ID"] + trait_columns]
+    else:
+        first_column = out.columns[0]
+        out = out.rename(columns={first_column: "ID"})
+        trait_columns = list(out.columns[1:])
+
+    if not trait_columns:
+        raise ValueError("Phenotype must include at least one trait column")
+
+    if default_columns:
+        if len(trait_columns) == 1:
+            trait_names = ["Trait"]
+        else:
+            trait_names = [f"Trait{i + 1}" for i in range(len(trait_columns))]
+        out.columns = ["ID"] + trait_names
+        return out
+
+    trait_names = []
+    seen_names = {"ID"}
+    single_trait = len(trait_columns) == 1
+    for idx, column in enumerate(trait_columns, start=1):
+        if isinstance(column, str):
+            normalized = column.strip()
+        elif column is None:
+            normalized = ""
+        else:
+            normalized = str(column)
+
+        if not normalized or normalized == "ID":
+            normalized = "Trait" if single_trait else f"Trait{idx}"
+
+        candidate = normalized
+        suffix = 2
+        while candidate in seen_names:
+            candidate = f"{normalized}_{suffix}"
+            suffix += 1
+        seen_names.add(candidate)
+        trait_names.append(candidate)
+
+    out.columns = ["ID"] + trait_names
+    return out
+
 class Phenotype:
     """Phenotype data structure compatible with R rMVP format
 
@@ -104,30 +164,20 @@ class Phenotype:
 
     def __init__(self, data: Union[np.ndarray, pd.DataFrame, str, Path]):
         if isinstance(data, (str, Path)):
-            # Load from file - try with header first
             try:
-                self.data = pd.read_csv(data, header=0)
-            except:
-                self.data = pd.read_csv(data, header=None)
+                self.data = _read_table_with_auto_separator(data, header=0)
+                if self.data.shape[1] < 2:
+                    self.data = _read_table_with_auto_separator(data, header=None)
+            except Exception:
+                self.data = _read_table_with_auto_separator(data, header=None)
         elif isinstance(data, pd.DataFrame):
             self.data = data.copy()
         elif isinstance(data, np.ndarray):
-            # Convert to DataFrame
             self.data = pd.DataFrame(data)
         else:
             raise ValueError("Data must be array, DataFrame, or file path")
 
-        # Validate structure - need at least ID + 1 trait
-        if self.data.shape[1] < 2:
-            raise ValueError(f"Phenotype must have at least 2 columns (ID + trait), got {self.data.shape[1]}")
-
-        # Normalize column names
-        n_traits = self.data.shape[1] - 1
-        if n_traits == 1:
-            self.data.columns = ['ID', 'Trait']
-        else:
-            # Multiple traits: ID, Trait1, Trait2, ...
-            self.data.columns = ['ID'] + [f'Trait{i+1}' for i in range(n_traits)]
+        self.data = _normalize_phenotype_dataframe(self.data)
 
     @property
     def ids(self) -> pd.Series:
@@ -198,7 +248,7 @@ class GenotypeMap:
     
     def __init__(self, data: Union[pd.DataFrame, str, Path], metadata: Optional[Dict[str, Any]] = None):
         if isinstance(data, (str, Path)):
-            raw_df = pd.read_csv(data)
+            raw_df = _read_table_with_auto_separator(data, header=0)
         elif isinstance(data, pd.DataFrame):
             raw_df = data.copy()
         else:
