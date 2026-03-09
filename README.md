@@ -144,6 +144,7 @@ python scripts/run_GWAS.py \
 | **`--max-genotype-dosage`** | Max dosage (e.g., 2 for diploid). | 2.0 |
 | **`--outputdir`** | Output directory. | ./GWAS_results |
 | **`--outputs`** | Outputs to generate: `all_marker_pvalues`, `significant_marker_pvalues`, `manhattan`, `qq` (see [docs/output_files.md](docs/output_files.md)). | All |
+| **`--include-standard-errors`** | Include `{METHOD}_SE` columns in merged result CSV outputs. | False |
 
 Other useful filters:
 - `--max-missing` (default 1.0), `--min-maf` (default 0.0)

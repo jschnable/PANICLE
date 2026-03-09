@@ -37,6 +37,7 @@ def test_parse_args_defaults_and_flags(tmp_path) -> None:
     assert args.outputdir == "./GWAS_results"
     assert args.ncpus == 1
     assert args.parallel_mode == "auto"
+    assert args.include_standard_errors is False
 
 
 def test_parse_args_respects_overrides(tmp_path) -> None:
@@ -63,6 +64,7 @@ def test_parse_args_respects_overrides(tmp_path) -> None:
             "4",
             "--parallel-mode",
             "off",
+            "--include-standard-errors",
             "--bayesloco-loco-mode",
             "refine",
             "--bayesloco-calibration",
@@ -77,5 +79,6 @@ def test_parse_args_respects_overrides(tmp_path) -> None:
     assert args.outputdir.endswith("results")
     assert args.ncpus == 4
     assert args.parallel_mode == "off"
+    assert args.include_standard_errors is True
     assert args.bayesloco_loco_mode == "refine"
     assert args.bayesloco_calibration == "gc"

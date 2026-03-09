@@ -150,6 +150,7 @@ def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
     expected_cols = ['SNP', 'CHROM', 'POS', 'GLM_P', 'GLM_Effect']
     for col in expected_cols:
         assert col in results_df.columns, f"Missing column: {col}"
+    assert 'GLM_SE' not in results_df.columns
 
     # Check number of markers
     assert len(results_df) == synthetic_data['n_markers']
@@ -161,6 +162,35 @@ def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
 
     # Check effects are numeric
     assert results_df['GLM_Effect'].dtype in [np.float64, np.float32, float]
+
+
+def test_gwas_pipeline_optional_se_output_columns(synthetic_data, tmp_path):
+    """SE columns are emitted only when include_standard_errors is enabled."""
+
+    output_dir = tmp_path / "gwas_results_glm_with_se"
+    pipeline = GWASPipeline(output_dir=str(output_dir))
+
+    pipeline.load_data(
+        phenotype_file=str(synthetic_data['phenotype_file']),
+        genotype_file=str(synthetic_data['genotype_file']),
+        map_file=str(synthetic_data['map_file']),
+        trait_columns=['Height'],
+        genotype_format='csv'
+    )
+    pipeline.align_samples()
+
+    pipeline.run_analysis(
+        traits=['Height'],
+        methods=['GLM'],
+        include_standard_errors=True,
+        outputs=['all_marker_pvalues']
+    )
+
+    results_file = output_dir / "GWAS_Height_all_results.csv"
+    results_df = pd.read_csv(results_file)
+
+    assert 'GLM_SE' in results_df.columns
+    assert np.isfinite(results_df['GLM_SE']).any()
 
 
 def test_gwas_pipeline_mlm_with_structure(synthetic_data, tmp_path):

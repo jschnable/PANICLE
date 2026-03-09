@@ -767,7 +767,8 @@ class GWASPipeline:
                      farmcpu_params: Optional[Dict] = None,
                      blink_params: Optional[Dict] = None,
                      bayesloco_params: Optional[Dict] = None,
-                     outputs: List[str] = list(OUTPUT_CHOICES)):
+                     outputs: List[str] = list(OUTPUT_CHOICES),
+                     include_standard_errors: bool = False):
         """
         Run GWAS analysis for specified traits and methods.
         """
@@ -1132,6 +1133,7 @@ class GWASPipeline:
                 trait_name, method_results,
                 base_threshold, alpha, effective_tests_count,
                 max_genotype_dosage, outputs, threshold_source,
+                include_standard_errors=include_standard_errors,
                 method_thresholds=method_thresholds,
                 method_threshold_sources=method_threshold_sources,
                 method_lambda_gc=method_lambda_gc,
@@ -1319,7 +1321,7 @@ class GWASPipeline:
 
         return y_final, g_final, cov_final, k_final, geno_idx
 
-    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
+    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, include_standard_errors: bool = False, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
         """Internal helper to save tables and plots"""
         
         summary_data = []
@@ -1442,6 +1444,8 @@ class GWASPipeline:
             # Add to big table
             all_res_df[f'{method}_P'] = Res.pvalues
             all_res_df[f'{method}_Effect'] = Res.effects
+            if include_standard_errors:
+                all_res_df[f'{method}_SE'] = Res.se
             
             # Check significance
             hits = Res.pvalues <= method_threshold
@@ -1502,6 +1506,8 @@ class GWASPipeline:
             if method == 'FarmCPUResampling':
                 continue
             method_columns.extend([f'{method}_P', f'{method}_Effect'])
+            if include_standard_errors:
+                method_columns.append(f'{method}_SE')
 
         if 'all_marker_pvalues' in outputs:
             maf_source = geno_for_maf or self.genotype_matrix

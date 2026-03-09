@@ -171,7 +171,8 @@ pipeline.run_analysis(
     max_genotype_dosage=2.0,
     farmcpu_params=None,
     blink_params=None,
-    outputs=['all_marker_pvalues', 'significant_marker_pvalues', 'manhattan', 'qq']
+    outputs=['all_marker_pvalues', 'significant_marker_pvalues', 'manhattan', 'qq'],
+    include_standard_errors=False
 )
 ```
 
@@ -189,6 +190,7 @@ pipeline.run_analysis(
 - `max_genotype_dosage` (float): Maximum genotype dosage for MAF calculation. Default: 2.0
 - `farmcpu_params` (dict, optional): Parameters for FarmCPU
 - `blink_params` (dict, optional): Parameters for BLINK
+- `include_standard_errors` (bool): If True, include `{METHOD}_SE` columns in merged CSV outputs. Default: False
 - `outputs` (list): Which outputs to generate. Options:
   - `'all_marker_pvalues'`: Full results CSV
   - `'significant_marker_pvalues'`: Significant markers only CSV

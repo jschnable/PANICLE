@@ -50,14 +50,16 @@ Contains association statistics for **all markers** across **all methods** run f
 | `MAF` | float | Minor allele frequency (0.0 to 0.5) |
 | `{METHOD}_P` | float | P-value from method (e.g., `GLM_P`, `MLM_P`) |
 | `{METHOD}_Effect` | float | Effect size (beta coefficient) from method |
+| `{METHOD}_SE` | float | Standard error of effect (only when `--include-standard-errors` is enabled) |
 
 #### Notes on Columns:
 - **CHROM/POS**: Match the original genotype file format
   - VCF files: Uses chromosome names as-is (e.g., 'Chr01', 'chr1', '1')
   - HapMap: Uses chromosome identifiers from the file
 - **MAF**: Calculated from the aligned samples used in analysis
-- **Method columns**: One `{METHOD}_P` and `{METHOD}_Effect` pair per standard association method
+- **Method columns**: By default, one `{METHOD}_P` and `{METHOD}_Effect` pair per standard association method
   - If you ran `['GLM', 'MLM']`, you'll have: `GLM_P`, `GLM_Effect`, `MLM_P`, `MLM_Effect`
+  - If you pass `--include-standard-errors`, `{METHOD}_SE` columns are also included
   - Method names match run options (e.g., `MLM_Hybrid_P`, `FarmCPU_P`, `BLINK_P`)
   - Resampling output is written separately (see FarmCPU Resampling section)
 

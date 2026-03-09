@@ -267,6 +267,7 @@ python scripts/run_GWAS.py \
 | `--outputdir`, `-o` | Output directory | ./GWAS_results |
 | `--format`, `-f` | Genotype format (auto-detected if omitted) | Auto |
 | `--compute-effective-tests` | Use effective test count for Bonferroni | Off |
+| `--include-standard-errors` | Include `{METHOD}_SE` columns in merged CSV output files | Off |
 | `--min-maf` | Minimum minor allele frequency filter | 0.0 |
 | `--max-missing` | Maximum missing data proportion | 1.0 |
 | `--significance` | Fixed p-value threshold (overrides Bonferroni) | — |

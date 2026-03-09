@@ -268,6 +268,7 @@ def main():
         max_genotype_dosage=args.max_genotype_dosage,
         farmcpu_params=farmcpu_params,
         bayesloco_params=(bayesloco_params or None),
+        include_standard_errors=args.include_standard_errors,
         outputs=outputs
     )
 

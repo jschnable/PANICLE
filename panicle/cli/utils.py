@@ -132,6 +132,11 @@ def parse_args():
                        choices=list(OUTPUT_CHOICES),
                        default=list(OUTPUT_CHOICES),
                        help="Outputs to generate")
+    parser.add_argument(
+        "--include-standard-errors",
+        action='store_true',
+        help="Include {METHOD}_SE columns in GWAS_*_all_results.csv and GWAS_*_significant.csv",
+    )
 
     # FarmCPU resampling options
     parser.add_argument("--resampling", action='store_true',
