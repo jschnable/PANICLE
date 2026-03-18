@@ -6,6 +6,9 @@ import numpy as np
 from typing import Tuple, List, Optional
 from scipy import stats
 
+QQ_LAMBDA_MAX_SAMPLE_SIZE = 200000
+QQ_LAMBDA_RANDOM_SEED = 0
+
 def bonferroni_correction(pvalues: np.ndarray, alpha: float = 0.05) -> Tuple[np.ndarray, float]:
     """Apply Bonferroni correction for multiple testing
     
@@ -121,6 +124,29 @@ def genomic_inflation_factor(pvalues: np.ndarray) -> float:
 
     lambda_gc = median_chi2 / expected_median
     return lambda_gc
+
+def qq_compatible_genomic_inflation_factor(
+    pvalues: np.ndarray,
+    *,
+    max_sample_size: int = QQ_LAMBDA_MAX_SAMPLE_SIZE,
+    random_seed: int = QQ_LAMBDA_RANDOM_SEED,
+) -> Tuple[float, bool]:
+    """Calculate lambda using the same subsampling strategy as QQ plotting.
+
+    Returns:
+        Tuple of (lambda_gc, is_approximate)
+    """
+    valid_pvals = pvalues[np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)]
+    n_valid = len(valid_pvals)
+    if n_valid == 0:
+        return 1.0, False
+
+    is_approximate = n_valid > max_sample_size
+    if is_approximate:
+        rng = np.random.default_rng(random_seed)
+        valid_pvals = rng.choice(valid_pvals, size=max_sample_size, replace=False)
+
+    return genomic_inflation_factor(valid_pvals), is_approximate
 
 def qq_plot_data(pvalues: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Prepare data for Q-Q plot

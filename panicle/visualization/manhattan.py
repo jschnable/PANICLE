@@ -15,7 +15,7 @@ from ..utils.data_types import (
     infer_marker_id_column,
 )
 from ..association.farmcpu_resampling import FarmCPUResamplingResults
-from ..utils.stats import genomic_inflation_factor
+from ..utils.stats import genomic_inflation_factor, qq_compatible_genomic_inflation_factor
 
 def _format_threshold_label(threshold: float,
                             alpha: Optional[float],
@@ -59,7 +59,9 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
                verbose: bool = True,
                save_plots: bool = True,
                true_qtns: Optional[List[str]] = None,
-               multi_panel: bool = False) -> Dict:
+               multi_panel: bool = False,
+               method_lambda_gc: Optional[Dict[str, float]] = None,
+               method_lambda_gc_is_approx: Optional[Dict[str, bool]] = None) -> Dict:
     """Generate comprehensive GWAS visualization report
 
     Creates Manhattan plots, Q-Q plots, and summary statistics for GWAS results.
@@ -163,10 +165,14 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
             if "qq" in plot_types:
                 if verbose:
                     print(f"Creating Q-Q plot for {method_name}...")
+                lambda_gc_override = None if method_lambda_gc is None else method_lambda_gc.get(method_name)
+                lambda_is_approx_override = None if method_lambda_gc_is_approx is None else method_lambda_gc_is_approx.get(method_name)
                 qq_fig = create_qq_plot(
                     pvalues=valid_pvalues,
                     title=f"Q-Q Plot - {method_name}",
-                    figsize=(6, 6)
+                    figsize=(6, 6),
+                    lambda_gc_override=lambda_gc_override,
+                    lambda_is_approx_override=lambda_is_approx_override,
                 )
                 method_plots['qq'] = qq_fig
                 
@@ -322,11 +328,15 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
         if "qq" in plot_types:
             if verbose:
                 print(f"Creating Q-Q plot for {method_name}...")
+            lambda_gc_override = None if method_lambda_gc is None else method_lambda_gc.get(method_name)
+            lambda_is_approx_override = None if method_lambda_gc_is_approx is None else method_lambda_gc_is_approx.get(method_name)
 
             qq_fig = create_qq_plot(
                 pvalues=valid_pvalues,
                 title=f"Q-Q Plot - {method_name}",
-                figsize=(6, 6)
+                figsize=(6, 6),
+                lambda_gc_override=lambda_gc_override,
+                lambda_is_approx_override=lambda_is_approx_override,
             )
             method_plots['qq'] = qq_fig
 
@@ -825,7 +835,9 @@ def plot_manhattan_sequential(ax,
 
 def create_qq_plot(pvalues: np.ndarray,
                   title: str = "Q-Q Plot",
-                  figsize: Tuple[int, int] = (6, 6)) -> plt.Figure:
+                  figsize: Tuple[int, int] = (6, 6),
+                  lambda_gc_override: Optional[float] = None,
+                  lambda_is_approx_override: Optional[bool] = None) -> plt.Figure:
     """Create Q-Q plot for GWAS p-values
 
     Args:
@@ -878,14 +890,12 @@ def create_qq_plot(pvalues: np.ndarray,
     max_val = max(np.max(exp_log), np.max(obs_log))
     ax.plot([0, max_val], [0, max_val], 'r--', alpha=0.8, label='Null hypothesis')
 
-    # Calculate lambda (genomic inflation factor) on a random subset for speed
-    lambda_sample = valid_pvals
-    lambda_is_approx = False
-    if n > 200000:
-        rng = np.random.default_rng(0)
-        lambda_sample = rng.choice(valid_pvals, size=200000, replace=False)
-        lambda_is_approx = True
-    lambda_gc = genomic_inflation_factor(lambda_sample)
+    # Use caller-provided lambda when available to ensure stdout/report parity.
+    if lambda_gc_override is None:
+        lambda_gc, lambda_is_approx = qq_compatible_genomic_inflation_factor(valid_pvals)
+    else:
+        lambda_gc = float(lambda_gc_override)
+        lambda_is_approx = bool(lambda_is_approx_override) if lambda_is_approx_override is not None else False
 
     ax.set_xlabel(r'Expected $-\log_{10}(P)$')
     ax.set_ylabel(r'Observed $-\log_{10}(P)$')

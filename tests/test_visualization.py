@@ -189,3 +189,18 @@ def test_association_results_plot_helpers() -> None:
     assert isinstance(qq_fig, matplotlib.figure.Figure)
     plt.close(manhattan_fig)
     plt.close(qq_fig)
+
+
+def test_create_qq_plot_respects_lambda_override() -> None:
+    pvalues = np.linspace(1e-6, 1.0, 1000)
+
+    fig = manhattan.create_qq_plot(
+        pvalues=pvalues,
+        title="Q-Q Plot - Override",
+        lambda_gc_override=1.234,
+        lambda_is_approx_override=True,
+    )
+
+    title = fig.axes[0].get_title()
+    assert "λ≈ 1.234" in title
+    plt.close(fig)

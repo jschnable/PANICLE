@@ -21,7 +21,7 @@ from ..data.loaders import (
 )
 from ..utils.stats import (
     calculate_maf_from_genotypes,
-    genomic_inflation_factor
+    qq_compatible_genomic_inflation_factor,
 )
 from ..utils.data_types import (
     LEGACY_MARKER_ID_COLUMN,
@@ -106,7 +106,7 @@ def _run_single_method(
     mlm_kwargs=None,
     ncpus: int = 1,
 ):
-    """Run a single GWAS method and return (name, result, lambda_gc, error)."""
+    """Run a single GWAS method and return (name, result, lambda_gc, lambda_gc_is_approx, error)."""
     try:
         if method == 'GLM':
             res = PANICLE_GLM(
@@ -116,14 +116,14 @@ def _run_single_method(
                 cpu=ncpus,
                 verbose=False,
             )
-            lambda_gc = genomic_inflation_factor(res.pvalues)
-            return ('GLM', res, lambda_gc, None)
+            lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
+            return ('GLM', res, lambda_gc, lambda_gc_is_approx, None)
 
         elif method == 'MLM':
             mlm_kwargs = mlm_kwargs or {}
             if map_data is None:
                 if k_sub is None:
-                    return ('MLM', None, None, "Kinship matrix missing")
+                    return ('MLM', None, None, False, "Kinship matrix missing")
                 res = PANICLE_MLM(
                     phe=y_sub,
                     geno=g_sub,
@@ -142,8 +142,8 @@ def _run_single_method(
                     verbose=False,
                     **mlm_kwargs,
                 )
-            lambda_gc = genomic_inflation_factor(res.pvalues)
-            return ('MLM', res, lambda_gc, None)
+            lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
+            return ('MLM', res, lambda_gc, lambda_gc_is_approx, None)
 
         elif method == 'FARMCPU':
             # Pass alpha values (uncorrected) - FarmCPU applies multiple testing correction internally
@@ -164,8 +164,8 @@ def _run_single_method(
                 cpu=ncpus,
                 verbose=False
             )
-            lambda_gc = genomic_inflation_factor(res.pvalues)
-            return ('FarmCPU', res, lambda_gc, None)
+            lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
+            return ('FarmCPU', res, lambda_gc, lambda_gc_is_approx, None)
 
         elif method == 'BLINK':
             blink_kwargs = {
@@ -197,8 +197,8 @@ def _run_single_method(
                 verbose=False,
                 **blink_kwargs,
             )
-            lambda_gc = genomic_inflation_factor(res.pvalues)
-            return ('BLINK', res, lambda_gc, None)
+            lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
+            return ('BLINK', res, lambda_gc, lambda_gc_is_approx, None)
 
         elif method == 'BAYESLOCO':
             res = PANICLE_BayesLOCO(
@@ -210,8 +210,8 @@ def _run_single_method(
                 verbose=False,
                 bl_config=bl_params,
             )
-            lambda_gc = genomic_inflation_factor(res.pvalues)
-            return ('BAYESLOCO', res, lambda_gc, None)
+            lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
+            return ('BAYESLOCO', res, lambda_gc, lambda_gc_is_approx, None)
             
         elif method == 'FarmCPUResampling':
             # Resampling is usually heavy and might output files directly or need special handling
@@ -224,10 +224,10 @@ def _run_single_method(
             # PANICLE_FarmCPUResampling requires trait_name.
             pass
 
-        return (method, None, None, f"Unknown method {method}")
+        return (method, None, None, False, f"Unknown method {method}")
 
     except Exception as e:
-        return (method, None, None, str(e))
+        return (method, None, None, False, str(e))
 
 
 OUTPUT_CHOICES: Tuple[str, ...] = (
@@ -968,6 +968,7 @@ class GWASPipeline:
             # internal threading based on `cpu`.
             method_results = {}
             method_lambda_gc = {}  # Track lambda GC for each method
+            method_lambda_gc_is_approx = {}  # Track whether lambda uses QQ subsampling
             
             # Setup params for FarmCPU/BLINK
             fc_params = farmcpu_params or {}
@@ -1058,17 +1059,17 @@ class GWASPipeline:
                     if method == "GLM" and use_grouped_glm:
                         res_name = "GLM"
                         res_obj = grouped_glm_results[trait_name]
-                        lambda_gc = genomic_inflation_factor(res_obj.pvalues)
+                        lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res_obj.pvalues)
                         error = None
                     elif method == "MLM" and use_grouped_mlm:
                         res_name = "MLM"
                         res_obj = grouped_mlm_results[trait_name]
-                        lambda_gc = genomic_inflation_factor(res_obj.pvalues)
+                        lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res_obj.pvalues)
                         error = None
                     else:
                         loco_arg = mlm_loco_kinship if method == "MLM" else None
                         mlm_kw_arg = mlm_kwargs if method == "MLM" else None
-                        res_name, res_obj, lambda_gc, error = _run_single_method(
+                        res_name, res_obj, lambda_gc, lambda_gc_is_approx, error = _run_single_method(
                             method,
                             y_sub,
                             g_sub,
@@ -1093,7 +1094,9 @@ class GWASPipeline:
                     method_results[res_name] = res_obj
                     if lambda_gc is not None:
                         method_lambda_gc[res_name] = lambda_gc
-                        self.log(f"   {res_name} Lambda (GC): {lambda_gc:.3f}")
+                        method_lambda_gc_is_approx[res_name] = lambda_gc_is_approx
+                        lambda_label = "Lambda (GC, approx)" if lambda_gc_is_approx else "Lambda (GC)"
+                        self.log(f"   {res_name} {lambda_label}: {lambda_gc:.3f}")
                         if lambda_gc > 1.3:
                             self.log(f"   WARNING: Genomic inflation factor ({lambda_gc:.3f}) > 1.3 for {res_name}.")
                             self.log(f"            This suggests population stratification or other confounding.")
@@ -1137,6 +1140,7 @@ class GWASPipeline:
                 method_thresholds=method_thresholds,
                 method_threshold_sources=method_threshold_sources,
                 method_lambda_gc=method_lambda_gc,
+                method_lambda_gc_is_approx=method_lambda_gc_is_approx,
                 n_samples=n_samples_trait,
                 n_markers=n_markers,
                 runtime_seconds=trait_runtime,
@@ -1321,7 +1325,7 @@ class GWASPipeline:
 
         return y_final, g_final, cov_final, k_final, geno_idx
 
-    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, include_standard_errors: bool = False, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
+    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, include_standard_errors: bool = False, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, method_lambda_gc_is_approx=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
         """Internal helper to save tables and plots"""
         
         summary_data = []
@@ -1488,6 +1492,8 @@ class GWASPipeline:
                         threshold_alpha=method_alpha,
                         threshold_n_tests=method_n_tests,
                         threshold_source=method_source,
+                        method_lambda_gc=method_lambda_gc,
+                        method_lambda_gc_is_approx=method_lambda_gc_is_approx,
                         verbose=False,
                         save_plots=True
                     )

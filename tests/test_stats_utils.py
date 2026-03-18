@@ -51,6 +51,36 @@ def test_genomic_inflation_factor_handles_empty_and_valid_cases() -> None:
     assert stats_utils.genomic_inflation_factor(pvalues) == pytest.approx(expected_lambda)
 
 
+def test_qq_compatible_genomic_inflation_factor_without_subsampling() -> None:
+    pvalues = np.array([0.5, 0.2, 0.1])
+    expected = stats_utils.genomic_inflation_factor(pvalues)
+
+    observed, is_approx = stats_utils.qq_compatible_genomic_inflation_factor(
+        pvalues,
+        max_sample_size=10,
+        random_seed=123,
+    )
+
+    assert is_approx is False
+    assert observed == pytest.approx(expected)
+
+
+def test_qq_compatible_genomic_inflation_factor_with_subsampling() -> None:
+    pvalues = np.linspace(1e-6, 1.0, 20)
+    rng = np.random.default_rng(7)
+    sample = rng.choice(pvalues, size=5, replace=False)
+    expected = stats_utils.genomic_inflation_factor(sample)
+
+    observed, is_approx = stats_utils.qq_compatible_genomic_inflation_factor(
+        pvalues,
+        max_sample_size=5,
+        random_seed=7,
+    )
+
+    assert is_approx is True
+    assert observed == pytest.approx(expected)
+
+
 def test_qq_plot_data_filters_invalid_and_orders() -> None:
     pvalues = np.array([0.1, 0.5, np.nan, 0.0, -1.0])
 
