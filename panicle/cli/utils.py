@@ -100,7 +100,7 @@ def parse_args():
         "--ncpus",
         type=int,
         default=1,
-        help="CPUs used by each method engine (0 = all available cores)",
+        help="CPUs used by each method engine and effective-test computation when enabled (0 = all available cores)",
     )
     parser.add_argument(
         "--parallel-mode",

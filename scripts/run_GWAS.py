@@ -3,6 +3,7 @@
 Comprehensive GWAS Analysis Script using PANICLE (Refactored Pipeline Version)
 """
 import sys
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -143,6 +144,14 @@ def main():
         'split_multiallelic': not args.no_split_multiallelic,
         'compute_effective_tests': args.compute_effective_tests
     }
+    if args.compute_effective_tests:
+        if args.parallel_mode == "off":
+            effective_ncpus = 1
+        elif args.ncpus == 0:
+            effective_ncpus = max(1, os.cpu_count() or 1)
+        else:
+            effective_ncpus = max(1, int(args.ncpus))
+        loader_kwargs["effective_test_kwargs"] = {"ncpus": effective_ncpus}
 
     pipeline.load_data(
         phenotype_file=args.phenotype,

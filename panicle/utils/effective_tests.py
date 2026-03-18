@@ -6,8 +6,9 @@ specification.
 from __future__ import annotations
 
 from collections import OrderedDict
-from concurrent.futures import Executor, Future
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 from typing import (
     Any,
     Dict,
@@ -173,6 +174,9 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         positions: Sequence[int],
         *,
         monomorphic_dropped: int = 0,
+        prefiltered_low_variance: bool = False,
+        preload_columns: bool = False,
+        preload_max_elements: int = 64_000_000,
     ) -> None:
         if len(indices) != len(positions):
             raise ValueError("Indices and positions must be the same length")
@@ -186,7 +190,11 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         self._position_lookup: Dict[int, int] = {
             int(idx): int(pos) for idx, pos in zip(self._indices, self._positions)
         }
+        self._index_column_lookup: Dict[int, int] = {
+            int(idx): offset for offset, idx in enumerate(self._indices)
+        }
         self.monomorphic_dropped = int(monomorphic_dropped)
+        self.pre_filtered_low_variance = bool(prefiltered_low_variance)
         self._column_cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
         self._variance_cache: Dict[int, float] = {}
         self._stats_cache: Dict[int, Tuple[float, float]] = {}
@@ -194,12 +202,55 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         self._cache_capacity = max(256, min(4096, len(self._indices)))
         self._low_variance_skipped = 0
         self._sample_count = int(self._genotype.n_individuals)
+        self._preload_columns = bool(preload_columns)
+        self._preload_max_elements = max(1, int(preload_max_elements))
+        self._preloaded_columns: Optional[np.ndarray] = None
+        self._preloaded_variances: Optional[np.ndarray] = None
+
+    def _ensure_preloaded_columns(self) -> None:
+        if not self._preload_columns:
+            return
+        if self._preloaded_columns is not None:
+            return
+        n_markers = int(self._indices.size)
+        if n_markers == 0:
+            return
+        if (self._sample_count * n_markers) > self._preload_max_elements:
+            # Disable preloading for very large chromosomes to avoid excessive memory use.
+            self._preload_columns = False
+            return
+
+        columns = self._genotype.get_columns_imputed(self._indices, dtype=np.float64)
+        if columns.ndim == 1:
+            columns = columns.reshape(self._sample_count, -1)
+        self._preloaded_columns = np.array(columns, dtype=np.float64, copy=True, order="F")
+        if self._sample_count <= 1:
+            self._preloaded_variances = np.zeros(n_markers, dtype=np.float64)
+        else:
+            denom = float(self._sample_count - 1)
+            centered = self._preloaded_columns - np.mean(
+                self._preloaded_columns,
+                axis=0,
+                dtype=np.float64,
+            )
+            variances = np.einsum(
+                "ij,ij->j",
+                centered,
+                centered,
+                dtype=np.float64,
+            ) / denom
+            tiny_neg = (variances < 0.0) & (np.abs(variances) < 1e-12)
+            variances[tiny_neg] = 0.0
+            self._preloaded_variances = variances
 
     def _enforce_cache_limit(self) -> None:
         while len(self._column_cache) > self._cache_capacity:
             self._column_cache.popitem(last=False)
 
     def _prefetch_range(self, start: int, end: int) -> None:
+        self._ensure_preloaded_columns()
+        if self._preloaded_columns is not None:
+            return
         if end < start:
             return
         span = end - start + 1
@@ -223,6 +274,9 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         idx_list = [int(i) for i in indices]
         if not idx_list:
             return []
+        self._ensure_preloaded_columns()
+        if self._preloaded_columns is not None:
+            return [self._preloaded_columns[:, self._index_column_lookup[idx]] for idx in idx_list]
         if len(idx_list) > 1:
             ordered = sorted(set(idx_list))
             span = ordered[-1] - ordered[0] + 1
@@ -251,9 +305,24 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         return [self._column_cache[idx] for idx in idx_list]
 
     def _get_columns_matrix(self, indices: Sequence[int]) -> np.ndarray:
-        cols = self._ensure_columns(indices)
-        if not cols:
+        idx_list = [int(i) for i in indices]
+        if not idx_list:
             raise ValueError("index_list must contain at least one marker")
+
+        self._ensure_preloaded_columns()
+        if self._preloaded_columns is not None:
+            col_pos = np.asarray(
+                [self._index_column_lookup[idx] for idx in idx_list],
+                dtype=np.int64,
+            )
+            contiguous = col_pos.size <= 1 or np.all(np.diff(col_pos) == 1)
+            if contiguous:
+                view = self._preloaded_columns[:, int(col_pos[0]) : int(col_pos[-1]) + 1]
+            else:
+                view = self._preloaded_columns[:, col_pos]
+            return np.array(view, dtype=np.float64, copy=True, order="F")
+
+        cols = self._ensure_columns(idx_list)
         n_cols = len(cols)
         matrix = np.empty((self._sample_count, n_cols), dtype=np.float64, order="F")
         for offset, col in enumerate(cols):
@@ -262,6 +331,10 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
 
     def is_low_variance(self, index: int, *, threshold: float = 1e-12) -> bool:
         idx = int(index)
+        if self._preloaded_variances is not None:
+            col_pos = self._index_column_lookup.get(idx)
+            if col_pos is not None:
+                return float(self._preloaded_variances[col_pos]) <= threshold
         var = self._variance_cache.get(idx)
         if var is None:
             column = self._ensure_columns([idx])[0]
@@ -367,6 +440,8 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         return corr
 
     def release_ld_data(self) -> None:
+        self._preloaded_columns = None
+        self._preloaded_variances = None
         self._column_cache.clear()
         self._variance_cache.clear()
         self._stats_cache.clear()
@@ -401,6 +476,38 @@ class _GenotypeLDSource(LDSparseMatrixProtocol):
         corr = cov / denom
         if np.isnan(corr):
             return None
+        return corr
+
+    def adjacent_correlations(self, indices: Sequence[int]) -> np.ndarray:
+        idx_list = [int(i) for i in indices]
+        if len(idx_list) <= 1:
+            return np.empty(0, dtype=np.float64)
+        if self._sample_count <= 1:
+            return np.full(len(idx_list) - 1, np.nan, dtype=np.float64)
+        if (self._sample_count * len(idx_list)) > self._preload_max_elements:
+            # Avoid allocating very large temporary matrices for adjacency precompute.
+            return np.full(len(idx_list) - 1, np.nan, dtype=np.float64)
+
+        columns = self._get_columns_matrix(idx_list)
+        n_samples = columns.shape[0]
+        if n_samples <= 1:
+            return np.full(len(idx_list) - 1, np.nan, dtype=np.float64)
+
+        columns -= np.mean(columns, axis=0, dtype=np.float64)
+        denom = max(n_samples - 1, 1)
+        sumsq = np.einsum("ij,ij->j", columns, columns, dtype=np.float64)
+        variances = sumsq / denom
+        valid = variances > 1e-12
+        std = np.zeros_like(variances)
+        std[valid] = np.sqrt(variances[valid])
+
+        cross = np.einsum("ij,ij->j", columns[:, :-1], columns[:, 1:], dtype=np.float64)
+        den = denom * std[:-1] * std[1:]
+        corr = np.full(len(idx_list) - 1, np.nan, dtype=np.float64)
+        ok = valid[:-1] & valid[1:] & (den > 0.0)
+        corr[ok] = cross[ok] / den[ok]
+        finite = np.isfinite(corr)
+        corr[finite] = np.clip(corr[finite], -1.0, 1.0)
         return corr
 
 
@@ -450,7 +557,8 @@ def _construct_blocks(
 
     entries = raw_entries
     low_var_checker = getattr(ld_source, "is_low_variance", None)
-    if callable(low_var_checker):
+    already_prefiltered = bool(getattr(ld_source, "pre_filtered_low_variance", False))
+    if callable(low_var_checker) and not already_prefiltered:
         filtered: List[Tuple[int, int]] = []
         skipped = 0
         for idx, pos in raw_entries:
@@ -467,6 +575,17 @@ def _construct_blocks(
 
     if not entries:
         return [], [], total_indices
+
+    ordered_indices = [idx for idx, _ in entries]
+    adjacent_corr_values: Optional[np.ndarray] = None
+    adjacent_corr_fn = getattr(ld_source, "adjacent_correlations", None)
+    if callable(adjacent_corr_fn):
+        try:
+            adjacent_corr_values = np.asarray(adjacent_corr_fn(ordered_indices), dtype=np.float64)
+            if adjacent_corr_values.ndim != 1 or adjacent_corr_values.size != max(len(ordered_indices) - 1, 0):
+                adjacent_corr_values = None
+        except Exception:
+            adjacent_corr_values = None
 
     n = len(entries)
     start = 0
@@ -487,7 +606,15 @@ def _construct_blocks(
                 break
 
             pair_corr = None
-            if hasattr(ld_source, "pair_correlation"):
+            pair_idx = end - 1
+            if (
+                adjacent_corr_values is not None
+                and 0 <= pair_idx < adjacent_corr_values.size
+            ):
+                pair_value = adjacent_corr_values[pair_idx]
+                if np.isfinite(pair_value):
+                    pair_corr = float(pair_value)
+            if pair_corr is None and hasattr(ld_source, "pair_correlation"):
                 pair_corr = getattr(ld_source, "pair_correlation")(prev_idx, curr_idx)
 
             if pair_corr is None:
@@ -811,6 +938,8 @@ def make_ld_sources_from_genotype(
             filtered_indices,
             filtered_positions,
             monomorphic_dropped=dropped,
+            prefiltered_low_variance=True,
+            preload_columns=True,
         )
 
     return ld_sources
@@ -821,9 +950,39 @@ def estimate_effective_tests_from_genotype(
     genotype_map: GenotypeMap,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Convenience wrapper combining LD construction and Me estimation."""
+    """Convenience wrapper combining LD construction and Me estimation.
+
+    Optional keyword arguments:
+      - ``ncpus`` or ``cpu``: number of workers for per-chromosome processing.
+        ``0`` means "use all available CPUs". ``1`` (default) runs serially.
+      - ``executor``: pre-built ``concurrent.futures.Executor``. If provided,
+        it takes precedence over ``ncpus``/``cpu``.
+      - Any other kwargs are passed through to ``estimate_effective_tests``.
+    """
     ld_sources = make_ld_sources_from_genotype(genotype, genotype_map)
     metadata = kwargs.pop("metadata", None)
+    executor = kwargs.get("executor")
+
+    if executor is None:
+        raw_workers = kwargs.pop("ncpus", kwargs.pop("cpu", None))
+        if raw_workers is not None:
+            try:
+                workers = int(raw_workers)
+            except (TypeError, ValueError):
+                raise ValueError("ncpus/cpu for effective tests must be an integer")
+            if workers < 0:
+                raise ValueError("ncpus/cpu for effective tests must be >= 0")
+            if workers == 0:
+                workers = max(1, os.cpu_count() or 1)
+            if workers > 1:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    return estimate_effective_tests(
+                        ld_sources,
+                        metadata=metadata,
+                        executor=pool,
+                        **kwargs,
+                    )
+
     return estimate_effective_tests(
         ld_sources,
         metadata=metadata,

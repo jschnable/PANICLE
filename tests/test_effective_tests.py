@@ -58,6 +58,58 @@ def test_estimate_effective_tests_from_genotype_simple_case() -> None:
     assert len(result["block_stats"]) >= 1
 
 
+def test_estimate_effective_tests_parallel_matches_serial() -> None:
+    geno_array = np.array(
+        [
+            [0, 0, 1, 1],
+            [1, 1, 0, 0],
+            [0, 1, 0, 1],
+            [1, 0, 1, 0],
+        ],
+        dtype=np.int8,
+    )
+    genotype = GenotypeMatrix(geno_array)
+    map_df = pd.DataFrame(
+        {
+            "SNP": ["snp1", "snp2", "snp3", "snp4"],
+            "CHROM": ["1", "1", "1", "1"],
+            "POS": [100, 200, 500, 800],
+        }
+    )
+    geno_map = GenotypeMap(map_df)
+
+    serial = estimate_effective_tests_from_genotype(genotype, geno_map, ncpus=1)
+    parallel = estimate_effective_tests_from_genotype(genotype, geno_map, ncpus=2)
+
+    assert parallel["Me"] == serial["Me"]
+    assert parallel["total_snps"] == serial["total_snps"]
+    assert set(parallel["per_chromosome"]) == set(serial["per_chromosome"])
+
+
+def test_estimate_effective_tests_rejects_negative_cpu() -> None:
+    geno_array = np.array(
+        [
+            [0, 1],
+            [1, 0],
+            [0, 1],
+            [1, 0],
+        ],
+        dtype=np.int8,
+    )
+    genotype = GenotypeMatrix(geno_array)
+    map_df = pd.DataFrame(
+        {
+            "SNP": ["snp1", "snp2"],
+            "CHROM": ["1", "1"],
+            "POS": [100, 200],
+        }
+    )
+    geno_map = GenotypeMap(map_df)
+
+    with pytest.raises(ValueError, match=">= 0"):
+        estimate_effective_tests_from_genotype(genotype, geno_map, ncpus=-1)
+
+
 def test_load_genotype_file_records_effective_tests(tmp_path: Path) -> None:
     geno_file = tmp_path / "geno.csv"
     geno_file.write_text(
