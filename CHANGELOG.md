@@ -5,6 +5,23 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-13
+
+### Added
+- Optional CLI and pipeline support to export GWAS standard errors.
+- Grouped multi-trait GLM execution paths with pipeline auto-dispatch.
+- eQTL multi-trait acceleration tutorial documentation.
+- Test coverage for effective tests, stats utilities, visualization, CLI utilities, and expanded GWAS pipeline paths.
+
+### Changed
+- Optimized LOCO MLM multi-trait execution and genotype alignment/subsetting paths.
+- Optimized effective marker number calculations and added CPU control wiring.
+- Improved PCA and kinship-related data flow for large analyses.
+
+### Fixed
+- Corrected phenotype parsing and BLINK option forwarding behavior.
+- Aligned reported genomic inflation lambda with the QQ plot lambda computation.
+
 ## [0.1.0] - 2026-01-25
 
 ### Changed
@@ -58,3 +75,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional: cyvcf2 (VCF support), bed-reader (PLINK support)
 
 [0.1.0]: https://github.com/jschnable/PANICLE/releases/tag/v0.1.0
+[0.3.1]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.1

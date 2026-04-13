@@ -543,7 +543,7 @@ class GenotypeMap:
         attrs = getattr(raw_df, "attrs", {})
         inherited_metadata = {
             key: attrs[key]
-            for key in ("chromosome_groups", "chromosome_order")
+            for key in ("chromosome_groups", "chromosome_order", "is_imputed")
             if key in attrs
         }
         if metadata:
@@ -554,8 +554,8 @@ class GenotypeMap:
             include_legacy_snp_alias=True,
         )
         attach_genotype_map_metadata(self._dataframe_cache)
-        self.metadata.setdefault("chromosome_groups", self._dataframe_cache.attrs.get("chromosome_groups"))
-        self.metadata.setdefault("chromosome_order", self._dataframe_cache.attrs.get("chromosome_order"))
+        if "is_imputed" in self.metadata:
+            self._dataframe_cache.attrs["is_imputed"] = self.metadata["is_imputed"]
         self._column_order = list(self._dataframe_cache.columns)
         self._column_data: Dict[str, Any] = {
             column: self._dataframe_cache[column].to_numpy(copy=False)
@@ -603,7 +603,13 @@ class GenotypeMap:
                 self._dataframe_cache.attrs["chromosome_order"] = self.metadata["chromosome_order"]
             if "is_imputed" in self.metadata:
                 self._dataframe_cache.attrs["is_imputed"] = self.metadata["is_imputed"]
+            attach_genotype_map_metadata(self._dataframe_cache)
         return self._dataframe_cache
+
+    @property
+    def attrs(self) -> Dict[str, Any]:
+        """Pandas-style attrs exposed for compatibility with DataFrame callers."""
+        return self.data.attrs
 
     def _get_column(self, column: str) -> np.ndarray:
         return _materialize_lazy_column(self._column_data[column])
@@ -640,6 +646,8 @@ class GenotypeMap:
             out.attrs["chromosome_groups"] = self.metadata["chromosome_groups"]
         if "chromosome_order" in self.metadata:
             out.attrs["chromosome_order"] = self.metadata["chromosome_order"]
+        if "is_imputed" in self.metadata:
+            out.attrs["is_imputed"] = self.metadata["is_imputed"]
         return out
 
     def with_metadata(self, **metadata: Any) -> "GenotypeMap":
@@ -656,19 +664,20 @@ class GenotypeMap:
         """Return cached chromosome-to-marker index groups."""
         chrom_groups = self.metadata.get("chromosome_groups")
         if chrom_groups is None:
+            chrom_groups = self.data.attrs.get("chromosome_groups")
+        if chrom_groups is None:
             chrom_groups = group_marker_indices_by_labels(
                 np.asarray(self.chromosomes).astype(str, copy=False)
             )
-            self.metadata["chromosome_groups"] = chrom_groups
-            self.metadata["chromosome_order"] = list(chrom_groups.keys())
         return chrom_groups
 
     def get_chromosome_order(self) -> List[str]:
         """Return chromosome labels in cached group order."""
         order = self.metadata.get("chromosome_order")
         if order is None:
+            order = self.data.attrs.get("chromosome_order")
+        if order is None:
             order = list(self.get_chromosome_groups().keys())
-            self.metadata["chromosome_order"] = order
         return list(order)
 
 

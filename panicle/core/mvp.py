@@ -674,8 +674,7 @@ def _align_samples_to_genotype(
 ) -> Tuple[Phenotype, GenotypeMatrix, Optional[np.ndarray], Dict[str, int]]:
     """Align phenotype (and optional covariates) to genotype sample IDs.
 
-    Uses genotype sample order for the aligned outputs so downstream genotype
-    subsetting can stay monotonic and cache-friendly.
+    Preserves phenotype row order while subsetting genotype to the shared IDs.
     """
     phenotype_df = phenotype.data.copy()
     phenotype_df['ID'] = phenotype_df['ID'].astype(str)
@@ -684,8 +683,8 @@ def _align_samples_to_genotype(
     id_to_genotype_index = {sample_id: idx for idx, sample_id in enumerate(genotype_ids_str)}
 
     phe_ids = phenotype_df['ID'].to_numpy()
-    phe_id_set = set(phe_ids.tolist())
-    ordered_common_ids = [gid for gid in genotype_ids_str if gid in phe_id_set]
+    genotype_id_set = set(genotype_ids_str)
+    ordered_common_ids = [sample_id for sample_id in phe_ids.tolist() if sample_id in genotype_id_set]
     n_common = len(ordered_common_ids)
     if n_common == 0:
         raise ValueError("No common sample IDs between phenotype and genotype data")
@@ -696,8 +695,10 @@ def _align_samples_to_genotype(
 
     aligned_covariates = None
     if covariates is not None:
-        id_to_phe_row = {sample_id: idx for idx, sample_id in enumerate(phe_ids.tolist())}
-        phe_row_indices = np.array([id_to_phe_row[sample_id] for sample_id in ordered_common_ids], dtype=int)
+        phe_row_indices = np.array(
+            [idx for idx, sample_id in enumerate(phe_ids.tolist()) if sample_id in genotype_id_set],
+            dtype=int,
+        )
         aligned_covariates = covariates[phe_row_indices, :]
 
     unique_phe = set(phe_ids.tolist())
