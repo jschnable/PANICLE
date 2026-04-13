@@ -68,7 +68,7 @@ pipeline.run_analysis(traits=['PlantHeight'], methods=['MLM'])
 
 ## Expected Results
 
-When analyzing this data with appropriate population structure correction (MLM or MLM_Hybrid):
+When analyzing this data with appropriate population structure correction (MLM):
 - You should detect many of the included significant PlantHeight markers
 - Lambda GC inflation factors should be reasonable (~1.0-1.3) with proper correction
 
@@ -97,5 +97,5 @@ For the full dataset, see the `sorghum_data/` directory in the parent repository
 ## Citation
 
 If you use this example data in publications, please cite:
-- The PANICLE package (citation TBD)
+- The PANICLE package version you used
 - Original SbDiv panel and genotyping work (Mangal et al. 2025, in prep)

@@ -35,9 +35,9 @@ Welcome to the PANICLE documentation! This guide will help you perform genome-wi
 - **[Example Scripts](../examples/README.md)** - Runnable Python scripts
   - 01: Basic GWAS with GLM
   - 02: MLM with population structure
-  - 03: Hybrid MLM for increased power
   - 04: Including covariates (flowering time example)
   - 05: Reading and analyzing results
+  - 06: FarmCPU resampling with RMIP output
 
 ## Quick Links
 
@@ -80,7 +80,7 @@ python scripts/run_GWAS.py \
    ↓
 4. Compute Population Structure (PCs and optional kinship)
    ↓
-5. Run Analysis (choose methods: GLM, MLM, MLM_Hybrid, FarmCPU, BLINK, FarmCPUResampling)
+5. Run Analysis (choose methods: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling)
    ↓
 6. Results saved to output directory
 ```
@@ -91,10 +91,10 @@ python scripts/run_GWAS.py \
 |--------|-------|-------------------|----------|
 | **GLM** | Very Fast | PCs (optional) | Quick screening, homogeneous populations |
 | **MLM** | Moderate | LOCO (if map) or Kinship + PCs | Diverse populations, related individuals |
-| **MLM_Hybrid** | Moderate | LOCO (map required) + PCs | LRT-quality p-values for top hits |
-| **FarmCPU** | Slow | Kinship + PCs | Controlling false positives |
-| **BLINK** | Slow | Kinship + PCs | Sparse signals with large marker sets |
-| **FarmCPUResampling** | Very Slow | Kinship + PCs | Stability via RMIP resampling |
+| **BAYESLOCO** | Moderate | Chromosome-aware Bayesian model + PCs | Sparse signals and chromosome-aware shrinkage |
+| **FarmCPU** | Slow | Iterative pseudo-QTN model + PCs | Controlling false positives |
+| **BLINK** | Slow | Iterative pseudo-QTN model + PCs | Sparse signals with large marker sets |
+| **FarmCPUResampling** | Very Slow | FarmCPU resampling + PCs | Stability via RMIP resampling |
 
 ## File Formats
 
@@ -122,7 +122,7 @@ Sample2,B,2023
 
 **Genetic Map (CSV/TSV, optional but recommended)**
 CSV/TSV with `MARKER`, `CHROM`, and `POS` columns (legacy `SNP` and aliases like `Chr`, `Pos` are accepted).
-Recommended for numeric genotype matrices and for LOCO-based methods like `MLM_Hybrid`.
+Recommended for numeric genotype matrices and chromosome-aware methods like `MLM` and `BAYESLOCO`.
 
 ### Output Files
 
@@ -138,7 +138,7 @@ See [Output Files](output_files.md) for detailed format specifications.
 ### Q: Which method should I use?
 - **Start with GLM** for quick screening
 - **Use MLM** if you have population structure or relatedness
-- **Use Hybrid MLM** when you need accurate p-values for top hits with minimal runtime cost
+- **Use MLM with map data** when you want LOCO + exact top-hit refinement in the pipeline
 
 ### Q: How many PCs should I include?
 - Typically 3-10 PCs depending on population structure
@@ -160,7 +160,7 @@ See [Output Files](output_files.md) for detailed format specifications.
 1. **Use binary genotype formats** - Genotype files are cached automatically (VCF/BCF/PLINK/HapMap/CSV/TSV)
 2. **Filter low MAF variants** before analysis
 3. **Start with GLM** for initial screening
-4. **Use Hybrid MLM** instead of full LRT for production analyses
+4. **Prefer MLM with map data** to enable LOCO + exact top-hit refinement
 5. **Run methods in parallel** - pipeline handles this automatically
 
 ## Getting Help
@@ -172,11 +172,10 @@ See [Output Files](output_files.md) for detailed format specifications.
 
 ## Citation
 
-If you use PANICLE in your research, please cite:
+If you use PANICLE in your research, cite the software version you used, for example:
 
 ```
-PANICLE: A Python package for efficient multivariate GWAS analysis
-[Full citation to be added]
+PANICLE v0.3.1. https://github.com/jschnable/PANICLE
 ```
 
 ## See Also

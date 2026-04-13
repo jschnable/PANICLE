@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 from scipy import optimize
 
@@ -221,3 +223,57 @@ def test_fit_markers_lrt_batch_prebuilt_matches_markerwise_gemma() -> None:
     assert np.max(np.abs(logp_batch - logp_ref)) < 0.05
     assert np.max(np.abs(beta_batch - beta_ref)) < 0.02
     assert np.max(np.abs(se_batch - se_ref)) < 0.02
+
+
+def test_lrt_gemma_paths_suppress_matmul_runtime_warnings() -> None:
+    n = 16
+    m = 12
+    scale = 1e200
+    x = np.linspace(-1.0, 1.0, n, dtype=np.float64)
+    X = np.column_stack([np.ones(n), x]).astype(np.float64) * scale
+    G = (
+        np.tile(np.array([0.0, 1.0, 2.0, 1.0], dtype=np.float64), (n * m // 4) + 1)[: n * m]
+        .reshape(n, m)
+        * scale
+    )
+    y = (0.1 + (0.2 * x)) * scale
+    eigenvals = np.linspace(0.2, 2.0, n, dtype=np.float64)
+
+    with warnings.catch_warnings(record=True) as batch_caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        p_batch, beta_batch, se_batch = fit_markers_lrt_batch_prebuilt(
+            y,
+            X,
+            G,
+            eigenvals,
+            0.0,
+            null_h2=0.5,
+            solver_norm="GEMMA",
+            assume_sanitized=False,
+        )
+
+    batch_matmul_warnings = [w for w in batch_caught if "encountered in matmul" in str(w.message)]
+    assert not batch_matmul_warnings
+    assert np.all(np.isfinite(p_batch))
+    assert np.all(np.isfinite(beta_batch))
+    assert np.all(np.isfinite(se_batch))
+
+    X_alt = np.column_stack([X, G[:, 0]])
+    with warnings.catch_warnings(record=True) as single_caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        lrt_stat, p_value, beta, se = fit_marker_lrt_prebuilt(
+            y,
+            X_alt,
+            eigenvals,
+            0.0,
+            null_h2=0.5,
+            solver_norm="GEMMA",
+            assume_sanitized=False,
+        )
+
+    single_matmul_warnings = [w for w in single_caught if "encountered in matmul" in str(w.message)]
+    assert not single_matmul_warnings
+    assert np.isfinite(lrt_stat)
+    assert 0.0 <= p_value <= 1.0
+    assert np.isfinite(beta)
+    assert np.isfinite(se)

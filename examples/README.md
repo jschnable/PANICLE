@@ -169,7 +169,7 @@ pipeline.run_analysis(
 ### Very slow analysis
 - Start with GLM for quick results
 - Use smaller sample of markers for testing
-- Consider Hybrid MLM instead of full LRT
+- Prefer `MLM` with map data when you want LOCO + exact top-hit refinement
 
 ## Next Steps
 
@@ -182,4 +182,3 @@ pipeline.run_analysis(
 
 - Check documentation in `docs/`
 - Open an issue on GitHub
-- Email: [your contact]

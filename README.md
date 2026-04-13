@@ -131,7 +131,7 @@ python scripts/run_GWAS.py \
 | **`--map`** | Optional map file (MARKER, CHROM, POS). Legacy `SNP` is also accepted. Recommended for numeric CSV/TSV and LOCO methods. | None |
 | **`--format`** | Genotype format override: `vcf`, `plink`, `hapmap`, `csv`, `tsv`, `numeric`. | Auto |
 | **`--traits`** | Comma-separated list of columns to analyze. | All numeric |
-| **`--methods`** | GWAS methods: `GLM`, `MLM`, `FarmCPU`, `BLINK`, `FarmCPUResampling`. | GLM,MLM,FarmCPU,BLINK |
+| **`--methods`** | GWAS methods: `GLM`, `MLM`, `BAYESLOCO`, `FarmCPU`, `BLINK`, `FarmCPUResampling`. | GLM,MLM,FarmCPU |
 | **`--n-pcs`** | Number of Principal Components for population structure. | 3 |
 | **`--compute-effective-tests`** | Calculate Effective Marker Number (Me) and use it for Bonferroni correction. | False |
 | **`--alpha`** | Significance level (e.g., 0.05). Threshold = `alpha / Me` (or `M`). | 0.05 |
@@ -221,9 +221,9 @@ The [`examples/`](examples/) directory contains runnable example scripts with in
 |---------|-------------|
 | [01_basic_gwas.py](examples/01_basic_gwas.py) | Simplest GWAS with GLM |
 | [02_mlm_with_structure.py](examples/02_mlm_with_structure.py) | MLM with population structure correction |
-| [03_hybrid_mlm.py](examples/03_hybrid_mlm.py) | Hybrid MLM (Wald + LRT) for accurate p-values |
 | [04_with_covariates.py](examples/04_with_covariates.py) | Including external covariates |
 | [05_reading_results.py](examples/05_reading_results.py) | Analyzing and visualizing results |
+| [06_farmcpu_resampling.py](examples/06_farmcpu_resampling.py) | FarmCPU resampling with RMIP output |
 
 Run any example:
 ```bash
@@ -246,7 +246,7 @@ Mixed Linear Model accounting for population structure and cryptic relatedness v
 - **Eigenspace transformation**: Data is transformed via eigendecomposition of the kinship matrix, converting the correlated mixed model into an equivalent weighted least squares problem.
 - **REML variance components**: Heritability (h²) is estimated using Brent's method optimization of the REML likelihood.
 
-**MLM_Hybrid** extends MLM with a two-phase approach: (1) fast Wald screening of all markers, (2) Likelihood Ratio Test (LRT) refinement for markers passing a screening threshold (default p < 5e-4). LRT re-estimates variance components per marker, with a GEMMA-inspired derivative solver available for faster exact refinement versus the legacy bounded-Brent optimizer.
+When map data is available, PANICLE's pipeline `MLM` path uses LOCO kinship and applies exact LRT refinement to top hits by default. LRT re-estimates variance components per marker, with a GEMMA-inspired derivative solver available for faster exact refinement versus the legacy bounded-Brent optimizer.
 
 ### FarmCPU
 
@@ -290,17 +290,16 @@ Benchmarks based on traits measured from 862 samples, each scored for 5,751,024 
 |-------------|---------|-------------------------------------------|
 | GLM         | 8.94s   | ~643K markers/second                      |
 | MLM         | 28.18s  | LOCO kinship precompute +15.95s = 44.13s total |
-| MLM_Hybrid  | 30.67s  | Includes LOCO kinship reuse               |
 | FarmCPU     | 41.90s  | 10 max iterations                         |
 | BLINK       | 60.81s  | 10 max iterations                         |
 
 ### Scaling by Marker Count (862 samples; includes cached load, alignment, PCA, kinship where relevant)
 
-| Markers    | GLM     | MLM     | MLM_Hybrid | FarmCPU  | BLINK   |
-|------------|---------|---------|------------|----------|---------|
-| 50,000     | 12.09s  | 12.86s  | 12.37s     | 12.29s   | 12.42s  |
-| 500,000    | 12.78s  | 15.72s  | 15.03s     | 14.66s   | 15.74s  |
-| 5,000,000  | 19.49s  | 47.12s  | 45.63s     | 46.37s   | 58.60s  |
+| Markers    | GLM     | MLM     | FarmCPU  | BLINK   |
+|------------|---------|---------|----------|---------|
+| 50,000     | 12.09s  | 12.86s  | 12.29s   | 12.42s  |
+| 500,000    | 12.78s  | 15.72s  | 14.66s   | 15.74s  |
+| 5,000,000  | 19.49s  | 47.12s  | 46.37s   | 58.60s  |
 
 ## License
 

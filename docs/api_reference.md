@@ -56,19 +56,21 @@ pipeline.load_data(
     covariate_file=None,
     covariate_columns=None,
     covariate_id_column='ID',
-    loader_kwargs=None
+    loader_kwargs=None,
+    phenotype_id_column='ID'
 )
 ```
 
 **Parameters:**
 - `phenotype_file` (str): Path to phenotype CSV file (first column must be 'ID' or individual IDs)
-- `genotype_file` (str): Path to genotype file (VCF, HapMap, or Plink format)
+- `genotype_file` (str): Path to genotype file (VCF/BCF, HapMap, Plink, CSV/TSV, or numeric matrix)
 - `map_file` (str, optional): Override genetic map file. If None, map is extracted from genotype file
-- `genotype_format` (str, optional): Format of genotype file ('vcf', 'hapmap', 'plink'). Auto-detected if None
+- `genotype_format` (str, optional): Format of genotype file ('vcf', 'bcf', 'hapmap', 'plink', 'csv', 'tsv', 'numeric'). Auto-detected if None
 - `trait_columns` (list, optional): Which phenotype columns to load. If None, loads all numeric columns
 - `covariate_file` (str, optional): Path to external covariate CSV file
 - `covariate_columns` (list, optional): Which covariate columns to use
 - `covariate_id_column` (str): Column name for individual IDs in covariate file. Default: `'ID'`
+- `phenotype_id_column` (str): Column name for individual IDs in phenotype file. Default: `'ID'`
 - `loader_kwargs` (dict, optional): Additional arguments for genotype loader:
   - `compute_effective_tests` (bool): Calculate effective number of independent tests
   - `effective_test_kwargs` (dict): Parameters for effective test calculation
@@ -142,7 +144,8 @@ pipeline.compute_population_structure(
 
 **Notes:**
 - PCs are automatically used as covariates in subsequent analyses
-- Kinship matrix is required for MLM, FarmCPU, and BLINK methods
+- Kinship is only required for non-LOCO `MLM` runs without map data
+- `FarmCPU`, `BLINK`, and `BAYESLOCO` do not use the global kinship matrix in the current pipeline
 - Uses VanRaden (2008) method for kinship calculation
 
 **Example:**
@@ -165,12 +168,16 @@ pipeline.run_analysis(
     traits=None,
     methods=['GLM', 'MLM'],
     max_iterations=10,
+    ncpus=1,
+    parallel_mode='auto',
     significance=None,
     alpha=0.05,
     n_eff=None,
+    use_effective_tests=True,
     max_genotype_dosage=2.0,
     farmcpu_params=None,
     blink_params=None,
+    bayesloco_params=None,
     outputs=['all_marker_pvalues', 'significant_marker_pvalues', 'manhattan', 'qq'],
     include_standard_errors=False
 )
@@ -180,16 +187,22 @@ pipeline.run_analysis(
 - `traits` (list, optional): Which traits to analyze. If None, analyzes all numeric columns in phenotype data
 - `methods` (list): GWAS methods to run. Options:
   - `'GLM'`: General Linear Model (fast, no population structure correction)
-  - `'MLM'`: Mixed Linear Model with LOCO kinship (includes automatic LRT refinement for top hits)
+  - `'MLM'`: Mixed Linear Model. Uses LOCO + exact top-hit refinement when map data is available; falls back to global kinship otherwise
+  - `'BAYESLOCO'`: Bayesian chromosome-aware association model
   - `'FarmCPU'`: Fixed and random model Circulating Probability Unification
   - `'BLINK'`: Bayesian-information and Linkage-disequilibrium Iteratively Nested Keyway
+  - `'FarmCPUResampling'`: Resampling-based FarmCPU stability analysis with RMIP output
 - `max_iterations` (int): Maximum iterations for iterative methods (FarmCPU, BLINK). Default: 10
+- `ncpus` (int): CPU count used by each method engine. `0` means all available CPUs
+- `parallel_mode` (str): Method execution mode: `'auto'`, `'off'`, or `'on'`
 - `significance` (float, optional): Fixed p-value threshold. If None, uses Bonferroni correction
 - `alpha` (float): Significance level for Bonferroni correction. Default: 0.05
 - `n_eff` (int, optional): Effective number of tests for Bonferroni. If None, uses total markers or M_eff
+- `use_effective_tests` (bool): Whether to prefer computed effective tests when available
 - `max_genotype_dosage` (float): Maximum genotype dosage for MAF calculation. Default: 2.0
 - `farmcpu_params` (dict, optional): Parameters for FarmCPU
 - `blink_params` (dict, optional): Parameters for BLINK
+- `bayesloco_params` (dict, optional): Parameters forwarded to `BayesLocoConfig`
 - `include_standard_errors` (bool): If True, include `{METHOD}_SE` columns in merged CSV outputs. Default: False
 - `outputs` (list): Which outputs to generate. Options:
   - `'all_marker_pvalues'`: Full results CSV
@@ -367,6 +380,53 @@ results = PANICLE_BLINK(
 
 ---
 
+### `PANICLE_BayesLOCO()`
+
+Bayesian chromosome-aware GWAS model.
+
+```python
+from panicle.association.bayes_loco import PANICLE_BayesLOCO, BayesLocoConfig
+
+config = BayesLocoConfig()
+results = PANICLE_BayesLOCO(
+    phe,          # Phenotype array (n × 2)
+    geno,         # Genotype matrix (n × m)
+    map_data,     # Genetic map with chromosome labels
+    CV=None,      # Covariates (n × p)
+    bl_config=config,
+    cpu=1,
+    verbose=True,
+)
+```
+
+**Returns:** `AssociationResults`
+
+---
+
+### `PANICLE_FarmCPUResampling()`
+
+FarmCPU resampling with RMIP output.
+
+```python
+from panicle.association.farmcpu_resampling import PANICLE_FarmCPUResampling
+
+results = PANICLE_FarmCPUResampling(
+    phe,                     # Phenotype array (n × 2)
+    geno,                    # Genotype matrix (n × m)
+    map_data,                # Genetic map
+    CV=None,                 # Covariates (n × p)
+    runs=100,                # Number of resampling runs
+    significance_threshold=1e-6,
+    mask_proportion=0.1,
+    trait_name='Trait',
+    verbose=True,
+)
+```
+
+**Returns:** `FarmCPUResamplingResults`
+
+---
+
 ## Data Loaders
 
 Functions for loading different data file formats.
@@ -393,7 +453,7 @@ from panicle.data.loaders import load_genotype_file
 
 geno_matrix, individual_ids, geno_map = load_genotype_file(
     filename,
-    file_format='vcf',  # or 'hapmap', 'plink'
+    file_format='vcf',  # or 'bcf', 'hapmap', 'plink', 'csv', 'tsv', 'numeric'
     compute_effective_tests=False,
     effective_test_kwargs=None
 )

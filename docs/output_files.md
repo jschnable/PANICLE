@@ -60,7 +60,7 @@ Contains association statistics for **all markers** across **all methods** run f
 - **Method columns**: By default, one `{METHOD}_P` and `{METHOD}_Effect` pair per standard association method
   - If you ran `['GLM', 'MLM']`, you'll have: `GLM_P`, `GLM_Effect`, `MLM_P`, `MLM_Effect`
   - If you pass `--include-standard-errors`, `{METHOD}_SE` columns are also included
-  - Method names match run options (e.g., `MLM_Hybrid_P`, `FarmCPU_P`, `BLINK_P`)
+  - Method names match run options (e.g., `MLM_P`, `BAYESLOCO_P`, `FarmCPU_P`, `BLINK_P`)
   - Resampling output is written separately (see FarmCPU Resampling section)
 
 #### Example File Content:
@@ -137,6 +137,7 @@ Overall summary table for all traits and methods analyzed.
 | `N_Markers` | integer | Number of markers tested |
 | `Runtime_Seconds` | float | Analysis time in seconds for this trait |
 | `Info` | string | Additional method-specific information |
+| `Metadata_File` | string | Optional JSON metadata file written for methods that expose extra metadata |
 
 #### Example:
 
@@ -221,6 +222,7 @@ rs456,Chr05,892341,rs456,0.72,FloweringTime
 - RMIP results are written to a separate file and are not included in `GWAS_{trait}_all_results.csv`.
 - Markers are counted as significant for `GWAS_{trait}_significant.csv` when `RMIP >= 0.1`.
 - Resampling uses the FarmCPU QTN threshold by default unless a resampling-specific threshold is provided.
+- If Manhattan plotting is enabled, PANICLE also writes `GWAS_{trait}_FarmCPUResampling_rmip_manhattan.png`.
 
 **Interpretation:**
 - RMIP > 0.8: Strong evidence for association
@@ -240,7 +242,8 @@ When loading genotype files, PANICLE creates binary cache files (v2, pre-imputed
 ```
 {genotype_filename}.panicle.v2.geno.npy  # Genotype matrix (binary, pre-imputed)
 {genotype_filename}.panicle.v2.ind.txt   # Individual IDs
-{genotype_filename}.panicle.v2.map.csv   # Genetic map
+{genotype_filename}.panicle.v2.map.npz   # Genetic map cache (current)
+{genotype_filename}.panicle.v2.map.csv   # Legacy genetic map cache (still read)
 ```
 
 **Notes:**
@@ -254,7 +257,8 @@ When loading genotype files, PANICLE creates binary cache files (v2, pre-imputed
 genotypes.vcf.gz                      # Original (21 MB)
 genotypes.vcf.gz.panicle.v2.geno.npy   # Cached genotypes (120 MB)
 genotypes.vcf.gz.panicle.v2.ind.txt    # Cached IDs (6 KB)
-genotypes.vcf.gz.panicle.v2.map.csv    # Cached map (5.4 MB)
+genotypes.vcf.gz.panicle.v2.map.npz    # Cached map (current format)
+genotypes.vcf.gz.panicle.v2.map.csv    # Cached map (legacy compatibility)
 ```
 
 ---

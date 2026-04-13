@@ -262,7 +262,7 @@ python scripts/run_GWAS.py \
 | `--phenotype`, `-p` | Phenotype CSV/TSV file (required) | — |
 | `--genotype`, `-g` | Genotype file (required) | — |
 | `--traits` | Comma-separated trait names (case-sensitive) | All numeric columns |
-| `--methods` | Comma-separated methods: GLM, MLM, FarmCPU, BLINK | GLM,MLM,FarmCPU,BLINK |
+| `--methods` | Comma-separated methods: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling | GLM,MLM,FarmCPU |
 | `--n-pcs` | Number of principal components | 3 |
 | `--outputdir`, `-o` | Output directory | ./GWAS_results |
 | `--format`, `-f` | Genotype format (auto-detected if omitted) | Auto |
@@ -284,7 +284,7 @@ python scripts/run_GWAS.py -p phenos.csv -g genos.vcf.gz \
   --methods GLM,MLM,FarmCPU,BLINK \
   --compute-effective-tests --n-pcs 5
 
-# Only generate Manhattan plots (no CSV output)
+# Only generate plots (no CSV output)
 python scripts/run_GWAS.py -p phenos.csv -g genos.vcf.gz \
   --methods MLM --outputs manhattan qq
 ```
@@ -335,4 +335,3 @@ do it ahead of time.
 - Check the documentation in `docs/`
 - Run example scripts in `examples/`
 - Open an issue on GitHub
-- Read the FAQ (coming soon)

@@ -3,6 +3,7 @@ import numpy as np
 from scipy import stats, optimize
 import warnings
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -77,6 +78,19 @@ def _alloc_batch_schur_scratch(n_samples: int, n_covariates: int, n_markers: int
         weighted_g=np.empty((n_samples, n_markers), dtype=np.float64),
         coeff_r0=np.empty(n_samples, dtype=np.float64),
     )
+
+
+@contextmanager
+def _suppress_known_matmul_runtime_warnings():
+    # Some NumPy + BLAS/Accelerate builds leak FPE RuntimeWarnings from matmul
+    # even though downstream finite-value checks handle the affected states.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=".*encountered in matmul",
+            category=RuntimeWarning,
+        )
+        yield
 
 
 def _solve_linear_system(mat: np.ndarray, rhs: np.ndarray) -> np.ndarray:
@@ -330,11 +344,11 @@ def _optimize_alt_h2_gemma_newton(
                 var_diag = h2 * eig_safe + (1.0 - h2)
                 inv_var = 1.0 / var_diag
 
-                x_vix = np.tensordot(inv_var, xx_terms, axes=(0, 2))
-                rhs_y = xy_terms.T @ inv_var
-                beta_hat = _solve_linear_system(x_vix, rhs_y)
-
-                resid = y_local - (X_local @ beta_hat)
+                with _suppress_known_matmul_runtime_warnings():
+                    x_vix = np.tensordot(inv_var, xx_terms, axes=(0, 2))
+                    rhs_y = xy_terms.T @ inv_var
+                    beta_hat = _solve_linear_system(x_vix, rhs_y)
+                    resid = y_local - (X_local @ beta_hat)
                 pxy = inv_var * resid
                 y_pxy = float(np.dot(y_local, pxy))
                 if (not np.isfinite(y_pxy)) or y_pxy <= 0.0:
@@ -356,9 +370,10 @@ def _optimize_alt_h2_gemma_newton(
                 hess: Optional[float] = None
                 if with_hessian:
                     trace_hinv_m_hinv_m = float(np.dot(m_diag * inv_var, m_diag * inv_var))
-                    rhs_m = x_t @ (inv_var * m_pxy)
-                    beta_m = _solve_linear_system(x_vix, rhs_m)
-                    p_m_pxy = inv_var * (m_pxy - (X_local @ beta_m))
+                    with _suppress_known_matmul_runtime_warnings():
+                        rhs_m = x_t @ (inv_var * m_pxy)
+                        beta_m = _solve_linear_system(x_vix, rhs_m)
+                        p_m_pxy = inv_var * (m_pxy - (X_local @ beta_m))
                     a2 = float(np.dot(m_pxy, p_m_pxy))
                     if not np.isfinite(a2):
                         return _ProfileMLState(False, h2, np.inf, 0.0, None, None)
@@ -776,17 +791,19 @@ def _profile_ml_state_batch_schur(
         weighted_g = np.empty_like(G, dtype=np.float64)
         coeff_r0 = np.empty_like(y, dtype=np.float64)
 
-    np.multiply(inv_var[:, np.newaxis], X, out=wx)
-    A = X.T @ wx
-    q = wx.T @ y
-    wy = inv_var * y
+    with _suppress_known_matmul_runtime_warnings():
+        np.multiply(inv_var[:, np.newaxis], X, out=wx)
+        A = X.T @ wx
+        q = wx.T @ y
+        wy = inv_var * y
     y_wy = float(np.dot(y, wy))
     sum_log_var = float(np.sum(np.log(var_diag)))
 
     try:
         a_inv_q = _solve_linear_system(A, q)
-        np.multiply(inv_var[:, np.newaxis], G, out=weighted_g)
-        B = X.T @ weighted_g
+        with _suppress_known_matmul_runtime_warnings():
+            np.multiply(inv_var[:, np.newaxis], G, out=weighted_g)
+            B = X.T @ weighted_g
         a_inv_B = _solve_linear_system(A, B)
     except Exception:
         bad = np.full(n_markers, np.nan, dtype=np.float64)
@@ -800,7 +817,8 @@ def _profile_ml_state_batch_schur(
         )
 
     c = np.sum(G * weighted_g, axis=0)
-    u = G.T @ wy
+    with _suppress_known_matmul_runtime_warnings():
+        u = G.T @ wy
 
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         S = c - np.sum(B * a_inv_B, axis=0)
@@ -814,18 +832,10 @@ def _profile_ml_state_batch_schur(
         y_pxy = y_base - numer * numer * inv_b22
         neg_loglik = 0.5 * (sum_log_var + n_samples * np.log(y_pxy / n_samples))
 
+    coeff = m_diag * (inv_var * inv_var)
     # Gradient term: y'PMPy using Schur-decomposed moments to avoid building
     # the full (n x m) residual matrix.
-    coeff = m_diag * (inv_var * inv_var)
-    # Some NumPy+Accelerate builds can emit spurious RuntimeWarning
-    # "... encountered in matmul" while still producing valid outputs.
-    # Suppress only those warnings for this local block.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=".*encountered in matmul",
-            category=RuntimeWarning,
-        )
+    with _suppress_known_matmul_runtime_warnings():
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             r0 = y - (X @ a_inv_q)
             np.multiply(coeff, r0, out=coeff_r0)
