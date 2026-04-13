@@ -609,7 +609,22 @@ class GenotypeMap:
     @property
     def attrs(self) -> Dict[str, Any]:
         """Pandas-style attrs exposed for compatibility with DataFrame callers."""
-        return self.data.attrs
+        attrs = self.data.attrs
+        if "is_imputed" in self.metadata:
+            attrs["is_imputed"] = self.metadata["is_imputed"]
+        chrom_groups = self.metadata.get("chromosome_groups")
+        if chrom_groups is not None:
+            attrs["chromosome_groups"] = chrom_groups
+        elif "chromosome_groups" not in attrs:
+            attrs["chromosome_groups"] = group_marker_indices_by_labels(
+                np.asarray(self.chromosomes).astype(str, copy=False)
+            )
+        chrom_order = self.metadata.get("chromosome_order")
+        if chrom_order is not None:
+            attrs["chromosome_order"] = chrom_order
+        elif "chromosome_order" not in attrs:
+            attrs["chromosome_order"] = list(attrs["chromosome_groups"].keys())
+        return attrs
 
     def _get_column(self, column: str) -> np.ndarray:
         return _materialize_lazy_column(self._column_data[column])
