@@ -46,6 +46,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         file_output: bool = True,
         output_prefix: str = "PANICLE",
         verbose: bool = True,
+        n_pcs: int = 0,
         **kwargs) -> Dict[str, Any]:
     """Primary GWAS analysis function
     
@@ -60,7 +61,8 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         geno: Genotype data (file path, array, or GenotypeMatrix object)
         map_data: Genetic map data (file path, DataFrame, or GenotypeMap object)
         K: Kinship matrix (optional, calculated if not provided for MLM/FarmCPU)
-        CV: Covariate matrix (optional)
+        CV: Covariate matrix (optional). If `n_pcs > 0`, computed PCs are appended
+            after these columns.
         method: GWAS methods to run ["GLM", "MLM", "BAYESLOCO", "FarmCPU", "BLINK", "FarmCPUResampling"]
         ncpus: Number of CPU cores to use
         vc_method: Variance component method for MLM ["BRENT", "EMMA", "HE"]
@@ -70,6 +72,8 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         file_output: Whether to save results to files
         output_prefix: Prefix for output files
         verbose: Print progress information
+        n_pcs: Number of principal components to compute from the aligned genotype
+            matrix and append to covariates. Set to 0 to disable internal PCA.
         **kwargs: Additional parameters for specific methods
 
     Notes:
@@ -89,6 +93,12 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
     
     if method is None:
         method = ["GLM"]
+    try:
+        n_pcs = int(n_pcs)
+    except (TypeError, ValueError):
+        raise ValueError("n_pcs must be an integer >= 0")
+    if n_pcs < 0:
+        raise ValueError("n_pcs must be >= 0")
 
     if verbose:
         print("=" * 60)
@@ -226,7 +236,31 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         # Phase 2: Kinship Matrix and PCA (if needed)
         kinship_matrix = None
         pca_results = None
-        
+
+        if n_pcs > 0:
+            if verbose:
+                print(f"\n[Phase 2] Computing PCA ({n_pcs} components)...")
+
+            pca_start = time.time()
+            pca_results = PANICLE_PCA(
+                M=genotype,
+                pcs_keep=n_pcs,
+                verbose=verbose,
+            )
+            pca_time = time.time() - pca_start
+            analysis_results['summary']['runtime']['pca'] = pca_time
+            analysis_results['data']['pcs'] = pca_results
+
+            if covariates is None:
+                covariates = pca_results
+            else:
+                covariates = np.column_stack([covariates, pca_results])
+            analysis_results['data']['covariates'] = covariates
+
+            if verbose:
+                print(f"PCA computation complete ({pca_time:.2f}s)")
+                print(f"  Added {pca_results.shape[1]} principal components as covariates")
+
         if any(method_name in ["FarmCPU"] for method_name in method) and K is None:
             if verbose:
                 print("\n[Phase 2] Computing kinship matrix...")

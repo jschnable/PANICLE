@@ -65,6 +65,7 @@ results = PANICLE(
     phe="data/phenotype.csv",
     geno="data/genotypes.vcf.gz",
     map_data="data/map.csv",       # optional for VCF (map is extracted automatically)
+    n_pcs=3,                       # compute 3 genotype PCs internally
     method=["GLM", "MLM", "FarmCPU"]
 )
 

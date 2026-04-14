@@ -449,11 +449,16 @@ def PANICLE_MLM_LOCO(
     geno = ensure_eager_genotype(geno)
 
     if isinstance(geno, GenotypeMatrix):
+        n_individuals = geno.n_individuals
         n_markers = geno.n_markers
     elif isinstance(geno, np.ndarray):
+        n_individuals = geno.shape[0]
         n_markers = geno.shape[1]
     else:
         raise ValueError("Genotype must be GenotypeMatrix or numpy array")
+
+    if n_individuals != phe.shape[0]:
+        raise ValueError("Number of phenotype observations must match number of genotype individuals")
 
     chrom_values, chrom_groups, _ = _resolve_chromosome_groups(map_data, n_markers)
 
@@ -465,6 +470,11 @@ def PANICLE_MLM_LOCO(
 
     if loco_kinship is None:
         loco_kinship = PANICLE_K_VanRaden_LOCO(geno, map_data, maxLine=maxLine, verbose=verbose)
+    elif loco_kinship.n_individuals != n_individuals:
+        raise ValueError(
+            "LOCO kinship dimensions must match the filtered phenotype/genotype sample set; "
+            "recompute LOCO kinship after dropping missing phenotype rows."
+        )
 
     effects = np.zeros(n_markers, dtype=np.float64)
     std_errors = np.zeros(n_markers, dtype=np.float64)
@@ -644,6 +654,11 @@ def PANICLE_MLM_LOCO_MULTI(
 
     if loco_kinship is None:
         loco_kinship = PANICLE_K_VanRaden_LOCO(geno, map_data, maxLine=maxLine, verbose=verbose)
+    elif loco_kinship.n_individuals != n_individuals:
+        raise ValueError(
+            "LOCO kinship dimensions must match the filtered phenotype/genotype sample set; "
+            "recompute LOCO kinship after dropping missing phenotype rows."
+        )
 
     if cpu == 0:
         import multiprocessing

@@ -4,6 +4,8 @@ import pytest
 from pathlib import Path
 
 from panicle.core import mvp
+from panicle.association.mlm_loco import PANICLE_MLM_LOCO
+from panicle.matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from panicle.utils.data_types import GenotypeMap, GenotypeMatrix, Phenotype
 
 
@@ -220,3 +222,114 @@ def test_panicle_excludes_missing_trait_values_per_trait(monkeypatch, tmp_path) 
     assert captured["phe"][:, 0].tolist() == ["A", "C"]
     assert np.all(np.isfinite(captured["phe"][:, 1].astype(float)))
     assert res["summary"]["trait_sample_sizes"]["Trait"] == 2
+
+
+def test_panicle_computes_internal_pcs_and_appends_to_covariates(monkeypatch) -> None:
+    phe, geno, geno_map = _basic_inputs(n=6, m=4)
+    phenotype = pd.DataFrame({"ID": phe[:, 0], "Trait": phe[:, 1].astype(float)})
+    external_covariates = np.arange(12, dtype=float).reshape(6, 2)
+    pcs = np.column_stack(
+        [
+            np.linspace(-1.0, 1.0, 6),
+            np.linspace(2.0, -2.0, 6),
+        ]
+    )
+    captured = {}
+    dummy = DummyAssocResult(geno.shape[1], np.full(geno.shape[1], 0.25))
+
+    def fake_pca(*, M, pcs_keep, verbose):
+        captured["pca_input_n"] = M.n_individuals
+        captured["pcs_keep"] = pcs_keep
+        return pcs[:, :pcs_keep]
+
+    def fake_glm(**kwargs):
+        captured["glm_cv"] = kwargs["CV"]
+        return dummy
+
+    monkeypatch.setattr(mvp, "PANICLE_PCA", fake_pca)
+    monkeypatch.setattr(mvp, "PANICLE_GLM", fake_glm)
+    monkeypatch.setattr(mvp, "PANICLE_Report", lambda **kwargs: {"files_created": []})
+
+    res = mvp.PANICLE(
+        phe=phenotype,
+        geno=geno,
+        map_data=geno_map,
+        CV=external_covariates,
+        n_pcs=2,
+        method=["GLM"],
+        file_output=False,
+        verbose=False,
+    )
+
+    expected_covariates = np.column_stack([external_covariates, pcs])
+    np.testing.assert_allclose(captured["glm_cv"], expected_covariates)
+    np.testing.assert_allclose(res["data"]["pcs"], pcs)
+    np.testing.assert_allclose(res["data"]["covariates"], expected_covariates)
+    assert captured["pca_input_n"] == geno.shape[0]
+    assert captured["pcs_keep"] == 2
+
+
+def test_panicle_mlm_matches_direct_loco_when_trait_contains_missing_values() -> None:
+    rng = np.random.default_rng(7)
+    n_individuals = 18
+    n_markers = 24
+    ids = np.array([f"L{i:03d}" for i in range(n_individuals)])
+    geno = rng.integers(0, 3, size=(n_individuals, n_markers), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(n_markers)],
+            "CHROM": ["1"] * (n_markers // 2) + ["2"] * (n_markers - n_markers // 2),
+            "POS": np.arange(1, n_markers + 1),
+        }
+    )
+    trait = 0.75 * geno[:, 0].astype(np.float64) + rng.normal(scale=0.3, size=n_individuals)
+    trait[[2, 5, 11]] = np.nan
+    phenotype_df = pd.DataFrame({"ID": ids, "Trait": trait})
+
+    high_level = mvp.PANICLE(
+        phe=phenotype_df,
+        geno=GenotypeMatrix(geno),
+        map_data=GenotypeMap(map_df),
+        method=["MLM"],
+        file_output=False,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    mask = np.isfinite(trait)
+    subset_indices = np.where(mask)[0]
+    subset_geno = GenotypeMatrix(geno).subset_individuals(subset_indices, materialize=True)
+    subset_phe = np.column_stack([ids[mask], trait[mask]])
+    subset_loco = PANICLE_K_VanRaden_LOCO(subset_geno, map_df, verbose=False)
+    direct = PANICLE_MLM_LOCO(
+        phe=subset_phe,
+        geno=subset_geno,
+        map_data=map_df,
+        loco_kinship=subset_loco,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    high_level_res = high_level["results"]["Trait"]["MLM"]
+    np.testing.assert_allclose(
+        high_level_res.effects,
+        direct.effects,
+        rtol=1e-6,
+        atol=1e-6,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        high_level_res.se,
+        direct.se,
+        rtol=1e-6,
+        atol=1e-6,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        high_level_res.pvalues,
+        direct.pvalues,
+        rtol=1e-6,
+        atol=1e-6,
+        equal_nan=True,
+    )
+    assert high_level["summary"]["trait_sample_sizes"]["Trait"] == int(mask.sum())

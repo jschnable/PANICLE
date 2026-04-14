@@ -3,6 +3,7 @@
 Complete reference for the PANICLE package.
 
 ## Table of Contents
+- [PANICLE](#panicle)
 - [GWASPipeline](#gwaspipeline)
 - [Association Methods](#association-methods)
 - [Data Loaders](#data-loaders)
@@ -10,9 +11,79 @@ Complete reference for the PANICLE package.
 
 ---
 
+## PANICLE
+
+High-level one-call GWAS interface.
+
+### Function: `panicle.core.mvp.PANICLE`
+
+```python
+PANICLE(
+    phe,
+    geno,
+    map_data,
+    K=None,
+    CV=None,
+    method=None,
+    ncpus=1,
+    vc_method='BRENT',
+    maxLine=5000,
+    priority='speed',
+    threshold=5e-8,
+    file_output=True,
+    output_prefix='PANICLE',
+    verbose=True,
+    n_pcs=0,
+    **kwargs,
+)
+```
+
+**Parameters:**
+- `phe`: Phenotype data. File path, DataFrame, `Phenotype`, or `(n, 2)` numpy array with `[ID, trait]`
+- `geno`: Genotype data. File path, numpy array, or `GenotypeMatrix`
+- `map_data`: Genetic map. File path, DataFrame, or `GenotypeMap`
+- `K` (optional): Precomputed global kinship matrix used by methods that consume it
+- `CV` (optional): External covariates `(n × p)`. If `n_pcs > 0`, computed PCs are appended after these columns
+- `method` (list): Methods to run. Typical values: `['GLM']`, `['MLM']`, `['GLM', 'MLM']`
+- `ncpus` (int): CPU count used by method engines. `0` means all available CPUs
+- `vc_method` (str): Variance-component estimator for MLM. Default: `'BRENT'`
+- `maxLine` (int): Marker batch size
+- `threshold` (float): Significance threshold used in summaries and file outputs
+- `file_output` (bool): Write CSV/plot outputs to disk
+- `output_prefix` (str): Prefix for output files
+- `verbose` (bool): Print progress messages
+- `n_pcs` (int): Number of genotype PCs to compute internally and append to `CV`. Set to `0` to skip PCA
+- `**kwargs`: Method-specific options such as `lrt_refinement=False`
+
+**Behavior:**
+- Aligns phenotype IDs to genotype IDs when genotype sample names are available
+- Filters missing phenotype or covariate rows trait-by-trait
+- Computes PCs internally when `n_pcs > 0`
+- Uses LOCO MLM automatically when map data is available
+
+**Returns:**
+- Dictionary with `data`, `results`, `summary`, `visualization`, and `files`
+- Computed PCs are stored in `results['data']['pcs']` when `n_pcs > 0`
+
+**Example:**
+```python
+from panicle import PANICLE
+
+results = PANICLE(
+    phe='phenotypes.csv',
+    geno='genotypes.vcf.gz',
+    map_data='markers.map.csv',
+    n_pcs=3,
+    method=['GLM', 'MLM'],
+    file_output=False,
+)
+```
+
+---
+
 ## GWASPipeline
 
-The main high-level interface for running GWAS analyses.
+Stepwise workflow interface for running GWAS analyses.
 
 ### Class: `panicle.pipelines.gwas.GWASPipeline`
 
@@ -322,6 +393,7 @@ results = PANICLE_MLM_LOCO(
 - `lrt_solver='GEMMA'` uses a derivative-based exact optimizer with automatic fallback
   to bounded Brent on numerical edge cases
 - If `loco_kinship` is not provided, it will be computed automatically
+- If you precompute `loco_kinship`, it must match the filtered phenotype/genotype sample set
 - Set `lrt_refinement=False` to skip LRT refinement (faster, Wald p-values only)
 
 ---

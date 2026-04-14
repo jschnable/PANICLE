@@ -30,7 +30,7 @@ os.environ.setdefault('KMP_WARNINGS', 'off')
 warnings.filterwarnings('ignore', message='.*omp_set_nested.*deprecated.*')
 warnings.filterwarnings('ignore', category=UserWarning, message='.*omp_set_nested.*')
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __author__ = "James C. Schnable"
 
 from .core.mvp import PANICLE

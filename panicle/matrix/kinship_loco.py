@@ -132,6 +132,11 @@ class LocoKinship:
         self._full_cache: Optional[KinshipMatrix] = None
 
     @property
+    def n_individuals(self) -> int:
+        """Number of individuals represented by this LOCO kinship object."""
+        return int(self._total_raw.shape[0])
+
+    @property
     def chromosomes(self) -> List[str]:
         """Chromosome labels in the order they appeared."""
         return list(self._chrom_order)

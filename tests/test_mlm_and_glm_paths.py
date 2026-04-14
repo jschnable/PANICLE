@@ -366,6 +366,30 @@ def test_mlm_loco_errors_on_missing_trait_values() -> None:
         PANICLE_MLM_LOCO(phe, geno, map_data=map_df, verbose=False)
 
 
+def test_mlm_loco_errors_on_mismatched_loco_kinship_dimensions() -> None:
+    rng = np.random.default_rng(17)
+    geno = rng.integers(0, 3, size=(8, 6), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(geno.shape[1])],
+            "CHROM": ["1", "1", "1", "2", "2", "2"],
+            "POS": np.arange(1, geno.shape[1] + 1),
+        }
+    )
+    phe = np.column_stack([np.arange(6), rng.normal(size=6)])
+
+    full_loco = PANICLE_K_VanRaden_LOCO(geno, map_df, verbose=False)
+
+    with pytest.raises(ValueError, match="LOCO kinship dimensions must match"):
+        PANICLE_MLM_LOCO(
+            phe=phe,
+            geno=geno[:6, :],
+            map_data=map_df,
+            loco_kinship=full_loco,
+            verbose=False,
+        )
+
+
 def test_mlm_uses_provided_eigen_and_kinship_matrix_and_cpu_zero() -> None:
     geno, phe, _ = _make_basic_inputs(n_individuals=5, n_markers=3, seed=3)
     kin_np = np.eye(geno.shape[0])

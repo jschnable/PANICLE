@@ -15,7 +15,23 @@ pip install -e .
 
 ## Basic GWAS Analysis
 
-Here's a minimal example to run a GWAS analysis:
+Here's the simplest way to run a GWAS analysis with the high-level API:
+
+```python
+from panicle import PANICLE
+
+results = PANICLE(
+    phe='my_phenotypes.csv',
+    geno='my_genotypes.vcf.gz',
+    map_data='my_markers.map.csv',   # optional for VCF/BCF if positions are embedded
+    n_pcs=3,                         # compute 3 genotype PCs internally
+    method=['GLM', 'MLM'],
+    output_prefix='./my_gwas_results/GWAS'
+)
+```
+
+If you want a stepwise workflow with explicit control over loading, matching, PCA,
+and kinship, use `GWASPipeline`:
 
 ```python
 from panicle.pipelines.gwas import GWASPipeline
@@ -135,46 +151,49 @@ pipeline.run_analysis(
 ### Scenario 2: MLM with Population Structure Correction
 
 ```python
+results = PANICLE(
+    phe='phenos.csv',
+    geno='genos.vcf.gz',
+    map_data='markers.map.csv',
+    n_pcs=5,                    # Use 5 PCs as covariates
+    method=['MLM'],
+    output_prefix='./mlm_analysis/GWAS',
+)
+```
+
+Equivalent stepwise pipeline form:
+
+```python
 pipeline = GWASPipeline(output_dir='./mlm_analysis')
 pipeline.load_data(phenotype_file='phenos.csv', genotype_file='genos.vcf.gz')
 pipeline.align_samples()
-
-# Compute population structure
 pipeline.compute_population_structure(
-    n_pcs=5,                    # Use 5 PCs as covariates
-    calculate_kinship=True      # Needed for MLM (auto-computed if omitted)
+    n_pcs=5,
+    calculate_kinship=True
 )
-
-# Run MLM (accounts for population structure)
-pipeline.run_analysis(
-    traits=['MyTrait'],
-    methods=['MLM']
-)
+pipeline.run_analysis(traits=['MyTrait'], methods=['MLM'])
 ```
 
 ### Scenario 3: Using External Covariates
 
 ```python
-pipeline = GWASPipeline(output_dir='./covariate_analysis')
+import pandas as pd
+from panicle import PANICLE
 
-# Load data with external covariates
-# Example: controlling for flowering time when analyzing plant height
-pipeline.load_data(
-    phenotype_file='phenos.csv',
-    genotype_file='genos.vcf.gz',
-    covariate_file='covariates.csv',      # CSV with ID, Cov1, Cov2, ...
-    covariate_columns=['DaysToFlower']    # Which columns to use
-)
+covariates = pd.read_csv('covariates.csv')[['DaysToFlower']].to_numpy()
 
-pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)  # kinship for MLM
-
-# PCs and external covariates are automatically combined
-pipeline.run_analysis(
-    traits=['PlantHeight'],
-    methods=['MLM']
+results = PANICLE(
+    phe='phenos.csv',
+    geno='genos.vcf.gz',
+    map_data='markers.map.csv',
+    CV=covariates,               # External covariates
+    n_pcs=3,                     # PCs are appended after CV columns
+    method=['MLM'],
+    output_prefix='./covariate_analysis/GWAS',
 )
 ```
+
+With `GWASPipeline`, external covariates and PCs are also combined automatically.
 
 ### Scenario 4: Multiple Methods Comparison
 

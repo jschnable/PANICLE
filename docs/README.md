@@ -50,14 +50,21 @@ pip install -e .
 
 ### Minimal Example
 ```python
-from panicle.pipelines.gwas import GWASPipeline
+from panicle import PANICLE
 
-pipeline = GWASPipeline(output_dir='./results')
-pipeline.load_data('phenos.csv', 'genos.vcf.gz')
-pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)
-pipeline.run_analysis(traits=['Height'], methods=['MLM'])
+results = PANICLE(
+    phe='phenos.csv',
+    geno='genos.vcf.gz',
+    map_data='markers.map.csv',   # optional for VCF/BCF; extracted automatically when embedded
+    n_pcs=3,                      # compute 3 genotype PCs internally
+    method=['MLM'],
+    output_prefix='results/GWAS',
+)
 ```
+
+Use `GWASPipeline` when you want a stepwise workflow with explicit `load_data()`,
+`align_samples()`, and `compute_population_structure()`. Use `PANICLE()` when you
+want the high-level one-call API and still want internal PCA via `n_pcs`.
 
 ### CLI Quick Start
 ```bash
@@ -84,6 +91,10 @@ python scripts/run_GWAS.py \
    ↓
 6. Results saved to output directory
 ```
+
+For the high-level `PANICLE()` API, steps 2-5 are handled inside the function.
+Set `n_pcs > 0` to compute genotype PCs internally and append them to any
+external covariates passed through `CV`.
 
 ## Available Methods
 
@@ -175,7 +186,7 @@ See [Output Files](output_files.md) for detailed format specifications.
 If you use PANICLE in your research, cite the software version you used, for example:
 
 ```
-PANICLE v0.3.1. https://github.com/jschnable/PANICLE
+PANICLE v0.3.2. https://github.com/jschnable/PANICLE
 ```
 
 ## See Also
