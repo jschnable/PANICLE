@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "panicle"
-version = "0.3.2"
+version = "0.3.3"
 description = "PANICLE: Python Algorithms for Nucleotide-phenotype Inference and Chromosome-wide Locus Evaluation - A comprehensive GWAS pipeline with Numba JIT acceleration"
 authors = [
     {name = "James C. Schnable", email = "james.schnable@gmail.com"}

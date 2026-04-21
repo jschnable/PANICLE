@@ -5,13 +5,19 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.3] - 2026-04-21
 
 ### Added
 - Per-trait minor allele count (MAC) filter applied *after* sample subsetting, guarding against spurious p-values driven by singleton/very-rare variants when missing phenotypes or covariates reduce the cohort. Exposed as `min_mac=` on `GWASPipeline.run_analysis()` and `PANICLE()` (default 10 — twice the common PLINK `--mac 5` convention, appropriate for inbred cohorts where effective sample size per allele is roughly half) and as `--min-mac` on the CLI. Set to 0 to disable.
 - `GenotypeMatrix.subset_markers()` and `GenotypeMap.subset_markers()` helpers.
 - Shared `compute_mac_keep_indices()` and `pad_association_results()` utilities in `panicle.utils.stats`.
 - Per-trait Bonferroni denominator now uses the post-MAC marker count so the significance threshold reflects the number of tests actually performed.
+- `threads=` parameter on `load_genotype_vcf()` and matching `--threads` CLI flag for tuning cyvcf2/htslib decompression workers (0 = all detected CPUs, default = min(4, cpu_count)).
+
+### Changed
+- Default behavior: `min_mac=10` is now applied by default in the high-level GWAS APIs. Pass `min_mac=0` to restore pre-0.3.3 behavior.
+- VCF first-load ingestion now writes the dynamic int8 matrix in marker-major order so each appended marker is a contiguous write, then transposes once on finalize. Speeds up VCF first-load without affecting the cached output layout.
+- `load_genotype_vcf(backend='auto')` now prefers cyvcf2 when installed (previously defaulted to the builtin text parser for VCF/VCF.GZ).
 
 ## [0.3.2] - 2026-04-14
 
