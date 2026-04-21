@@ -27,7 +27,6 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 from typing import Dict, Optional, Tuple
-from typing import Dict, Optional, Tuple
 
 try:
     import numpy as np
@@ -81,7 +80,10 @@ class _DynamicInt8MatrixWriter:
         tmp = tempfile.NamedTemporaryFile(prefix="panicle_geno_", suffix=".tmp", delete=False)
         self.path = tmp.name
         tmp.close()
-        self.memmap = np.memmap(self.path, dtype=np.int8, mode='w+', shape=(self.n_rows, self.capacity))
+        # Store as marker-major while building so each appended marker is a
+        # contiguous write. Finalize transposes back to the public sample-major
+        # shape: (n_individuals, n_markers).
+        self.memmap = np.memmap(self.path, dtype=np.int8, mode='w+', shape=(self.capacity, self.n_rows))
         self.count = 0
 
     def _grow(self, min_capacity):
@@ -90,17 +92,17 @@ class _DynamicInt8MatrixWriter:
             new_capacity = max(new_capacity * 2, min_capacity)
         old_columns = self.count
         if old_columns > 0:
-            preserved = np.empty((self.n_rows, old_columns), dtype=np.int8)
-            np.copyto(preserved, self.memmap[:, :old_columns])
+            preserved = np.empty((old_columns, self.n_rows), dtype=np.int8)
+            np.copyto(preserved, self.memmap[:old_columns, :])
         else:
             preserved = None
         self.memmap.flush()
         del self.memmap
         with open(self.path, 'r+b') as fh:
             fh.truncate(self.n_rows * new_capacity)
-        self.memmap = np.memmap(self.path, dtype=np.int8, mode='r+', shape=(self.n_rows, new_capacity))
+        self.memmap = np.memmap(self.path, dtype=np.int8, mode='r+', shape=(new_capacity, self.n_rows))
         if preserved is not None:
-            self.memmap[:, :old_columns] = preserved
+            self.memmap[:old_columns, :] = preserved
         self.capacity = new_capacity
 
     def append(self, column):
@@ -108,7 +110,7 @@ class _DynamicInt8MatrixWriter:
             raise ValueError(f"Column shape mismatch: expected ({self.n_rows},), got {column.shape}")
         if self.count >= self.capacity:
             self._grow(self.count + 1)
-        self.memmap[:, self.count] = column
+        self.memmap[self.count, :] = column
         self.count += 1
 
     def finalize(self):
@@ -120,7 +122,7 @@ class _DynamicInt8MatrixWriter:
         if total_cols == 0:
             result = np.zeros((self.n_rows, 0), dtype=np.int8)
         else:
-            result = np.array(mm[:, :total_cols], dtype=np.int8, copy=True, order='C')
+            result = np.array(mm[:total_cols, :].T, dtype=np.int8, copy=True, order='C')
         try:
             os.remove(self.path)
         except OSError:
@@ -324,6 +326,7 @@ def load_genotype_vcf(
     min_maf=0.0,
     return_pandas=True,
     backend='auto',  # 'auto', 'cyvcf2', 'builtin'
+    threads=None,
     force_recache=False,
 ):
     """
@@ -339,14 +342,16 @@ def load_genotype_vcf(
       (missing calls treated as major allele for filtering)
     - force_recache: if True, ignore any existing cache and overwrite it
     - return_pandas: return geno_map as pandas.DataFrame if pandas is available
-    - backend: 'auto' (defaults to builtin for VCF/VCF.GZ), 'cyvcf2', or 'builtin'
+    - backend: 'auto' (prefers cyvcf2 when installed), 'cyvcf2', or 'builtin'
+    - threads: cyvcf2/htslib worker threads. None uses min(4, cpu_count);
+      0 uses all detected CPUs. Ignored by the builtin text parser.
     """
     import re
     import os
     import numpy as np
     import pandas as pd
 
-    # Backend selection: prefer builtin for VCF text, require cyvcf2 for BCF.
+    # Backend selection: prefer cyvcf2 when available; require cyvcf2 for BCF.
     # --- CACHING LOGIC START ---
     # Cache version 2: pre-imputes missing values (-9) at cache time for faster downstream
     cache_base = str(vcf_path)
@@ -423,9 +428,20 @@ def load_genotype_vcf(
     else:
         raise ValueError("backend must be one of {'auto', 'cyvcf2', 'builtin'}")
 
-    # Determine thread count (default to 4 or CPU count)
+    # Determine thread count for cyvcf2/htslib. This mainly helps compressed
+    # input decompression; variant decoding below still happens in this process.
     import multiprocessing
-    n_threads = min(4, multiprocessing.cpu_count())
+    cpu_count = multiprocessing.cpu_count()
+    if threads is None:
+        n_threads = min(4, cpu_count)
+    else:
+        try:
+            requested_threads = int(threads)
+        except (TypeError, ValueError):
+            raise ValueError("threads must be an integer or None")
+        if requested_threads < 0:
+            raise ValueError("threads must be >= 0")
+        n_threads = cpu_count if requested_threads == 0 else max(1, requested_threads)
     
     # Initialize VCF reader based on backend and file type
     vcf = None
@@ -926,7 +942,9 @@ def _main(argv):  # pragma: no cover
     p.add_argument('--force-recache', action='store_true', help='Rebuild and overwrite cache files')
     p.add_argument('--no-pandas', action='store_true', help='Return map as list instead of DataFrame')
     p.add_argument('--backend', choices=['auto','cyvcf2','builtin'], default='auto',
-                   help='Choose parsing backend (auto prefers builtin for VCF, cyvcf2 for BCF)')
+                   help='Choose parsing backend (auto prefers cyvcf2 when installed; cyvcf2 required for BCF)')
+    p.add_argument('--threads', type=int, default=None,
+                   help='cyvcf2/htslib worker threads; 0 uses all detected CPUs')
     args = p.parse_args(argv)
 
     geno, ids, gmap = load_genotype_vcf(
@@ -938,6 +956,7 @@ def _main(argv):  # pragma: no cover
         min_maf=args.min_maf,
         return_pandas=not args.no_pandas,
         backend=args.backend,
+        threads=args.threads,
         force_recache=args.force_recache,
     )
     print('Samples:', len(ids))

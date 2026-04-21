@@ -1,5 +1,7 @@
+import os
 import sys
 import types
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +12,8 @@ from panicle.data import load_genotype_vcf, load_genotype_plink, load_genotype_h
 
 
 def test_load_genotype_vcf_cyvcf2_stub(monkeypatch, tmp_path) -> None:
+    seen_threads = []
+
     class FakeGenotype:
         def __init__(self, arr):
             self._arr = arr
@@ -28,6 +32,7 @@ def test_load_genotype_vcf_cyvcf2_stub(monkeypatch, tmp_path) -> None:
 
     class FakeVCF:
         def __init__(self, path, threads=1):
+            seen_threads.append(threads)
             self.samples = ["S1", "S2"]
             self._vars = [
                 FakeVariant("1", 100, "rs1", "A", ["G"], np.array([[0, 0, 0], [0, 1, 0]])),
@@ -52,8 +57,10 @@ def test_load_genotype_vcf_cyvcf2_stub(monkeypatch, tmp_path) -> None:
         split_multiallelic=True,
         drop_monomorphic=False,
         return_pandas=True,
+        threads=7,
     )
 
+    assert seen_threads == [7]
     assert ids == ["S1", "S2"]
     assert geno.shape == (2, 3)  # rs1, rs2, rs3 (ALT2 kept, ALT1 invalidated)
     np.testing.assert_array_equal(
@@ -82,9 +89,11 @@ def test_load_genotype_vcf_prefers_cache(tmp_path, monkeypatch) -> None:
     map_cache = vcf_path.with_suffix(".vcf.panicle.v2.map.csv")
     pd.DataFrame({"SNP": ["rs1", "rs2"], "CHROM": ["1", "1"], "POS": [10, 20]}).to_csv(map_cache, index=False)
 
-    # Ensure cache is newer than VCF
+    # Ensure cache is strictly newer than VCF; equal mtimes should miss cache.
+    newer = time.time() + 10
     for f in (geno_cache, ind_cache, map_cache):
         f.touch()
+        os.utime(f, (newer, newer))
 
     out_geno, ids, map_df = load_genotype_vcf.load_genotype_vcf(vcf_path, backend="builtin", include_indels=True, split_multiallelic=False)
 

@@ -2,9 +2,11 @@
 
 from typing import Tuple
 
+import numpy as np
 import pytest
 
 from panicle.data.load_genotype_vcf import (
+    _DynamicInt8MatrixWriter,
     MISSING,
     _code_dosage_biallelic,
     _code_dosage_split,
@@ -100,3 +102,24 @@ def test_decode_biallelic_gt_invalid(gt) -> None:
 )
 def test_code_dosage_split(tokens: Tuple[str, ...], alt_index: int, expected: Tuple[int, int]) -> None:
     assert _code_dosage_split(tokens, alt_index) == expected
+
+
+def test_dynamic_int8_writer_preserves_sample_major_shape() -> None:
+    writer = _DynamicInt8MatrixWriter(3, initial_capacity=1)
+    writer.append(np.array([0, 1, 2], dtype=np.int8))
+    writer.append(np.array([2, 1, 0], dtype=np.int8))
+
+    result = writer.finalize()
+
+    np.testing.assert_array_equal(
+        result,
+        np.array(
+            [
+                [0, 2],
+                [1, 1],
+                [2, 0],
+            ],
+            dtype=np.int8,
+        ),
+    )
+    assert result.flags.c_contiguous
