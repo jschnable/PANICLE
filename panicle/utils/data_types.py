@@ -675,6 +675,42 @@ class GenotypeMap:
             metadata=merged,
         )
 
+    def subset_markers(self, indices: Union[np.ndarray, list]) -> "GenotypeMap":
+        """Return a GenotypeMap restricted to the given marker indices.
+
+        Accepts a boolean mask (length n_markers) or an integer index array.
+        Chromosome groups/order are dropped from metadata because they are
+        indexed against the original marker layout; callers that need them
+        for the subset should recompute after.
+        """
+        n = self.n_markers
+        if isinstance(indices, list):
+            indices = np.asarray(indices)
+        if isinstance(indices, np.ndarray) and indices.dtype == bool:
+            if indices.ndim != 1 or indices.size != n:
+                raise ValueError("Boolean marker indexer must match the number of markers")
+            idx = np.flatnonzero(indices).astype(np.int64, copy=False)
+        else:
+            idx = np.asarray(indices, dtype=np.int64)
+            if idx.ndim != 1:
+                raise ValueError("Marker indices must be a 1D array-like")
+            if idx.size and (idx.min() < 0 or idx.max() >= n):
+                raise IndexError("Marker indices are out of bounds")
+
+        new_columns: Dict[str, Any] = {}
+        for col_name in self._column_order:
+            data = _materialize_lazy_column(self._column_data[col_name])
+            arr = np.asarray(data)
+            new_columns[col_name] = arr[idx] if idx.size else arr[:0]
+
+        metadata = {k: v for k, v in self.metadata.items()
+                    if k not in ("chromosome_groups", "chromosome_order")}
+        return GenotypeMap.from_columns(
+            new_columns,
+            column_order=self._column_order,
+            metadata=metadata,
+        )
+
     def get_chromosome_groups(self) -> Dict[str, np.ndarray]:
         """Return cached chromosome-to-marker index groups."""
         chrom_groups = self.metadata.get("chromosome_groups")
@@ -1088,7 +1124,46 @@ class GenotypeMatrix:
             transposed=self._transposed,
             row_indexer=composed_row_indexer,
         )
-    
+
+    def subset_markers(
+        self,
+        indices: Union[np.ndarray, list],
+        *,
+        precompute_alleles: Optional[bool] = None,
+    ) -> "GenotypeMatrix":
+        """Return a GenotypeMatrix restricted to a subset of markers.
+
+        Always materializes the selected columns into a standalone (n_ind,
+        n_markers_kept) array. Supports boolean masks or integer index arrays.
+        """
+        if isinstance(indices, list):
+            indices = np.asarray(indices)
+        if isinstance(indices, np.ndarray) and indices.dtype == bool:
+            if indices.ndim != 1 or indices.size != self.n_markers:
+                raise ValueError("Boolean marker indexer must match the number of markers")
+            marker_idx = np.flatnonzero(indices).astype(np.int64, copy=False)
+        else:
+            marker_idx = np.asarray(indices, dtype=np.int64)
+            if marker_idx.ndim != 1:
+                raise ValueError("Marker indices must be a 1D array-like")
+            if marker_idx.size:
+                if marker_idx.min() < 0 or marker_idx.max() >= self.n_markers:
+                    raise IndexError("Marker indices are out of bounds")
+
+        if marker_idx.size == 0:
+            subset = np.empty((self.n_individuals, 0), dtype=self._data.dtype)
+        else:
+            subset = np.ascontiguousarray(self.get_columns(marker_idx))
+
+        if precompute_alleles is None:
+            precompute_alleles = not self._is_imputed
+        return GenotypeMatrix(
+            subset,
+            precompute_alleles=precompute_alleles,
+            is_imputed=self._is_imputed,
+            transposed=False,
+        )
+
     def calculate_allele_frequencies(
         self,
         batch_size: int = 1000,

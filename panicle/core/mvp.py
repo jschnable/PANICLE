@@ -20,6 +20,7 @@ from ..utils.data_types import (
     AssociationResults,
 )
 from ..data.loaders import load_genotype_file, load_map_file, load_phenotype_file
+from ..utils.stats import compute_mac_keep_indices, pad_association_results
 from ..association.glm import PANICLE_GLM
 from ..association.mlm import PANICLE_MLM
 from ..association.mlm_loco import PANICLE_MLM_LOCO
@@ -47,6 +48,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         output_prefix: str = "PANICLE",
         verbose: bool = True,
         n_pcs: int = 0,
+        min_mac: int = 10,
         **kwargs) -> Dict[str, Any]:
     """Primary GWAS analysis function
     
@@ -366,6 +368,27 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             trait_covariates = covariates[valid_mask, :] if covariates is not None else None
             analysis_results['summary']['trait_sample_sizes'][trait_name] = n_valid
 
+            # Per-trait MAC filter (post sample-subset) guards against spurious
+            # hits driven by singleton/very-rare variants when the cohort is
+            # reduced by missing phenotypes/covariates.
+            trait_map = genetic_map
+            full_n_markers = trait_genotype.n_markers
+            trait_keep_indices = compute_mac_keep_indices(
+                trait_genotype, int(min_mac or 0)
+            )
+            if trait_keep_indices is not None and trait_keep_indices.size != full_n_markers:
+                dropped = full_n_markers - trait_keep_indices.size
+                trait_genotype = trait_genotype.subset_markers(trait_keep_indices)
+                if trait_map is not None and hasattr(trait_map, 'subset_markers'):
+                    trait_map = trait_map.subset_markers(trait_keep_indices)
+                if verbose:
+                    print(
+                        f"  Trait '{trait_name}': MAC filter (min_mac={int(min_mac)}) "
+                        f"dropped {dropped}/{full_n_markers} markers"
+                    )
+            else:
+                trait_keep_indices = None
+
             # Initialize results dict for this trait
             analysis_results['results'][trait_name] = {}
             analysis_results['summary']['significant_markers'][trait_name] = {}
@@ -385,6 +408,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     verbose=verbose
                 )
                 glm_time = time.time() - glm_start
+                glm_results = pad_association_results(glm_results, trait_keep_indices, full_n_markers)
 
                 analysis_results['results'][trait_name]['GLM'] = glm_results
                 methods_actually_run.add('GLM')
@@ -408,12 +432,12 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 if K is not None and verbose and trait_idx == 0:
                     warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
                 key_arr = np.ascontiguousarray(valid_indices, dtype=np.int64)
-                loco_key = (int(key_arr.size), hash(key_arr.tobytes()))
+                loco_key = (int(key_arr.size), hash(key_arr.tobytes()), id(trait_map))
                 trait_loco_kinship = loco_kinship_cache.get(loco_key)
                 if trait_loco_kinship is None:
                     trait_loco_kinship = PANICLE_K_VanRaden_LOCO(
                         trait_genotype,
-                        genetic_map,
+                        trait_map,
                         maxLine=maxLine,
                         cpu=ncpus,
                         verbose=False,
@@ -422,7 +446,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 mlm_results = PANICLE_MLM_LOCO(
                     phe=phenotype_array,
                     geno=trait_genotype,
-                    map_data=genetic_map,
+                    map_data=trait_map,
                     loco_kinship=trait_loco_kinship,
                     CV=trait_covariates,
                     vc_method=vc_method,
@@ -431,6 +455,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     verbose=verbose
                 )
                 mlm_time = time.time() - mlm_start
+                mlm_results = pad_association_results(mlm_results, trait_keep_indices, full_n_markers)
 
                 analysis_results['results'][trait_name]['MLM'] = mlm_results
                 methods_actually_run.add('MLM')
@@ -462,13 +487,14 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 bayes_results = PANICLE_BayesLOCO(
                     phe=phenotype_array,
                     geno=trait_genotype,
-                    map_data=genetic_map,
+                    map_data=trait_map,
                     CV=trait_covariates,
                     cpu=ncpus,
                     verbose=verbose,
                     bl_config=bayes_cfg,
                 )
                 bayes_time = time.time() - bayes_start
+                bayes_results = pad_association_results(bayes_results, trait_keep_indices, full_n_markers)
 
                 analysis_results['results'][trait_name]['BAYESLOCO'] = bayes_results
                 methods_actually_run.add('BAYESLOCO')
@@ -491,7 +517,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 farmcpu_results = PANICLE_FarmCPU(
                     phe=phenotype_array,
                     geno=trait_genotype,
-                    map_data=genetic_map,
+                    map_data=trait_map,
                     CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
@@ -499,6 +525,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     **farmcpu_extra_kwargs
                 )
                 farmcpu_time = time.time() - farmcpu_start
+                farmcpu_results = pad_association_results(farmcpu_results, trait_keep_indices, full_n_markers)
 
                 analysis_results['results'][trait_name]['FarmCPU'] = farmcpu_results
                 methods_actually_run.add('FarmCPU')
@@ -522,7 +549,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 blink_results = PANICLE_BLINK(
                     phe=phenotype_array,
                     geno=trait_genotype,
-                    map_data=genetic_map,
+                    map_data=trait_map,
                     CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,
@@ -530,6 +557,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     **blink_kwargs,
                 )
                 blink_time = time.time() - blink_start
+                blink_results = pad_association_results(blink_results, trait_keep_indices, full_n_markers)
 
                 analysis_results['results'][trait_name]['BLINK'] = blink_results
                 methods_actually_run.add('BLINK')
@@ -566,7 +594,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 resampling_results = PANICLE_FarmCPUResampling(
                     phe=phenotype_array,
                     geno=trait_genotype,
-                    map_data=genetic_map,
+                    map_data=trait_map,
                     CV=trait_covariates,
                     maxLine=maxLine,
                     cpu=ncpus,

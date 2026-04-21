@@ -173,6 +173,7 @@ def test_panicle_auto_matches_ids_and_subsets_genotype(monkeypatch, tmp_path) ->
         method=["GLM"],
         file_output=False,
         verbose=False,
+        min_mac=0,
     )
 
     assert captured["phe"][:, 0].tolist() == ["B", "A"]
@@ -294,6 +295,7 @@ def test_panicle_mlm_matches_direct_loco_when_trait_contains_missing_values() ->
         file_output=False,
         lrt_refinement=False,
         verbose=False,
+        min_mac=0,
     )
 
     mask = np.isfinite(trait)

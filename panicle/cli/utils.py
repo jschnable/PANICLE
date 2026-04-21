@@ -195,6 +195,19 @@ def parse_args():
                        help="Keep monomorphic markers (override default)")
     parser.add_argument("--max-missing", type=float, default=1.0)
     parser.add_argument("--min-maf", type=float, default=0.0)
+    parser.add_argument(
+        "--min-mac",
+        type=int,
+        default=10,
+        help=(
+            "Minimum minor allele count required per marker, applied to the "
+            "per-trait sample subset (guards against spurious hits driven by "
+            "rare variants that survive load-time MAF filtering). "
+            "Default 10 (2x the common PLINK --mac 5 convention; appropriate "
+            "for inbred cohorts where effective sample size per allele is ~half). "
+            "Set 0 to disable."
+        ),
+    )
     parser.add_argument("--snps-only", action='store_true')
     parser.add_argument("--no-split-multiallelic", action='store_true')
 

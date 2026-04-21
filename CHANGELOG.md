@@ -5,6 +5,14 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Per-trait minor allele count (MAC) filter applied *after* sample subsetting, guarding against spurious p-values driven by singleton/very-rare variants when missing phenotypes or covariates reduce the cohort. Exposed as `min_mac=` on `GWASPipeline.run_analysis()` and `PANICLE()` (default 10 — twice the common PLINK `--mac 5` convention, appropriate for inbred cohorts where effective sample size per allele is roughly half) and as `--min-mac` on the CLI. Set to 0 to disable.
+- `GenotypeMatrix.subset_markers()` and `GenotypeMap.subset_markers()` helpers.
+- Shared `compute_mac_keep_indices()` and `pad_association_results()` utilities in `panicle.utils.stats`.
+- Per-trait Bonferroni denominator now uses the post-MAC marker count so the significance threshold reflects the number of tests actually performed.
+
 ## [0.3.2] - 2026-04-14
 
 ### Added

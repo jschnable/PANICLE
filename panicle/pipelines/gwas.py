@@ -21,11 +21,14 @@ from ..data.loaders import (
 )
 from ..utils.stats import (
     calculate_maf_from_genotypes,
+    compute_mac_keep_indices,
+    pad_association_results,
     qq_compatible_genomic_inflation_factor,
 )
 from ..utils.data_types import (
     LEGACY_MARKER_ID_COLUMN,
     MARKER_ID_COLUMN,
+    GenotypeMap,
     GenotypeMatrix,
     AssociationResults,
     infer_marker_id_column,
@@ -342,6 +345,9 @@ class GWASPipeline:
         self._trait_cache_genotype: Optional[GenotypeMatrix] = None
         self._trait_cache_pcs: Optional[np.ndarray] = None
         self._trait_cache_kinship: Optional[np.ndarray] = None
+        self._trait_cache_min_mac: Optional[int] = None
+        self._trait_cache_keep_indices: Optional[np.ndarray] = None
+        self._trait_cache_geno_map = None
 
         # Cache LOCO kinship objects keyed by trait-specific sample subsets.
         self._loco_kinship_cache: Dict[Tuple[int, int], Any] = {}
@@ -357,6 +363,9 @@ class GWASPipeline:
         self._trait_cache_genotype = None
         self._trait_cache_pcs = None
         self._trait_cache_kinship = None
+        self._trait_cache_min_mac = None
+        self._trait_cache_keep_indices = None
+        self._trait_cache_geno_map = None
         self._loco_kinship_cache.clear()
 
     @staticmethod
@@ -370,19 +379,29 @@ class GWASPipeline:
         subset_indices: np.ndarray,
         *,
         maxLine: int = 5000,
+        map_data=None,
     ):
-        """Return cached LOCO kinship for a trait sample subset, computing on miss."""
-        if self.geno_map is None:
+        """Return cached LOCO kinship for a trait sample subset, computing on miss.
+
+        Pass map_data when markers have been filtered (e.g., MAC filter) so
+        chromosome grouping aligns with the filtered genotype. Defaults to
+        self.geno_map.
+        """
+        if map_data is None:
+            map_data = self.geno_map
+        if map_data is None:
             return None
 
-        key = self._sample_subset_cache_key(subset_indices)
+        # Key by sample subset AND map identity so that filtered-vs-unfiltered
+        # maps don't share a cache entry.
+        key = (self._sample_subset_cache_key(subset_indices), id(map_data))
         cached = self._loco_kinship_cache.get(key)
         if cached is not None:
             return cached
 
         loco_kinship = PANICLE_K_VanRaden_LOCO(
             genotype_subset,
-            self.geno_map,
+            map_data,
             maxLine=maxLine,
             verbose=False,
         )
@@ -764,6 +783,7 @@ class GWASPipeline:
                      n_eff: Optional[int] = None,
                      use_effective_tests: bool = True,
                      max_genotype_dosage: float = 2.0,
+                     min_mac: int = 10,
                      farmcpu_params: Optional[Dict] = None,
                      blink_params: Optional[Dict] = None,
                      bayesloco_params: Optional[Dict] = None,
@@ -871,20 +891,36 @@ class GWASPipeline:
                 Optional[np.ndarray],
                 Optional[np.ndarray],
                 np.ndarray,
+                Any,
+                Optional[np.ndarray],
             ]
         ] = []
 
+        mac_dropped_total = 0
         for trait_name in selected_traits:
             trait_data = self._prepare_trait_data(
                 trait_name,
                 n_pcs=structure_n_pcs,
                 need_kinship=need_kinship,
+                min_mac=min_mac,
+                max_dosage=max_genotype_dosage,
             )
             if not trait_data:
                 continue
-            y_sub, g_sub, cov_sub, k_sub, trait_geno_idx = trait_data
+            (y_sub, g_sub, cov_sub, k_sub, trait_geno_idx,
+             trait_geno_map, trait_keep_indices) = trait_data
+            if trait_keep_indices is not None:
+                n_drop = int(n_markers - trait_keep_indices.size)
+                if n_drop > 0:
+                    mac_dropped_total += n_drop
+                    self.log(
+                        f"   [{trait_name}] MAC filter (min_mac={int(min_mac)}) "
+                        f"dropped {n_drop}/{n_markers} markers "
+                        f"({100.0*n_drop/max(n_markers,1):.1f}%)"
+                    )
             prepared_traits.append(
-                (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx)
+                (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx,
+                 trait_geno_map, trait_keep_indices)
             )
 
         grouped_glm_results: Dict[str, AssociationResults] = {}
@@ -899,6 +935,8 @@ class GWASPipeline:
                     Optional[np.ndarray],
                     Optional[np.ndarray],
                     np.ndarray,
+                    Any,
+                    Optional[np.ndarray],
                 ]
             ],
         ] = {}
@@ -918,23 +956,27 @@ class GWASPipeline:
             group_geno = group_items[0][2]
             group_cov = group_items[0][3]
             group_indices = group_items[0][5]
+            group_map = group_items[0][6]
+            group_keep_indices = group_items[0][7]
 
             if "GLM" in methods_upper_check:
                 self.log(
                     "   Running grouped GLM for "
                     f"{len(group_items)} traits sharing {group_indices.size} samples"
                 )
-                grouped_glm_results.update(
-                    PANICLE_GLM_MULTI(
-                        phe=y_matrix,
-                        geno=group_geno,
-                        trait_names=group_trait_names,
-                        CV=group_cov,
-                        maxLine=5000,
-                        cpu=method_cpus,
-                        verbose=False,
-                    )
+                raw_glm = PANICLE_GLM_MULTI(
+                    phe=y_matrix,
+                    geno=group_geno,
+                    trait_names=group_trait_names,
+                    CV=group_cov,
+                    maxLine=5000,
+                    cpu=method_cpus,
+                    verbose=False,
                 )
+                for tname, tres in raw_glm.items():
+                    grouped_glm_results[tname] = pad_association_results(
+                        tres, group_keep_indices, n_markers,
+                    )
 
             if "MLM" in methods_upper_check and self.geno_map is not None:
                 self.log(
@@ -945,21 +987,25 @@ class GWASPipeline:
                     group_geno,
                     group_indices,
                     maxLine=5000,
+                    map_data=group_map,
                 )
-                grouped_mlm_results.update(
-                    PANICLE_MLM_LOCO_MULTI(
-                        phe=y_matrix,
-                        geno=group_geno,
-                        map_data=self.geno_map,
-                        trait_names=group_trait_names,
-                        loco_kinship=group_loco_kinship,
-                        CV=group_cov,
-                        cpu=method_cpus,
-                        verbose=False,
+                raw_mlm = PANICLE_MLM_LOCO_MULTI(
+                    phe=y_matrix,
+                    geno=group_geno,
+                    map_data=group_map,
+                    trait_names=group_trait_names,
+                    loco_kinship=group_loco_kinship,
+                    CV=group_cov,
+                    cpu=method_cpus,
+                    verbose=False,
+                )
+                for tname, tres in raw_mlm.items():
+                    grouped_mlm_results[tname] = pad_association_results(
+                        tres, group_keep_indices, n_markers,
                     )
-                )
 
-        for trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx in prepared_traits:
+        for (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx,
+             trait_geno_map, trait_keep_indices) in prepared_traits:
             self.log(f"\n-- Analyzing Trait: {trait_name} --")
             trait_start_time = time.time()
             n_samples_trait = y_sub.shape[0]
@@ -984,12 +1030,31 @@ class GWASPipeline:
             elif n_eff:
                 effective_n = n_eff
 
+            # Per-trait Bonferroni denominator and threshold: when the MAC
+            # filter drops markers, use the filtered count so thresholds
+            # reflect the number of tests actually performed on this trait.
+            trait_n_tested = int(g_sub.n_markers) if hasattr(g_sub, "n_markers") else int(n_markers)
+            if significance is not None:
+                trait_base_threshold = base_threshold
+                trait_effective_tests_count = effective_tests_count
+                trait_threshold_source = threshold_source
+            elif trait_keep_indices is not None:
+                # Filter is active for this trait: use the filtered count
+                # directly (effective_tests from LD was based on full set).
+                trait_base_threshold = alpha / max(trait_n_tested, 1)
+                trait_effective_tests_count = float(trait_n_tested)
+                trait_threshold_source = "Bonferroni (markers, post-MAC)"
+            else:
+                trait_base_threshold = base_threshold
+                trait_effective_tests_count = effective_tests_count
+                trait_threshold_source = threshold_source
+
             fc_qtn_alpha = fc_params.get('QTN_threshold', 0.01)
             if fc_params.get('QTN_threshold_is_corrected'):
                 fc_qtn_corrected = fc_qtn_alpha
                 fc_qtn_source = 'FarmCPU QTN threshold (corrected)'
             else:
-                fc_n_tests = effective_n if effective_n else n_markers
+                fc_n_tests = effective_n if effective_n else trait_n_tested
                 fc_qtn_corrected = fc_qtn_alpha / fc_n_tests
                 fc_qtn_source = 'FarmCPU QTN threshold'
 
@@ -1016,17 +1081,17 @@ class GWASPipeline:
                 method_thresholds['FarmCPU'] = fc_qtn_corrected  # Match worker return name
                 method_threshold_sources['FarmCPU'] = fc_qtn_source
             if 'BLINK' in methods_upper:
-                method_thresholds['BLINK'] = base_threshold
-                method_threshold_sources['BLINK'] = threshold_source
+                method_thresholds['BLINK'] = trait_base_threshold
+                method_threshold_sources['BLINK'] = trait_threshold_source
             if 'GLM' in methods_upper:
-                method_thresholds['GLM'] = base_threshold
-                method_threshold_sources['GLM'] = threshold_source
+                method_thresholds['GLM'] = trait_base_threshold
+                method_threshold_sources['GLM'] = trait_threshold_source
             if 'MLM' in methods_upper:
-                method_thresholds['MLM'] = base_threshold
-                method_threshold_sources['MLM'] = threshold_source
+                method_thresholds['MLM'] = trait_base_threshold
+                method_threshold_sources['MLM'] = trait_threshold_source
             if 'BAYESLOCO' in methods_upper:
-                method_thresholds['BAYESLOCO'] = base_threshold
-                method_threshold_sources['BAYESLOCO'] = threshold_source
+                method_thresholds['BAYESLOCO'] = trait_base_threshold
+                method_threshold_sources['BAYESLOCO'] = trait_threshold_source
             if 'FARMCPURESAMPLING' in methods_upper:
                 if 'resampling_significance_threshold' in fc_params:
                     resampling_thresh = fc_params['resampling_significance_threshold']
@@ -1051,7 +1116,12 @@ class GWASPipeline:
                     g_sub,
                     trait_geno_idx,
                     maxLine=5000,
+                    map_data=trait_geno_map,
                 )
+
+            # Per-trait effective marker count for Bonferroni reporting
+            # (the raw scan ran on the filtered marker set).
+            trait_n_markers = g_sub.n_markers if hasattr(g_sub, "n_markers") else n_markers
 
             if ordered_methods:
                 self.log(f"   Running analysis for: {ordered_methods}")
@@ -1075,18 +1145,22 @@ class GWASPipeline:
                             g_sub,
                             cov_sub,
                             k_sub,
-                            self.geno_map,
+                            trait_geno_map,
                             fc_params,
                             blk_params,
                             bl_params,
                             max_iterations,
-                            base_threshold,
-                            n_markers,
+                            trait_base_threshold,
+                            trait_n_markers,
                             effective_n,
                             alpha,
                             loco_arg,
                             mlm_kw_arg,
                             ncpus=method_cpus,
+                        )
+                        # Pad results back to full-map length (NaN for dropped markers).
+                        res_obj = pad_association_results(
+                            res_obj, trait_keep_indices, n_markers,
                         )
                     if error:
                         self.log(f"   {method} Failed: {error}")
@@ -1115,7 +1189,7 @@ class GWASPipeline:
                      if progress_callback is None and fc_params.get('resampling_progress'):
                          progress_callback = _FarmCPUResamplingProgressReporter(self.log, trait_name)
                      res = PANICLE_FarmCPUResampling(
-                         phe=y_sub, geno=g_sub, map_data=self.geno_map, CV=cov_sub,
+                         phe=y_sub, geno=g_sub, map_data=trait_geno_map, CV=cov_sub,
                          runs=runs,
                          significance_threshold=sig_thresh,
                          mask_proportion=mask_prop,
@@ -1134,8 +1208,9 @@ class GWASPipeline:
             trait_runtime = time.time() - trait_start_time
             trait_summary = self._save_trait_results(
                 trait_name, method_results,
-                base_threshold, alpha, effective_tests_count,
-                max_genotype_dosage, outputs, threshold_source,
+                trait_base_threshold, alpha, trait_effective_tests_count,
+                max_genotype_dosage, outputs, trait_threshold_source,
+                maf_keep_indices=trait_keep_indices,
                 include_standard_errors=include_standard_errors,
                 method_thresholds=method_thresholds,
                 method_threshold_sources=method_threshold_sources,
@@ -1158,10 +1233,23 @@ class GWASPipeline:
 
         self.log("\nGWAS Analysis Completed Successfully.")
 
-    def _prepare_trait_data(self, trait_name, n_pcs: int = 0, need_kinship: bool = False):
+    def _prepare_trait_data(
+        self,
+        trait_name,
+        n_pcs: int = 0,
+        need_kinship: bool = False,
+        min_mac: int = 0,
+        max_dosage: float = 2.0,
+    ):
         """
-        Handle missing data removal (phenotype & covariates).
-        Returns (y_sub, g_sub, cov_sub, k_sub, geno_idx) or None if empty.
+        Handle missing data removal (phenotype & covariates), then apply the
+        optional per-trait MAC filter (post sample-subset).
+
+        Returns (y_sub, g_sub, cov_sub, k_sub, geno_idx, trait_geno_map,
+        keep_indices) or None if empty. trait_geno_map is self.geno_map when
+        no filter is applied; keep_indices is None when no filter is applied
+        (length = trait_geno_map.n_markers otherwise, with entries pointing
+        into self.geno_map).
         """
         if self._matched_indices is None:
              raise ValueError("Samples not aligned. Call align_samples() first.")
@@ -1192,6 +1280,7 @@ class GWASPipeline:
             self._trait_cache_indices is not None
             and self._trait_cache_n_pcs == n_pcs
             and self._trait_cache_need_kinship == need_kinship
+            and self._trait_cache_min_mac == int(min_mac or 0)
             and np.array_equal(self._trait_cache_indices, geno_idx)
         )
 
@@ -1199,6 +1288,8 @@ class GWASPipeline:
             g_final = self._trait_cache_genotype
             pcs = self._trait_cache_pcs
             k_final = self._trait_cache_kinship
+            keep_indices = self._trait_cache_keep_indices
+            trait_geno_map = self._trait_cache_geno_map
         else:
             # Try to reuse the genotype subset from compute_population_structure
             if is_full_geno:
@@ -1292,13 +1383,37 @@ class GWASPipeline:
                 else:
                     k_final = PANICLE_K_VanRaden(g_final, verbose=False)
 
+            # Apply per-trait MAC filter to the association genotype matrix.
+            # Kinship and PCs above are computed (or reused) on the unfiltered
+            # marker set; this filter only reshapes what the marker scan sees,
+            # guarding against singleton-driven spurious hits in the subset.
+            keep_indices = compute_mac_keep_indices(
+                g_final, int(min_mac or 0), max_dosage=max_dosage,
+            )
+            if keep_indices is None:
+                trait_geno_map = self.geno_map
+            else:
+                if keep_indices.size != g_final.n_markers:
+                    g_final = g_final.subset_markers(keep_indices)
+                    if self.geno_map is not None:
+                        trait_geno_map = self.geno_map.subset_markers(keep_indices)
+                    else:
+                        trait_geno_map = None
+                else:
+                    # Filter kept every marker — treat as no-op.
+                    keep_indices = None
+                    trait_geno_map = self.geno_map
+
             self._trait_cache_indices = geno_idx
             self._trait_cache_n_pcs = n_pcs
             self._trait_cache_need_kinship = need_kinship
             self._trait_cache_genotype = g_final
             self._trait_cache_pcs = pcs
             self._trait_cache_kinship = k_final
-        
+            self._trait_cache_min_mac = int(min_mac or 0)
+            self._trait_cache_keep_indices = keep_indices
+            self._trait_cache_geno_map = trait_geno_map
+
         # Apply mask
         y_final = np.column_stack([
              np.arange(mask.sum()), # Dummy IDs for internal solvers usually ok, or use real strings?
@@ -1323,9 +1438,9 @@ class GWASPipeline:
 
         cov_final = np.column_stack(cov_parts) if cov_parts else None
 
-        return y_final, g_final, cov_final, k_final, geno_idx
+        return y_final, g_final, cov_final, k_final, geno_idx, trait_geno_map, keep_indices
 
-    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, include_standard_errors: bool = False, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, method_lambda_gc_is_approx=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None):
+    def _save_trait_results(self, trait_name, results, threshold, alpha, n_tests, max_dosage, outputs, threshold_source, include_standard_errors: bool = False, method_thresholds=None, method_threshold_sources=None, method_lambda_gc=None, method_lambda_gc_is_approx=None, n_samples=None, n_markers=None, runtime_seconds=None, geno_for_maf: Optional[GenotypeMatrix] = None, maf_keep_indices: Optional[np.ndarray] = None):
         """Internal helper to save tables and plots"""
         
         summary_data = []
@@ -1518,6 +1633,16 @@ class GWASPipeline:
         if 'all_marker_pvalues' in outputs:
             maf_source = geno_for_maf or self.genotype_matrix
             maf_all = calculate_maf_from_genotypes(maf_source, max_dosage=max_dosage)
+            # Pad MAF vector back to full-map length when the genotype
+            # passed to MAF is a per-trait MAC-filtered subset.
+            if (
+                maf_keep_indices is not None
+                and len(maf_all) == len(maf_keep_indices)
+                and len(maf_all) != len(all_res_df)
+            ):
+                padded = np.full(len(all_res_df), np.nan, dtype=float)
+                padded[np.asarray(maf_keep_indices, dtype=np.int64)] = np.asarray(maf_all, dtype=float)
+                maf_all = padded
             _insert_maf_column(all_res_df, maf_all)
             ordered_base = _ordered_base_columns(all_res_df)
             if method_columns:
