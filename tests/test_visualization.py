@@ -88,6 +88,73 @@ def test_panicle_report_multi_panel_and_density(tmp_path) -> None:
                 plt.close(fig)
 
 
+def test_create_manhattan_plot_aligns_chrom_with_padded_pvalues(monkeypatch) -> None:
+    """Regression: NaN-padded pvalues (from MAC filter etc.) must not shift
+    surviving markers onto the wrong chromosome.
+
+    Previously the plot path called ``map_df['CHROM'].values[:len(pvalues)]``,
+    which silently truncated the map when pre-filtered pvalues were passed.
+    """
+    # Map: 6 markers spread across chr1, chr2, chr3 (2 each).
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(6)],
+            "CHROM": ["1", "1", "2", "2", "3", "3"],
+            "POS": [10, 20, 30, 40, 50, 60],
+        }
+    )
+    geno_map = GenotypeMap(map_df)
+
+    # Strong signal on chr3 marker s5; rest are noise. NaN holes mimic the
+    # MAC filter dropping markers s0 and s2 (chr1 and chr2).
+    pvalues = np.array([np.nan, 0.5, np.nan, 0.4, 0.3, 1e-9])
+
+    captured: dict = {}
+
+    def fake_plot_with_positions(ax, chromosomes, positions, log_pvalues, **kwargs):
+        captured["chromosomes"] = np.asarray(chromosomes).copy()
+        captured["positions"] = np.asarray(positions).copy()
+        captured["log_pvalues"] = np.asarray(log_pvalues).copy()
+
+    monkeypatch.setattr(
+        manhattan, "plot_manhattan_with_positions", fake_plot_with_positions
+    )
+
+    fig = manhattan.create_manhattan_plot(pvalues, map_data=geno_map, threshold=5e-8)
+    plt.close(fig)
+
+    chroms = captured["chromosomes"]
+    positions = captured["positions"]
+    log_pvals = captured["log_pvalues"]
+
+    # The NaN holes must be excluded (4 surviving markers).
+    assert len(chroms) == 4
+    assert list(chroms) == ["1", "2", "3", "3"]
+    assert list(positions) == [20, 40, 50, 60]
+
+    # The strongest peak (-log10(1e-9)) must land on chr3, not shifted earlier.
+    peak_idx = int(np.argmax(log_pvals))
+    assert chroms[peak_idx] == "3"
+    assert positions[peak_idx] == 60
+
+
+def test_create_manhattan_plot_rejects_map_length_mismatch() -> None:
+    """Length mismatch between pvalues and map must raise (no silent slicing)."""
+    geno_map = _make_genotype_map(5)
+    pvalues = np.array([0.5, 0.1, 1e-6])  # 3 pvalues, 5 markers
+
+    import warnings as _warnings
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        fig = manhattan.create_manhattan_plot(pvalues, map_data=geno_map, threshold=5e-8)
+        plt.close(fig)
+
+    # Should warn about positioning failure and fall back to sequential plotting.
+    assert any("positioning" in str(w.message).lower() or "markers" in str(w.message).lower()
+               for w in caught), [str(w.message) for w in caught]
+
+
 def test_create_rmip_manhattan_plot_with_counts_and_fallback() -> None:
     entries = [
         FarmCPUResamplingEntry(marker_index=0, snp="s0", chrom="1", pos=10, rmip=0.5),

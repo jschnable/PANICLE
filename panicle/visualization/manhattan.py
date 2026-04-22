@@ -305,7 +305,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
                 print(f"Creating Manhattan plot for {method_name}...")
 
             manhattan_fig = create_manhattan_plot(
-                pvalues=valid_pvalues,
+                pvalues=pvalues,
                 map_data=map_data,
                 threshold=threshold,
                 threshold_alpha=threshold_alpha,
@@ -454,20 +454,29 @@ def create_manhattan_plot(pvalues: np.ndarray,
 
         return keep_mask
 
-    # Convert p-values to -log10 scale
-    log_pvalues = -np.log10(pvalues)
-    plot_mask = _select_plot_mask(pvalues)
-
     fig, ax = plt.subplots(figsize=figsize)
 
+    pvalues = np.asarray(pvalues, dtype=float)
+
     if map_data is not None and hasattr(map_data, 'to_dataframe'):
-        # Use actual chromosomal positions
+        # Use actual chromosomal positions. Apply the finite-pvalue mask to
+        # *both* pvalues and map rows in lockstep so dropped markers (NaN
+        # placeholders from MAC filtering, etc.) do not shift surviving
+        # points to the wrong chromosome/position.
         try:
             map_df = map_data.to_dataframe()
-            chromosomes = map_df['CHROM'].values[:len(pvalues)]
-            positions = map_df['POS'].values[:len(pvalues)]
+            if len(map_df) != len(pvalues):
+                raise ValueError(
+                    f"map_data has {len(map_df)} markers but pvalues has "
+                    f"{len(pvalues)}; lengths must match for positional plotting"
+                )
+            finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
+            pvals_for_plot = pvalues[finite_mask]
+            chromosomes = map_df['CHROM'].values[finite_mask]
+            positions = map_df['POS'].values[finite_mask]
+            log_pvalues = -np.log10(pvals_for_plot)
+            plot_mask = _select_plot_mask(pvals_for_plot)
 
-            # Create Manhattan plot with chromosomal positions
             plot_manhattan_with_positions(
                 ax, chromosomes, positions, log_pvalues,
                 colors=colors, point_size=point_size,
@@ -476,10 +485,18 @@ def create_manhattan_plot(pvalues: np.ndarray,
             )
         except Exception as e:
             warnings.warn(f"Could not use map data for positioning: {e}")
-            # Fallback to sequential plotting
+            # Fallback to sequential plotting (drop non-finite for safety)
+            finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
+            pvals_for_plot = pvalues[finite_mask]
+            log_pvalues = -np.log10(pvals_for_plot)
+            plot_mask = _select_plot_mask(pvals_for_plot)
             plot_manhattan_sequential(ax, log_pvalues, point_size=point_size, plot_mask=plot_mask)
     else:
         # Sequential plotting without chromosomal information
+        finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
+        pvals_for_plot = pvalues[finite_mask]
+        log_pvalues = -np.log10(pvals_for_plot)
+        plot_mask = _select_plot_mask(pvals_for_plot)
         plot_manhattan_sequential(ax, log_pvalues, point_size=point_size, plot_mask=plot_mask)
 
     # Add only significance threshold (no suggestive threshold)
@@ -1071,8 +1088,13 @@ def create_multi_panel_manhattan(results_dict: Dict,
         if map_data is not None and hasattr(map_data, 'to_dataframe'):
             try:
                 map_df = map_data.to_dataframe()
-                chromosomes = map_df['CHROM'].values[:len(pvalues)][valid_mask]
-                positions = map_df['POS'].values[:len(pvalues)][valid_mask]
+                if len(map_df) != len(pvalues):
+                    raise ValueError(
+                        f"map_data has {len(map_df)} markers but pvalues has "
+                        f"{len(pvalues)}; lengths must match for positional plotting"
+                    )
+                chromosomes = map_df['CHROM'].values[valid_mask]
+                positions = map_df['POS'].values[valid_mask]
                 
                 # Create Manhattan plot with chromosomal positions
                 plot_manhattan_with_positions(

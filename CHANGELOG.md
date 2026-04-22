@@ -5,6 +5,11 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-04-22
+
+### Fixed
+- **Manhattan plot chromosome misassignment when MAC filter (or any other path that produces NaN-padded p-values) was active in 0.3.3.** `PANICLE_Report` pre-filtered NaN p-values before calling `create_manhattan_plot`, then `create_manhattan_plot` aligned the surviving p-values against `map_df['CHROM'].values[:len(pvalues)]` — slicing the *first N* markers of the map rather than the markers that actually survived filtering. This silently shifted peaks onto neighboring chromosomes (e.g., a real chr8 peak rendering on chr7) and could drop the last chromosome entirely from the plot. The merged `GWAS_<trait>_all_results.csv` was unaffected (its assignment used the full-length padded results against the full map). Per-method PNG Manhattan plots are now correctly aligned. `create_manhattan_plot` and `create_multi_panel_manhattan` now require `len(map_data) == len(pvalues)` and apply the finite-pvalue mask jointly to both arrays.
+
 ## [0.3.3] - 2026-04-21
 
 ### Added
