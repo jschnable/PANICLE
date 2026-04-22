@@ -465,24 +465,6 @@ def create_manhattan_plot(pvalues: np.ndarray,
         # points to the wrong chromosome/position.
         try:
             map_df = map_data.to_dataframe()
-            if len(map_df) != len(pvalues):
-                raise ValueError(
-                    f"map_data has {len(map_df)} markers but pvalues has "
-                    f"{len(pvalues)}; lengths must match for positional plotting"
-                )
-            finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
-            pvals_for_plot = pvalues[finite_mask]
-            chromosomes = map_df['CHROM'].values[finite_mask]
-            positions = map_df['POS'].values[finite_mask]
-            log_pvalues = -np.log10(pvals_for_plot)
-            plot_mask = _select_plot_mask(pvals_for_plot)
-
-            plot_manhattan_with_positions(
-                ax, chromosomes, positions, log_pvalues,
-                colors=colors, point_size=point_size,
-                map_data=map_data, true_qtns=true_qtns,
-                plot_mask=plot_mask, decimate=False
-            )
         except Exception as e:
             warnings.warn(f"Could not use map data for positioning: {e}")
             # Fallback to sequential plotting (drop non-finite for safety)
@@ -491,6 +473,36 @@ def create_manhattan_plot(pvalues: np.ndarray,
             log_pvalues = -np.log10(pvals_for_plot)
             plot_mask = _select_plot_mask(pvals_for_plot)
             plot_manhattan_sequential(ax, log_pvalues, point_size=point_size, plot_mask=plot_mask)
+        else:
+            if len(map_df) != len(pvalues):
+                plt.close(fig)
+                raise ValueError(
+                    f"map_data has {len(map_df)} markers but pvalues has "
+                    f"{len(pvalues)}; lengths must match for positional plotting"
+                )
+            if 'CHROM' not in map_df.columns or 'POS' not in map_df.columns:
+                plt.close(fig)
+                raise ValueError("map_data must contain CHROM and POS columns for positional plotting")
+            finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
+            pvals_for_plot = pvalues[finite_mask]
+            chromosomes = map_df['CHROM'].values[finite_mask]
+            positions = map_df['POS'].values[finite_mask]
+            marker_col = infer_marker_id_column(map_df.columns)
+            marker_names = (
+                map_df[marker_col].astype(str).values[finite_mask]
+                if marker_col is not None
+                else None
+            )
+            log_pvalues = -np.log10(pvals_for_plot)
+            plot_mask = _select_plot_mask(pvals_for_plot)
+
+            plot_manhattan_with_positions(
+                ax, chromosomes, positions, log_pvalues,
+                colors=colors, point_size=point_size,
+                map_data=map_data, true_qtns=true_qtns,
+                marker_names=marker_names,
+                plot_mask=plot_mask, decimate=False
+            )
     else:
         # Sequential plotting without chromosomal information
         finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
@@ -645,6 +657,7 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
                                  log_pvalues: np.ndarray, colors: Optional[List[str]] = None,
                                  point_size: float = 3.0, map_data: Optional[GenotypeMap] = None,
                                  true_qtns: Optional[List[str]] = None,
+                                 marker_names: Optional[np.ndarray] = None,
                                  highlight_mask: Optional[np.ndarray] = None,
                                  highlight_kwargs: Optional[Dict] = None,
                                  plot_mask: Optional[np.ndarray] = None,
@@ -694,6 +707,10 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
         raise ValueError("highlight_mask must match the shape of the plotted values")
     if plot_mask is not None and plot_mask.shape != log_pvalues.shape:
         raise ValueError("plot_mask must match the shape of the plotted values")
+    if marker_names is not None:
+        marker_names = np.asarray(marker_names)
+        if marker_names.shape != log_pvalues.shape:
+            raise ValueError("marker_names must match the shape of the plotted values")
 
     for i, chrom in enumerate(unique_chromosomes):
         chrom_mask = chromosomes == chrom
@@ -788,16 +805,25 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
         current_pos += chrom_length + gap  # Advance with a small gap before next chromosome
 
     # Highlight true QTNs if provided
-    if true_qtns is not None and map_data is not None:
+    if true_qtns is not None:
         try:
-            map_df = map_data.to_dataframe()
-            marker_col = infer_marker_id_column(map_df.columns)
-            if marker_col is None:
-                raise KeyError("Map data does not contain a marker ID column")
-            marker_names = map_df[marker_col].values[:len(log_pvalues)]
+            if marker_names is None:
+                if map_data is None:
+                    raise KeyError("Marker names are required to highlight true QTNs")
+                map_df = map_data.to_dataframe()
+                marker_col = infer_marker_id_column(map_df.columns)
+                if marker_col is None:
+                    raise KeyError("Map data does not contain a marker ID column")
+                candidate_names = map_df[marker_col].astype(str).values
+                if candidate_names.shape != log_pvalues.shape:
+                    raise ValueError(
+                        "Marker names must already be filtered with plotted p-values "
+                        "to highlight true QTNs"
+                    )
+                marker_names = candidate_names
             
             # Find true QTNs in the data
-            qtn_mask = np.isin(marker_names, true_qtns)
+            qtn_mask = np.isin(marker_names.astype(str), np.asarray(true_qtns, dtype=str))
             if np.any(qtn_mask):
                 qtn_positions = cumulative_pos[qtn_mask]
                 qtn_log_pvals = log_pvalues[qtn_mask]
@@ -1089,20 +1115,35 @@ def create_multi_panel_manhattan(results_dict: Dict,
             try:
                 map_df = map_data.to_dataframe()
                 if len(map_df) != len(pvalues):
+                    plt.close(fig)
                     raise ValueError(
                         f"map_data has {len(map_df)} markers but pvalues has "
                         f"{len(pvalues)}; lengths must match for positional plotting"
                     )
+                if 'CHROM' not in map_df.columns or 'POS' not in map_df.columns:
+                    plt.close(fig)
+                    raise ValueError("map_data must contain CHROM and POS columns for positional plotting")
                 chromosomes = map_df['CHROM'].values[valid_mask]
                 positions = map_df['POS'].values[valid_mask]
+                marker_col = infer_marker_id_column(map_df.columns)
+                marker_names = (
+                    map_df[marker_col].astype(str).values[valid_mask]
+                    if marker_col is not None
+                    else None
+                )
                 
                 # Create Manhattan plot with chromosomal positions
                 plot_manhattan_with_positions(
                     ax, chromosomes, positions, log_pvalues,
                     colors=colors, point_size=point_size,
-                    map_data=map_data, true_qtns=true_qtns
+                    map_data=map_data, true_qtns=true_qtns,
+                    marker_names=marker_names,
                 )
             except Exception as e:
+                if isinstance(e, ValueError) and (
+                    "lengths must match" in str(e) or "CHROM and POS" in str(e)
+                ):
+                    raise
                 warnings.warn(f"Could not use map data for {method_name}: {e}")
                 # Fallback to sequential plotting
                 plot_manhattan_sequential(ax, log_pvalues, point_size=point_size)

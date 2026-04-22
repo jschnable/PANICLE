@@ -164,6 +164,24 @@ def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
     assert results_df['GLM_Effect'].dtype in [np.float64, np.float32, float]
 
 
+def test_gwas_pipeline_rejects_reordered_external_map(synthetic_data, tmp_path):
+    """A same-length map override must still match genotype marker order."""
+    bad_map_file = tmp_path / "bad_reordered_map.csv"
+    bad_map = pd.read_csv(synthetic_data['map_file']).iloc[::-1].reset_index(drop=True)
+    bad_map.to_csv(bad_map_file, index=False)
+
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "bad_map_results"))
+
+    with pytest.raises(ValueError, match="marker IDs/order"):
+        pipeline.load_data(
+            phenotype_file=str(synthetic_data['phenotype_file']),
+            genotype_file=str(synthetic_data['genotype_file']),
+            map_file=str(bad_map_file),
+            trait_columns=['Height'],
+            genotype_format='csv',
+        )
+
+
 def test_gwas_pipeline_optional_se_output_columns(synthetic_data, tmp_path):
     """SE columns are emitted only when include_standard_errors is enabled."""
 

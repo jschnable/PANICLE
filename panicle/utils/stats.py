@@ -93,6 +93,7 @@ def pad_association_results(
     result,
     keep_indices: Optional[np.ndarray],
     full_n_markers: int,
+    full_map=None,
 ):
     """Expand a filtered AssociationResults back to full-map length with NaN fill.
 
@@ -103,13 +104,47 @@ def pad_association_results(
     pvalues) trio — some test mocks only implement ``.pvalues`` or
     ``.to_numpy()``, and we have no way to reconstruct a padded result for them.
     """
-    if result is None or keep_indices is None:
+    if result is None:
         return result
     if not all(hasattr(result, attr) for attr in ("effects", "se", "pvalues")):
         return result
+
+    if full_map is not None:
+        if hasattr(full_map, "n_markers"):
+            map_n = int(full_map.n_markers)
+        elif hasattr(full_map, "to_dataframe"):
+            map_n = len(full_map.to_dataframe())
+        else:
+            map_n = len(full_map)
+        if map_n != full_n_markers:
+            raise ValueError(
+                f"full_map has {map_n} markers but full_n_markers is {full_n_markers}"
+            )
+
+    if keep_indices is None:
+        if len(result.effects) != full_n_markers:
+            raise ValueError(
+                f"Unfiltered result length {len(result.effects)} does not match "
+                f"full_n_markers {full_n_markers}"
+            )
+        if full_map is not None and hasattr(result, "snp_map"):
+            result.snp_map = full_map
+        return result
+
     if len(result.effects) == full_n_markers:
+        if full_map is not None and hasattr(result, "snp_map"):
+            result.snp_map = full_map
         return result
     from .data_types import AssociationResults  # local import to avoid cycle
+    keep_indices = np.asarray(keep_indices, dtype=np.int64)
+    if keep_indices.ndim != 1:
+        raise ValueError("keep_indices must be a 1D array")
+    if len(result.effects) != keep_indices.size:
+        raise ValueError(
+            f"Result length {len(result.effects)} does not match keep_indices length {keep_indices.size}"
+        )
+    if keep_indices.size and (keep_indices.min() < 0 or keep_indices.max() >= full_n_markers):
+        raise IndexError("keep_indices are out of bounds for the full marker set")
     effects = np.full(full_n_markers, np.nan, dtype=float)
     se = np.full(full_n_markers, np.nan, dtype=float)
     pvalues = np.full(full_n_markers, np.nan, dtype=float)
@@ -118,7 +153,7 @@ def pad_association_results(
     pvalues[keep_indices] = np.asarray(result.pvalues, dtype=float)
     return AssociationResults(
         effects=effects, se=se, pvalues=pvalues,
-        snp_map=None,
+        snp_map=full_map,
         metadata=getattr(result, "metadata", None),
     )
 

@@ -94,6 +94,40 @@ def test_pad_association_results_expands_with_nan() -> None:
     assert out.se[3] == pytest.approx(0.04)
 
 
+def test_pad_association_results_preserves_full_map() -> None:
+    res = AssociationResults(
+        effects=np.array([0.2, 0.4]),
+        se=np.array([0.02, 0.04]),
+        pvalues=np.array([0.01, 0.001]),
+    )
+    full_map = GenotypeMap(pd.DataFrame({
+        'SNP': [f'm{i}' for i in range(5)],
+        'CHROM': ['1', '1', '2', '2', '3'],
+        'POS': np.arange(5) * 100,
+    }))
+
+    out = pad_association_results(res, np.array([1, 3]), 5, full_map=full_map)
+
+    assert out.snp_map is full_map
+    assert out.snp_map.n_markers == len(out.pvalues)
+
+
+def test_association_results_rejects_snp_map_length_mismatch() -> None:
+    gmap = GenotypeMap(pd.DataFrame({
+        'SNP': ['m0', 'm1'],
+        'CHROM': ['1', '1'],
+        'POS': [10, 20],
+    }))
+
+    with pytest.raises(ValueError, match="SNP map length"):
+        AssociationResults(
+            effects=np.array([0.1, 0.2, 0.3]),
+            se=np.array([0.01, 0.02, 0.03]),
+            pvalues=np.array([0.5, 0.01, 0.9]),
+            snp_map=gmap,
+        )
+
+
 def test_genotype_matrix_subset_markers_boolean_and_int() -> None:
     rng = np.random.default_rng(0)
     g = rng.integers(0, 3, size=(20, 10)).astype(np.int8)

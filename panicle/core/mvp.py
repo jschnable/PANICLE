@@ -408,7 +408,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     verbose=verbose
                 )
                 glm_time = time.time() - glm_start
-                glm_results = pad_association_results(glm_results, trait_keep_indices, full_n_markers)
+                glm_results = pad_association_results(
+                    glm_results, trait_keep_indices, full_n_markers, full_map=genetic_map
+                )
 
                 analysis_results['results'][trait_name]['GLM'] = glm_results
                 methods_actually_run.add('GLM')
@@ -455,7 +457,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     verbose=verbose
                 )
                 mlm_time = time.time() - mlm_start
-                mlm_results = pad_association_results(mlm_results, trait_keep_indices, full_n_markers)
+                mlm_results = pad_association_results(
+                    mlm_results, trait_keep_indices, full_n_markers, full_map=genetic_map
+                )
 
                 analysis_results['results'][trait_name]['MLM'] = mlm_results
                 methods_actually_run.add('MLM')
@@ -494,7 +498,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     bl_config=bayes_cfg,
                 )
                 bayes_time = time.time() - bayes_start
-                bayes_results = pad_association_results(bayes_results, trait_keep_indices, full_n_markers)
+                bayes_results = pad_association_results(
+                    bayes_results, trait_keep_indices, full_n_markers, full_map=genetic_map
+                )
 
                 analysis_results['results'][trait_name]['BAYESLOCO'] = bayes_results
                 methods_actually_run.add('BAYESLOCO')
@@ -525,7 +531,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     **farmcpu_extra_kwargs
                 )
                 farmcpu_time = time.time() - farmcpu_start
-                farmcpu_results = pad_association_results(farmcpu_results, trait_keep_indices, full_n_markers)
+                farmcpu_results = pad_association_results(
+                    farmcpu_results, trait_keep_indices, full_n_markers, full_map=genetic_map
+                )
 
                 analysis_results['results'][trait_name]['FarmCPU'] = farmcpu_results
                 methods_actually_run.add('FarmCPU')
@@ -557,7 +565,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                     **blink_kwargs,
                 )
                 blink_time = time.time() - blink_start
-                blink_results = pad_association_results(blink_results, trait_keep_indices, full_n_markers)
+                blink_results = pad_association_results(
+                    blink_results, trait_keep_indices, full_n_markers, full_map=genetic_map
+                )
 
                 analysis_results['results'][trait_name]['BLINK'] = blink_results
                 methods_actually_run.add('BLINK')

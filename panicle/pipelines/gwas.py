@@ -588,6 +588,17 @@ class GWASPipeline:
                 
                 if supplied_map.n_markers != self.geno_map.n_markers:
                     raise ValueError(f"Map marker count ({supplied_map.n_markers}) != genotype marker count ({self.geno_map.n_markers})")
+                genotype_marker_ids = self.geno_map.marker_ids.astype(str).to_numpy()
+                supplied_marker_ids = supplied_map.marker_ids.astype(str).to_numpy()
+                if not np.array_equal(genotype_marker_ids, supplied_marker_ids):
+                    mismatch = np.flatnonzero(genotype_marker_ids != supplied_marker_ids)
+                    first_idx = int(mismatch[0]) if mismatch.size else 0
+                    raise ValueError(
+                        "Map marker IDs/order do not match genotype markers "
+                        f"at position {first_idx}: genotype has "
+                        f"{genotype_marker_ids[first_idx]!r}, map has "
+                        f"{supplied_marker_ids[first_idx]!r}"
+                    )
                 
                 self.geno_map = supplied_map
                 
@@ -975,7 +986,7 @@ class GWASPipeline:
                 )
                 for tname, tres in raw_glm.items():
                     grouped_glm_results[tname] = pad_association_results(
-                        tres, group_keep_indices, n_markers,
+                        tres, group_keep_indices, n_markers, full_map=self.geno_map,
                     )
 
             if "MLM" in methods_upper_check and self.geno_map is not None:
@@ -1001,7 +1012,7 @@ class GWASPipeline:
                 )
                 for tname, tres in raw_mlm.items():
                     grouped_mlm_results[tname] = pad_association_results(
-                        tres, group_keep_indices, n_markers,
+                        tres, group_keep_indices, n_markers, full_map=self.geno_map,
                     )
 
         for (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx,
@@ -1160,7 +1171,7 @@ class GWASPipeline:
                         )
                         # Pad results back to full-map length (NaN for dropped markers).
                         res_obj = pad_association_results(
-                            res_obj, trait_keep_indices, n_markers,
+                            res_obj, trait_keep_indices, n_markers, full_map=self.geno_map,
                         )
                     if error:
                         self.log(f"   {method} Failed: {error}")

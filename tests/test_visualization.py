@@ -143,16 +143,41 @@ def test_create_manhattan_plot_rejects_map_length_mismatch() -> None:
     geno_map = _make_genotype_map(5)
     pvalues = np.array([0.5, 0.1, 1e-6])  # 3 pvalues, 5 markers
 
-    import warnings as _warnings
+    import pytest
 
-    with _warnings.catch_warnings(record=True) as caught:
-        _warnings.simplefilter("always")
-        fig = manhattan.create_manhattan_plot(pvalues, map_data=geno_map, threshold=5e-8)
-        plt.close(fig)
+    with pytest.raises(ValueError, match="lengths must match"):
+        manhattan.create_manhattan_plot(pvalues, map_data=geno_map, threshold=5e-8)
 
-    # Should warn about positioning failure and fall back to sequential plotting.
-    assert any("positioning" in str(w.message).lower() or "markers" in str(w.message).lower()
-               for w in caught), [str(w.message) for w in caught]
+
+def test_create_manhattan_plot_filters_marker_names_with_padded_pvalues(monkeypatch) -> None:
+    """True-QTN marker names must follow the same finite-pvalue mask as positions."""
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(6)],
+            "CHROM": ["1", "1", "2", "2", "3", "3"],
+            "POS": [10, 20, 30, 40, 50, 60],
+        }
+    )
+    geno_map = GenotypeMap(map_df)
+    pvalues = np.array([np.nan, 0.5, np.nan, 0.4, 0.3, 1e-9])
+    captured: dict = {}
+
+    def fake_plot_with_positions(ax, chromosomes, positions, log_pvalues, **kwargs):
+        captured["marker_names"] = np.asarray(kwargs["marker_names"]).copy()
+
+    monkeypatch.setattr(
+        manhattan, "plot_manhattan_with_positions", fake_plot_with_positions
+    )
+
+    fig = manhattan.create_manhattan_plot(
+        pvalues,
+        map_data=geno_map,
+        threshold=5e-8,
+        true_qtns=["s5"],
+    )
+    plt.close(fig)
+
+    assert list(captured["marker_names"]) == ["s1", "s3", "s4", "s5"]
 
 
 def test_create_rmip_manhattan_plot_with_counts_and_fallback() -> None:

@@ -1402,7 +1402,18 @@ class AssociationResults:
              raise ValueError(f"SE array length {len(se)} does not match effects length {n}")
         if hasattr(pvalues, '__len__') and len(pvalues) != n:
              raise ValueError(f"P-value array length {len(pvalues)} does not match effects length {n}")
-            
+        if snp_map is not None:
+            if hasattr(snp_map, "n_markers"):
+                map_n = int(snp_map.n_markers)
+            elif hasattr(snp_map, "to_dataframe"):
+                map_n = len(snp_map.to_dataframe())
+            else:
+                map_n = len(snp_map)
+            if map_n != n:
+                raise ValueError(
+                    f"AssociationResults marker count {n} does not match SNP map length {map_n}"
+                )
+
         self.effects = effects
         self.se = se  
         self.pvalues = pvalues
