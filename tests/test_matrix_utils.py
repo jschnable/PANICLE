@@ -75,6 +75,34 @@ def test_panicle_k_ibs_small_matrix_matches_manual_calculation() -> None:
     np.testing.assert_allclose(kinship.to_numpy(), expected)
 
 
+def test_lazy_subset_public_accessors_honor_rows_and_data_raises() -> None:
+    genotype_array = np.arange(30, dtype=np.int16).reshape(5, 6)
+    genotype = GenotypeMatrix(genotype_array, precompute_alleles=False)
+    row_idx = np.array([4, 1, 3])
+
+    subset = genotype.subset_individuals(row_idx, precompute_alleles=False)
+
+    assert subset.shape == (3, 6)
+    np.testing.assert_array_equal(subset.get_batch(1, 5), genotype_array[row_idx, 1:5])
+    np.testing.assert_array_equal(subset.get_columns([0, 3, 5]), genotype_array[np.ix_(row_idx, [0, 3, 5])])
+    np.testing.assert_array_equal(subset.to_numpy(copy=False), genotype_array[row_idx, :])
+    with pytest.raises(AttributeError, match="unsubsetted parent array"):
+        _ = subset._data
+
+
+def test_materialized_subset_data_matches_subset_shape() -> None:
+    genotype_array = np.arange(30, dtype=np.int16).reshape(5, 6)
+    row_idx = np.array([4, 1, 3])
+    subset = GenotypeMatrix(genotype_array, precompute_alleles=False).subset_individuals(
+        row_idx,
+        precompute_alleles=False,
+        materialize=True,
+    )
+
+    assert subset._data.shape == (3, 6)
+    np.testing.assert_array_equal(subset._data, genotype_array[row_idx, :])
+
+
 def test_validate_kinship_matrix_detects_shape_and_psd_issues() -> None:
     is_valid, errors = validate_kinship_matrix(np.ones((2, 3)))
     assert not is_valid

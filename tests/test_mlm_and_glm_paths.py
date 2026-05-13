@@ -360,10 +360,32 @@ def test_mlm_loco_errors_on_missing_trait_values() -> None:
             "POS": np.arange(1, geno.shape[1] + 1),
         }
     )
+    phe = phe.astype(object)
+    phe[:, 0] = np.array([f"sample_{i}" for i in range(phe.shape[0])], dtype=object)
     phe[1, 1] = np.nan
 
-    with pytest.raises(ValueError, match="missing/non-finite"):
+    with pytest.raises(ValueError, match="sample_1"):
         PANICLE_MLM_LOCO(phe, geno, map_data=map_df, verbose=False)
+
+
+def test_mlm_reports_missing_phenotype_sample_ids() -> None:
+    geno, phe, kinship = _make_basic_inputs()
+    phe = phe.astype(object)
+    phe[:, 0] = np.array([f"line_{i}" for i in range(phe.shape[0])], dtype=object)
+    phe[2, 1] = np.inf
+
+    with pytest.raises(ValueError, match="line_2"):
+        PANICLE_MLM(phe, geno, K=kinship, verbose=False)
+
+
+def test_glm_ultrafast_reports_missing_phenotype_sample_ids() -> None:
+    geno, phe, _ = _make_basic_inputs()
+    phe = phe.astype(object)
+    phe[:, 0] = np.array([f"line_{i}" for i in range(phe.shape[0])], dtype=object)
+    phe[3, 1] = np.nan
+
+    with pytest.raises(ValueError, match="line_3"):
+        glm_fwl_qr.PANICLE_GLM_ultrafast(phe, geno, verbose=False)
 
 
 def test_mlm_loco_errors_on_mismatched_loco_kinship_dimensions() -> None:

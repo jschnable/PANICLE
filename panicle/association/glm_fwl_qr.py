@@ -36,6 +36,7 @@ from panicle.utils.data_types import (
     AssociationResults,
     impute_numpy_batch_major_allele,
 )
+from ._validation import missing_values_error
 
 
 _PROFILE_GLM_BATCH = os.getenv("PANICLE_PROFILE_GLM_BATCH", "").lower() in {"1", "true", "yes"}
@@ -162,9 +163,17 @@ def PANICLE_GLM_ultrafast(phe: np.ndarray,
         If return_t_stats is True, .pvalues contains |t| instead of p-values.
     """
     # Extract phenotype vector y
-    if not isinstance(phe, np.ndarray) or phe.shape[1] != 2:
+    if not isinstance(phe, np.ndarray) or phe.ndim != 2 or phe.shape[1] != 2:
         raise ValueError("Phenotype must be numpy array with 2 columns [ID, trait_value]")
     y = phe[:, 1].astype(np.float32)
+    finite_y = np.isfinite(y)
+    if not np.all(finite_y):
+        raise missing_values_error(
+            "Phenotype",
+            ~finite_y,
+            sample_ids=phe[:, 0],
+            action="filter individuals before PANICLE_GLM_ultrafast",
+        )
 
     # Dimensions and genotype accessor
     if isinstance(geno, GenotypeMatrix):
@@ -437,8 +446,13 @@ def PANICLE_GLM_multi_ultrafast(
         raise ValueError("Phenotype must be a 2D numpy array (n_individuals x n_traits)")
     if phe.shape[1] < 1:
         raise ValueError("Phenotype matrix must contain at least one trait column")
-    if not np.all(np.isfinite(phe)):
-        raise ValueError("Phenotype matrix contains missing/non-finite values")
+    finite_trait_rows = np.isfinite(phe).all(axis=1)
+    if not np.all(finite_trait_rows):
+        raise missing_values_error(
+            "Phenotype matrix",
+            ~finite_trait_rows,
+            action="filter individuals before PANICLE_GLM_multi_trait",
+        )
 
     Y = np.asarray(phe, dtype=np.float32)
     n, n_traits = Y.shape

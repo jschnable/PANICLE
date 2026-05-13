@@ -845,21 +845,21 @@ class GenotypeMatrix:
         self._transposed = transposed
 
         if isinstance(data, np.memmap):
-            self._data = data
+            self._storage = data
             self._is_memmap = True
         elif isinstance(data, np.ndarray):
-            self._data = data
+            self._storage = data
             self._is_memmap = False
         elif isinstance(data, (str, Path)):
             # Memory-mapped file
             if shape is None:
                 raise ValueError("Shape required for memory-mapped files")
-            self._data = np.memmap(data, dtype=dtype, mode='r', shape=shape)
+            self._storage = np.memmap(data, dtype=dtype, mode='r', shape=shape)
             self._is_memmap = True
         else:
             raise ValueError("Data must be array or file path")
 
-        base_n_individuals = self._data.shape[1] if self._transposed else self._data.shape[0]
+        base_n_individuals = self._storage.shape[1] if self._transposed else self._storage.shape[0]
         if row_indexer is None:
             self._row_indexer = None
         else:
@@ -888,9 +888,9 @@ class GenotypeMatrix:
     def shape(self) -> Tuple[int, int]:
         """Matrix shape (n_individuals, n_markers)"""
         n_individuals = len(self._row_indexer) if self._row_indexer is not None else (
-            self._data.shape[1] if self._transposed else self._data.shape[0]
+            self._storage.shape[1] if self._transposed else self._storage.shape[0]
         )
-        n_markers = self._data.shape[0] if self._transposed else self._data.shape[1]
+        n_markers = self._storage.shape[0] if self._transposed else self._storage.shape[1]
         return (n_individuals, n_markers)
 
     @property
@@ -927,12 +927,28 @@ class GenotypeMatrix:
     @property
     def estimated_nbytes(self) -> int:
         """Estimated byte size of the matrix in API row-major shape."""
-        return int(self.n_individuals * self.n_markers * self._data.dtype.itemsize)
+        return int(self.n_individuals * self.n_markers * self._storage.dtype.itemsize)
 
     @property
     def has_row_subset(self) -> bool:
         """Whether this matrix lazily views a subset of individuals."""
         return self._row_indexer is not None
+
+    @property
+    def _data(self) -> np.ndarray:
+        """Compatibility accessor for the raw backing array.
+
+        Direct backing-array access is unsafe for lazy row subsets because the
+        backing array still contains all parent rows. Use public accessors that
+        preserve API row order instead.
+        """
+        if self._row_indexer is not None:
+            raise AttributeError(
+                "GenotypeMatrix._data is unavailable on lazy row subsets because "
+                "it would expose the unsubsetted parent array. Use to_numpy(), "
+                "get_batch(), get_columns(), or subset_individuals(..., materialize=True)."
+            )
+        return self._storage
 
     def _normalize_subset_indices(self, indices: Union[np.ndarray, list]) -> np.ndarray:
         if isinstance(indices, list):
@@ -961,9 +977,9 @@ class GenotypeMatrix:
         if row_indexer.ndim != 1:
             raise ValueError("row_indexer must be a 1D array")
         if self._transposed:
-            return np.array(self._data[:, row_indexer].T, copy=True)
+            return np.array(self._storage[:, row_indexer].T, copy=True)
         if row_indexer.size == 0:
-            return np.empty((0, self.n_markers), dtype=self._data.dtype)
+            return np.empty((0, self.n_markers), dtype=self._storage.dtype)
 
         # Fast path for memmaps: when rows are monotonic and mostly contiguous
         # (common after genotype-order alignment), copy long row runs directly.
@@ -975,17 +991,17 @@ class GenotypeMatrix:
                 n_runs = int(run_starts.size)
                 max_runs_for_chunk_copy = min(2048, max(32, row_indexer.size // 4))
                 if n_runs <= max_runs_for_chunk_copy:
-                    out = np.empty((row_indexer.size, self.n_markers), dtype=self._data.dtype)
+                    out = np.empty((row_indexer.size, self.n_markers), dtype=self._storage.dtype)
                     for start, end in zip(run_starts, run_ends):
                         src_start = int(row_indexer[start])
                         src_end = int(row_indexer[end - 1]) + 1
-                        out[start:end, :] = self._data[src_start:src_end, :]
+                        out[start:end, :] = self._storage[src_start:src_end, :]
                     return out
-                out = np.empty((row_indexer.size, self.n_markers), dtype=self._data.dtype)
-                np.take(self._data, row_indexer, axis=0, out=out)
+                out = np.empty((row_indexer.size, self.n_markers), dtype=self._storage.dtype)
+                np.take(self._storage, row_indexer, axis=0, out=out)
                 return out
 
-        return np.array(self._data[row_indexer, :], copy=True)
+        return np.array(self._storage[row_indexer, :], copy=True)
 
     @staticmethod
     def _as_contiguous_marker_slice(
@@ -1008,21 +1024,21 @@ class GenotypeMatrix:
     ) -> np.ndarray:
         if self._transposed:
             if self._row_indexer is None:
-                return self._data[markers, :].T
+                return self._storage[markers, :].T
             if isinstance(markers, slice):
-                return self._data[markers, :][:, self._row_indexer].T
+                return self._storage[markers, :][:, self._row_indexer].T
             marker_idx = np.asarray(markers, dtype=np.int64)
-            return self._data[np.ix_(marker_idx, self._row_indexer)].T
+            return self._storage[np.ix_(marker_idx, self._row_indexer)].T
 
         if self._row_indexer is None:
-            return self._data[:, markers]
+            return self._storage[:, markers]
         if isinstance(markers, slice):
             # For row-major memmaps, slice markers first so numpy can use a
             # contiguous view, then gather rows from the smaller block.
-            block = self._data[:, markers]
+            block = self._storage[:, markers]
             return block[self._row_indexer, :]
         marker_idx = np.asarray(markers, dtype=np.int64)
-        return self._data[np.ix_(self._row_indexer, marker_idx)]
+        return self._storage[np.ix_(self._row_indexer, marker_idx)]
 
     def get_columns(
         self,
@@ -1066,19 +1082,19 @@ class GenotypeMatrix:
         """Get genotypes for a specific marker"""
         if self._row_indexer is None:
             if self._transposed:
-                return self._data[marker_idx, :]
-            return self._data[:, marker_idx]
+                return self._storage[marker_idx, :]
+            return self._storage[:, marker_idx]
         if self._transposed:
-            return np.asarray(self._data[marker_idx, self._row_indexer])
-        column = self._data[:, marker_idx]
+            return np.asarray(self._storage[marker_idx, self._row_indexer])
+        column = self._storage[:, marker_idx]
         return np.asarray(column[self._row_indexer])
 
     def get_individual(self, ind_idx: int) -> np.ndarray:
         """Get genotypes for a specific individual"""
         base_idx = int(self._row_indexer[ind_idx]) if self._row_indexer is not None else int(ind_idx)
         if self._transposed:
-            return self._data[:, base_idx]
-        return self._data[base_idx, :]
+            return self._storage[:, base_idx]
+        return self._storage[base_idx, :]
 
     def get_batch(self, marker_start: int, marker_end: int) -> np.ndarray:
         """Get batch of markers for efficient processing.
@@ -1103,6 +1119,10 @@ class GenotypeMatrix:
         When ``materialize=True``, it copies the subset into a standalone
         row-major ndarray, which can still be useful for access patterns that
         repeatedly touch many scattered markers.
+
+        Direct ``._data`` access is unsupported on lazy row views because it
+        would expose the full parent array. Use ``to_numpy()``, ``get_batch()``,
+        or ``get_columns()`` to access subsetted genotype values.
         """
         indexer = self._normalize_subset_indices(indices)
         composed_row_indexer = self._compose_row_indexer(indexer)
@@ -1118,7 +1138,7 @@ class GenotypeMatrix:
                 transposed=False,
             )
         return GenotypeMatrix(
-            self._data,
+            self._storage,
             precompute_alleles=precompute_alleles,
             is_imputed=self._is_imputed,
             transposed=self._transposed,
@@ -1211,7 +1231,7 @@ class GenotypeMatrix:
         This matches rMVP's missing data imputation strategy exactly.
         """
         n_markers = self.n_markers
-        self._major_alleles = np.zeros(n_markers, dtype=self._data.dtype)
+        self._major_alleles = np.zeros(n_markers, dtype=self._storage.dtype)
         
         # Process in batches to handle large datasets
         for start in range(0, n_markers, batch_size):
@@ -1241,7 +1261,7 @@ class GenotypeMatrix:
                 self._major_alleles[start:end] = 0
                 continue
 
-            unique_vals = unique_vals.astype(self._data.dtype, copy=False)
+            unique_vals = unique_vals.astype(self._storage.dtype, copy=False)
             counts = np.zeros((unique_vals.size, end - start), dtype=np.int32)
             for idx, val in enumerate(unique_vals):
                 counts[idx, :] = np.sum(batch == val, axis=0)
@@ -1249,7 +1269,7 @@ class GenotypeMatrix:
             major_indices = np.argmax(counts, axis=0)
             major_vals = unique_vals[major_indices]
             if np.any(completely_missing):
-                major_vals = major_vals.astype(self._data.dtype, copy=False)
+                major_vals = major_vals.astype(self._storage.dtype, copy=False)
                 major_vals[completely_missing] = 0
             self._major_alleles[start:end] = major_vals
     
@@ -1366,7 +1386,7 @@ class GenotypeMatrix:
     def to_numpy(self, *, copy: bool = True) -> np.ndarray:
         """Materialize the genotype matrix as a numpy array in API row order."""
         if not copy and self._row_indexer is None and not self._transposed:
-            return np.asarray(self._data)
+            return np.asarray(self._storage)
         array = self.get_batch(0, self.n_markers)
         if copy:
             return np.array(array, copy=True)

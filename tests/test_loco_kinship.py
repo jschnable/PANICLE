@@ -56,6 +56,62 @@ def test_vanraden_numpy_missing_matches_genotype_matrix_missing():
     np.testing.assert_allclose(k_np, k_gm, rtol=1e-8, atol=1e-8)
 
 
+def test_loco_kinship_lazy_subset_matches_materialized_subset():
+    genotypes, map_df = _make_test_data(seed=456)
+    row_idx = np.array([10, 2, 7, 4, 0, 8, 1])
+    genotype = GenotypeMatrix(genotypes)
+    lazy_subset = genotype.subset_individuals(row_idx)
+    materialized_subset = genotype.subset_individuals(row_idx, materialize=True)
+
+    lazy_loco = PANICLE_K_VanRaden_LOCO(lazy_subset, map_df, maxLine=6, verbose=False)
+    materialized_loco = PANICLE_K_VanRaden_LOCO(materialized_subset, map_df, maxLine=6, verbose=False)
+
+    np.testing.assert_allclose(
+        lazy_loco.get_full().to_numpy(),
+        materialized_loco.get_full().to_numpy(),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    for chrom in lazy_loco.chromosomes:
+        np.testing.assert_allclose(
+            lazy_loco.get_loco(chrom).to_numpy(),
+            materialized_loco.get_loco(chrom).to_numpy(),
+            rtol=1e-8,
+            atol=1e-8,
+        )
+
+
+def test_mlm_loco_lazy_subset_matches_materialized_subset():
+    rng = np.random.default_rng(789)
+    genotypes, map_df = _make_test_data(seed=789)
+    row_idx = np.array([10, 2, 7, 4, 0, 8, 1, 11])
+    phe = np.column_stack([row_idx.astype(str), rng.normal(size=row_idx.size)])
+    genotype = GenotypeMatrix(genotypes)
+    lazy_subset = genotype.subset_individuals(row_idx)
+    materialized_subset = genotype.subset_individuals(row_idx, materialize=True)
+
+    res_lazy = PANICLE_MLM_LOCO(
+        phe=phe,
+        geno=lazy_subset,
+        map_data=map_df,
+        maxLine=6,
+        lrt_refinement=False,
+        verbose=False,
+    )
+    res_materialized = PANICLE_MLM_LOCO(
+        phe=phe,
+        geno=materialized_subset,
+        map_data=map_df,
+        maxLine=6,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    np.testing.assert_allclose(res_lazy.effects, res_materialized.effects, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_lazy.se, res_materialized.se, rtol=1e-8, atol=1e-8, equal_nan=True)
+    np.testing.assert_allclose(res_lazy.pvalues, res_materialized.pvalues, rtol=1e-8, atol=1e-8, equal_nan=True)
+
+
 def test_mlm_loco_matches_per_chrom_mlm():
     rng = np.random.default_rng(321)
     n_individuals = 20

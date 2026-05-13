@@ -9,6 +9,7 @@ import pandas as pd
 from ...utils.data_types import GenotypeMatrix, AssociationResults, ensure_eager_genotype
 from .config import BayesLocoConfig
 from .engine import run_bayes_loco
+from .._validation import missing_values_error
 
 
 def PANICLE_BayesLOCO(
@@ -40,8 +41,14 @@ def PANICLE_BayesLOCO(
     if not isinstance(phe, np.ndarray) or phe.ndim != 2 or phe.shape[1] != 2:
         raise ValueError("Phenotype must be numpy array with 2 columns [ID, trait_value]")
     y = np.asarray(phe[:, 1], dtype=np.float64)
-    if not np.all(np.isfinite(y)):
-        raise ValueError("Phenotype contains missing/non-finite values; filter before BAYESLOCO")
+    finite_y = np.isfinite(y)
+    if not np.all(finite_y):
+        raise missing_values_error(
+            "Phenotype",
+            ~finite_y,
+            sample_ids=phe[:, 0],
+            action="filter before BAYESLOCO",
+        )
 
     # v1 is quantitative only.
     finite_y = y[np.isfinite(y)]
@@ -59,8 +66,14 @@ def PANICLE_BayesLOCO(
         if CV.shape[0] != phe.shape[0]:
             raise ValueError("Covariates must have same number of rows as phenotype")
         CV = CV.astype(np.float64, copy=False)
-        if not np.all(np.isfinite(CV)):
-            raise ValueError("Covariates contain missing/non-finite values; filter before BAYESLOCO")
+        finite_cv = np.isfinite(CV).all(axis=1)
+        if not np.all(finite_cv):
+            raise missing_values_error(
+                "Covariates",
+                ~finite_cv,
+                sample_ids=phe[:, 0],
+                action="filter before BAYESLOCO",
+            )
 
     geno = ensure_eager_genotype(geno)
 

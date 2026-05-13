@@ -29,6 +29,7 @@ from .mlm import (
     process_batch_parallel,
 )
 from .lrt import fit_markers_lrt_batch_prebuilt
+from ._validation import missing_values_error
 
 # Check for joblib availability
 try:
@@ -430,9 +431,13 @@ def PANICLE_MLM_LOCO(
     if not isinstance(phe, np.ndarray) or phe.ndim != 2 or phe.shape[1] != 2:
         raise ValueError("Phenotype must be numpy array with 2 columns [ID, trait_value]")
     trait_values_full = phe[:, 1].astype(np.float64)
-    if not np.all(np.isfinite(trait_values_full)):
-        raise ValueError(
-            "Phenotype contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO"
+    finite_trait = np.isfinite(trait_values_full)
+    if not np.all(finite_trait):
+        raise missing_values_error(
+            "Phenotype",
+            ~finite_trait,
+            sample_ids=phe[:, 0],
+            action="filter individuals before PANICLE_MLM_LOCO",
         )
     if CV is not None:
         if CV.shape[0] != phe.shape[0]:
@@ -441,9 +446,13 @@ def PANICLE_MLM_LOCO(
             CV = CV.astype(np.float64, copy=False)
         except (TypeError, ValueError):
             raise ValueError("Covariate matrix must contain numeric values")
-        if not np.all(np.isfinite(CV)):
-            raise ValueError(
-                "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO"
+        finite_cv = np.isfinite(CV).all(axis=1)
+        if not np.all(finite_cv):
+            raise missing_values_error(
+                "Covariate matrix",
+                ~finite_cv,
+                sample_ids=phe[:, 0],
+                action="filter individuals before PANICLE_MLM_LOCO",
             )
 
     geno = ensure_eager_genotype(geno)
@@ -603,9 +612,12 @@ def PANICLE_MLM_LOCO_MULTI(
         raise ValueError("Phenotype matrix must contain at least one trait column")
 
     trait_matrix = phe.astype(np.float64, copy=False)
-    if not np.all(np.isfinite(trait_matrix)):
-        raise ValueError(
-            "Phenotype contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO_MULTI"
+    finite_trait_rows = np.isfinite(trait_matrix).all(axis=1)
+    if not np.all(finite_trait_rows):
+        raise missing_values_error(
+            "Phenotype",
+            ~finite_trait_rows,
+            action="filter individuals before PANICLE_MLM_LOCO_MULTI",
         )
 
     n_individuals = trait_matrix.shape[0]
@@ -624,9 +636,12 @@ def PANICLE_MLM_LOCO_MULTI(
             CV = CV.astype(np.float64, copy=False)
         except (TypeError, ValueError):
             raise ValueError("Covariate matrix must contain numeric values")
-        if not np.all(np.isfinite(CV)):
-            raise ValueError(
-                "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM_LOCO_MULTI"
+        finite_cv = np.isfinite(CV).all(axis=1)
+        if not np.all(finite_cv):
+            raise missing_values_error(
+                "Covariate matrix",
+                ~finite_cv,
+                action="filter individuals before PANICLE_MLM_LOCO_MULTI",
             )
 
     geno = ensure_eager_genotype(geno)

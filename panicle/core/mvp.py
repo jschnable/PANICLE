@@ -354,9 +354,14 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             if n_valid < len(valid_mask):
                 excluded = len(valid_mask) - n_valid
                 if verbose:
+                    excluded_ids = trait_ids[~valid_mask]
+                    shown = ", ".join(excluded_ids[:10])
+                    if excluded > 10:
+                        shown += f", ... and {excluded - 10} more"
                     print(
                         f"  Trait '{trait_name}': excluded {excluded} individual(s) with missing/non-finite phenotype or covariate values."
                     )
+                    print(f"    Excluded sample IDs: {shown}")
 
             valid_indices = np.where(valid_mask)[0]
             phenotype_array = np.column_stack([trait_ids[valid_mask], raw_trait[valid_mask]])

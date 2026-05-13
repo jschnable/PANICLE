@@ -1279,6 +1279,16 @@ class GWASPipeline:
              self.log(f"   Skipping {trait_name}: No valid samples after QC.")
              return None
 
+        n_excluded = int((~mask).sum())
+        if n_excluded:
+             excluded_ids = self.phenotype_df.loc[~mask, "ID"].astype(str).to_numpy()
+             shown = ", ".join(excluded_ids[:10])
+             if n_excluded > 10:
+                  shown += f", ... and {n_excluded - 10} more"
+             self.log(
+                  f"   {trait_name}: excluded {n_excluded} sample(s) with missing/non-finite phenotype or covariate values: {shown}"
+             )
+
         idx = np.where(mask)[0]
         base_indices = np.asarray(self._matched_indices, dtype=int)
         geno_idx = base_indices[idx]

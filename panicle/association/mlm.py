@@ -23,6 +23,7 @@ from ..utils.data_types import (
     impute_numpy_batch_major_allele,
 )
 from ..utils.perf import warn_if_potential_single_thread_blas
+from ._validation import missing_values_error
 import warnings
 import time
 
@@ -383,9 +384,14 @@ def PANICLE_MLM(phe: np.ndarray,
     # Validate dimensions
     if len(trait_values) != n_individuals:
         raise ValueError("Number of phenotype observations must match number of individuals")
-    if not np.all(np.isfinite(trait_values)):
-        raise ValueError(
-            "Phenotype contains missing/non-finite values; filter individuals before PANICLE_MLM"
+    finite_trait = np.isfinite(trait_values)
+    if not np.all(finite_trait):
+        sample_ids = phe[:, 0] if phe.ndim == 2 and phe.shape[1] == 2 else None
+        raise missing_values_error(
+            "Phenotype",
+            ~finite_trait,
+            sample_ids=sample_ids,
+            action="filter individuals before PANICLE_MLM",
         )
     
     # Handle kinship matrix
@@ -410,9 +416,14 @@ def PANICLE_MLM(phe: np.ndarray,
             CV = CV.astype(np.float64, copy=False)
         except (TypeError, ValueError):
             raise ValueError("Covariate matrix must contain numeric values")
-        if not np.all(np.isfinite(CV)):
-            raise ValueError(
-                "Covariate matrix contains missing/non-finite values; filter individuals before PANICLE_MLM"
+        finite_cv = np.isfinite(CV).all(axis=1)
+        if not np.all(finite_cv):
+            sample_ids = phe[:, 0] if phe.ndim == 2 and phe.shape[1] == 2 else None
+            raise missing_values_error(
+                "Covariate matrix",
+                ~finite_cv,
+                sample_ids=sample_ids,
+                action="filter individuals before PANICLE_MLM",
             )
         X = np.column_stack([np.ones(n_individuals), CV])
         if verbose:
