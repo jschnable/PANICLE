@@ -5,13 +5,36 @@
 [![CI](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml/badge.svg)](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-PANICLE is a **Python package for Genome Wide Association Studies (GWAS)**. It implements GLM, MLM, FarmCPU, and BLINK. PANICLE seeks to achieve speeds comparable or better to other implementations while supporting multiple input data formats, providing multiple quality of life features (native effect marker number testing, leave one chromosome out MLM, calculation of resampling model inclusion probabilities, etc), and allowing modern GWAS algorithms to be natively integrated into python-based data analysis pipelines and ecosystems.
+**PANICLE finds the DNA variants driving traits** — crop yield, disease risk, plant height, anything you can measure — by scanning millions of genetic markers across hundreds or thousands of individuals. It's a fast, modern Python implementation of the four most-used GWAS algorithms (GLM, MLM, FarmCPU, BLINK), built for researchers who want to run GWAS inside their Python pipelines instead of bouncing through R or standalone binaries.
 
-## Key Features
+![Example Manhattan plot from the bundled demo data](docs/images/example_manhattan.png)
 
-*   **Multiple Algorithms**: GLM, MLM, FarmCPU, BLINK
-*   **Supported Genotype Formats**: VCF/BCF, PLINK, HapMap, CSV/TSV with optional caching of genotype data in binary during initial run (speeds future data loading dramatically).
-*   **Robustness**: Graceful handling of missing data.
+*The classic GWAS payoff: peaks rising above the red significance threshold mark genomic regions associated with the trait. Generated end-to-end by the 30-second quick start below.*
+
+## Try It in 30 Seconds
+
+The repo ships with a small demo dataset — clone, install, and you get a real Manhattan plot:
+
+```bash
+pip install panicle
+git clone https://github.com/jschnable/PANICLE.git && cd PANICLE
+python scripts/run_GWAS.py \
+  --phenotype examples/example_phenotypes.csv \
+  --genotype  examples/example_genotypes.vcf.gz \
+  --traits PlantHeight \
+  --methods GLM \
+  --outputdir ./results
+```
+
+Open `results/` and you'll find a Manhattan plot, a Q-Q plot, and a CSV of significant markers. That's a full GWAS, from raw VCF to publishable figure, with no setup beyond `pip install`.
+
+## Why PANICLE
+
+*   **Fast.** 5.75M markers × 862 samples in ~9 seconds for GLM, ~28s for MLM on a laptop ([benchmarks below](#benchmarks)).
+*   **Four algorithms, one interface.** GLM for speed, MLM for population structure, FarmCPU and BLINK for resolving independent loci — pick any combination in one call.
+*   **Reads what you have.** VCF/BCF, PLINK, HapMap, or numeric CSV/TSV. First-run parsing is cached to disk so re-analyses load in seconds.
+*   **Quality-of-life features other implementations lack.** Effective marker number for less-conservative Bonferroni thresholds, leave-one-chromosome-out MLM by default, FarmCPU resampling with model inclusion probabilities, optional standard errors.
+*   **Native Python.** No R bridge, no shelling out to binaries — drop GWAS into pandas/Jupyter/Snakemake pipelines directly.
 
 ## Installation
 
@@ -40,85 +63,66 @@ cd PANICLE
 pip install -e .[all]
 ```
 
-### Dependencies
+<details>
+<summary><b>Dependencies</b> (click to expand)</summary>
 
-**Core dependencies** (installed automatically):
-- `numpy` ≥1.19.0
-- `scipy` ≥1.6.0
-- `pandas` ≥1.2.0
-- `h5py` ≥3.0.0 (HDF5 support)
-- `matplotlib` ≥3.3.0 (plotting)
-- `numba` ≥0.50.0 (JIT compilation for performance)
-- `cyvcf2` ≥0.30.0 (fast VCF/BCF parsing)
+**Core** (installed automatically): `numpy` ≥1.19, `scipy` ≥1.6, `pandas` ≥1.2, `h5py` ≥3.0, `matplotlib` ≥3.3, `numba` ≥0.50, `cyvcf2` ≥0.30.
 
-**Optional dependencies**:
-- `bed-reader` ≥1.0.0 — PLINK .bed/.bim/.fam format support (`pip install panicle[plink]`)
-- `joblib` ≥1.0.0 — Parallel processing for LOCO methods (`pip install panicle[parallel]`)
+**Optional**: `bed-reader` ≥1.0 for PLINK `.bed/.bim/.fam` (`pip install panicle[plink]`), `joblib` ≥1.0 for parallel LOCO (`pip install panicle[parallel]`).
 
-## Quick Start (Python API)
+</details>
+
+## Python API
+
+The same workflow as the [30-second quick start](#try-it-in-30-seconds), in Python:
 
 ```python
 from panicle import PANICLE
 
-# Run GWAS with a single function call
 results = PANICLE(
-    phe="data/phenotype.csv",
-    geno="data/genotypes.vcf.gz",
-    map_data="data/map.csv",       # optional for VCF (map is extracted automatically)
-    n_pcs=3,                       # compute 3 genotype PCs internally
-    method=["GLM", "MLM", "FarmCPU"]
+    phe="examples/example_phenotypes.csv",
+    geno="examples/example_genotypes.vcf.gz",
+    map_data=None,                # VCF carries its own map; pass a path for numeric CSV/TSV
+    n_pcs=3,
+    method=["GLM", "MLM", "FarmCPU"],
 )
-
-# Results are also saved to CSV files automatically
+# Results are also saved to CSV files automatically.
 ```
 
-For more control over data loading, use the loader functions directly:
+For finer control (custom alignment, manual kinship, looping over traits), see the [API Reference](docs/api_reference.md) and the [`GWASPipeline`](#pipeline-api) class below.
 
-```python
-from panicle import load_genotype_vcf, load_phenotype_file, match_individuals
-from panicle import PANICLE_MLM, PANICLE_K_VanRaden, PANICLE_PCA
+## What You Get
 
-# Load data
-genotype, sample_ids, marker_map = load_genotype_vcf("data/genotypes.vcf.gz")
-phenotypes = load_phenotype_file("data/phenotype.csv")
+Each run writes to `--outputdir` (default `./GWAS_results/`):
 
-# Align samples and loop over traits
-for trait in phenotypes.columns[1:]:
-    phe_trait = phenotypes[["ID", trait]].dropna()
-    phe_aligned, _, geno_idx, _ = match_individuals(phe_trait, sample_ids)
+- **`GWAS_<trait>_all_results.csv`** — every marker, with p-values and effect sizes per method:
 
-    geno_subset = genotype.subset_individuals(geno_idx)
-    phe_array = phe_aligned.values  # (n, 2) array: [ID, value]
+  | MARKER | CHROM | POS | REF | ALT | MAF | GLM_P | GLM_Effect |
+  |---|---|---|---|---|---|---|---|
+  | Chr09_4810793 | Chr09 | 4810793 | G | A | 0.21 | 3.1e-19 | 0.412 |
+  | Chr06_2110438 | Chr06 | 2110438 | C | T | 0.14 | 8.4e-08 | -0.047 |
+  | … | … | … | … | … | … | … | … |
 
-    K = PANICLE_K_VanRaden(geno_subset)
-    results = PANICLE_MLM(phe=phe_array, geno=geno_subset, K=K)
-    df = results.to_dataframe()
-    print(f"{trait}: {(df['P'] < 5e-8).sum()} significant markers")
-```
+  (With multiple `--methods`, each adds its own `<METHOD>_P` and `<METHOD>_Effect` columns.)
 
-## CLI Usage (Quick Start)
+- **`GWAS_<trait>_significant.csv`** — only markers passing the significance threshold
+- **`GWAS_<trait>_<METHOD>_manhattan.png`** — Manhattan plot per method
+- **`GWAS_<trait>_<METHOD>_qq.png`** — Q-Q plot for diagnostic checking
+- **`GWAS_summary_by_traits_methods.csv`** — one-row-per-(trait, method) summary across the whole run
 
-The `run_GWAS.py` script provides a command-line interface for batch processing.
+## CLI Reference
+
+The `run_GWAS.py` script provides a command-line interface for batch processing. A complete invocation using more options than the quick start:
 
 ```bash
 python scripts/run_GWAS.py \
-  --phenotype data/phenotype.csv \
-  --genotype data/genotypes.vcf.gz \
-  --traits Trait1,Trait2 \
+  --phenotype examples/example_phenotypes.csv \
+  --genotype  examples/example_genotypes.vcf.gz \
+  --traits PlantHeight \
   --methods GLM,MLM,FarmCPU,BLINK \
   --n-pcs 5 \
   --compute-effective-tests \
   --outputs manhattan qq significant_marker_pvalues \
-  --outputdir ./results
-```
-
-For a small demo dataset included in the repo, see `examples/EXAMPLE_DATA.md` and try:
-```bash
-python scripts/run_GWAS.py \
-  --phenotype examples/example_phenotypes.csv \
-  --genotype examples/example_genotypes.vcf.gz \
-  --traits PlantHeight \
-  --methods GLM \
   --outputdir ./results
 ```
 
@@ -152,34 +156,25 @@ Other useful filters:
 - `--drop-monomorphic` / `--keep-monomorphic`
 - `--snps-only`, `--no-split-multiallelic`
 
-## Python API Usage
+<a id="pipeline-api"></a>
+## Pipeline API (step-by-step control)
 
-Integrate PANICLE into scripts or Jupyter Notebooks via the `GWASPipeline` class.
+For multi-step workflows in scripts or notebooks, use the `GWASPipeline` class — it exposes loading, alignment, structure, and analysis as separate steps you can inspect between.
 
 ```python
 from panicle.pipelines.gwas import GWASPipeline
 
-# 1. Initialize
 pipeline = GWASPipeline(output_dir="./results")
 
-# 2. Load Data (Auto-caches for speed)
 pipeline.load_data(
-    phenotype_file="data/phenotype.csv",
-    genotype_file="data/genotype.vcf.gz",
-    map_file="data/genotype.map",  # Optional unless format lacks positions
-    trait_columns=["Height", "Yield"],
-    loader_kwargs={'compute_effective_tests': True}  # Enable Me calculation
+    phenotype_file="examples/example_phenotypes.csv",
+    genotype_file="examples/example_genotypes.vcf.gz",
+    trait_columns=["PlantHeight"],
+    loader_kwargs={"compute_effective_tests": True},
 )
-
-# 3. Pre-process
 pipeline.align_samples()
 pipeline.compute_population_structure(n_pcs=5)
-
-# 4. Run Analysis (runs in parallel by default)
-pipeline.run_analysis(
-    methods=['GLM', 'MLM', 'FARMCPU', 'BLINK'],
-    alpha=0.05
-)
+pipeline.run_analysis(methods=["GLM", "MLM", "FARMCPU", "BLINK"], alpha=0.05)
 ```
 
 ## Input Formats
@@ -210,9 +205,10 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 - **[API Reference](docs/api_reference.md)** - Complete API documentation for all functions and classes
 - **[Output Files](docs/output_files.md)** - Understanding result file formats and columns
 
-### Interactive Tutorial
+### Interactive Tutorials
 
-- **[Sorghum GWAS Tutorial](docs/gwas_sorghum_tutorial.ipynb)** - Jupyter notebook with complete GWAS workflow
+- **[Sorghum GWAS Tutorial](examples/gwas_sorghum_tutorial.ipynb)** — Jupyter notebook walking through a complete GWAS workflow on a sorghum dataset.
+- **[eQTL Multi-Trait LOCO MLM Acceleration](examples/eqtl_multitrait_acceleration_tutorial.ipynb)** — Practical eQTL/QTL pattern: many traits (e.g. gene expression) tested against the same genotype matrix and shared LOCO kinship, with the acceleration tricks that make it tractable.
 
 ### Example Scripts
 
@@ -269,6 +265,7 @@ PANICLE includes a python-based based implementation of the effective marker num
 
 GEC citation: Li MX, Yeung JM, Cherny SS, Sham PC. Evaluating the effective numbers of independent tests and significant p-value thresholds in commercial genotyping arrays and public imputation reference datasets. Hum Genet. 2012 May;131(5):747-56.
 
+<a id="benchmarks"></a>
 ## Benchmarks
 
 Benchmarks based on traits measured from 862 samples, each scored for 5,751,024 markers and run on an Apple M4 CPU (cached VCF).
