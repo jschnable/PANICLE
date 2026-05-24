@@ -110,6 +110,18 @@ def test_estimate_effective_tests_rejects_negative_cpu() -> None:
         estimate_effective_tests_from_genotype(genotype, geno_map, ncpus=-1)
 
 
+def test_run_gwas_cli_skips_global_kinship_for_loco_mlm() -> None:
+    class PipelineWithMap:
+        geno_map = object()
+
+    class PipelineWithoutMap:
+        geno_map = None
+
+    assert RUN_GWAS._requires_global_kinship(["MLM"], PipelineWithoutMap())
+    assert not RUN_GWAS._requires_global_kinship(["MLM"], PipelineWithMap())
+    assert not RUN_GWAS._requires_global_kinship(["GLM"], PipelineWithoutMap())
+
+
 def test_load_genotype_file_records_effective_tests(tmp_path: Path) -> None:
     geno_file = tmp_path / "geno.csv"
     geno_file.write_text(

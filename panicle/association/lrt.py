@@ -221,6 +221,55 @@ def _profile_ml_state_impl(
     )
 
 
+def _profile_ml_gradient_impl(
+    h2: float,
+    y: np.ndarray,
+    X: np.ndarray,
+    eig_safe: np.ndarray,
+    m_diag: np.ndarray,
+    n_samples: int,
+    *,
+    trusted_inputs: bool = False,
+) -> Tuple[bool, float]:
+    """Evaluate only the profile-ML derivative at h2."""
+    var_diag = h2 * eig_safe + (1.0 - h2)
+    if trusted_inputs:
+        inv_var = 1.0 / var_diag
+        vi_x = inv_var[:, np.newaxis] * X
+        x_vix = X.T @ vi_x
+    else:
+        if np.any(var_diag <= 0) or not np.all(np.isfinite(var_diag)):
+            return False, np.nan
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            inv_var = 1.0 / var_diag
+            vi_x = inv_var[:, np.newaxis] * X
+            x_vix = X.T @ vi_x
+        if not np.all(np.isfinite(inv_var)) or not np.all(np.isfinite(x_vix)):
+            return False, np.nan
+
+    rhs_y = vi_x.T @ y
+    beta_hat = _solve_linear_system(x_vix, rhs_y)
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        vi_y = inv_var * y
+        pxy = vi_y - vi_x @ beta_hat
+    y_pxy = float(np.dot(y, pxy))
+    if not np.isfinite(y_pxy) or y_pxy <= 0:
+        return False, np.nan
+
+    trace_hinv_m = float(np.dot(m_diag, inv_var))
+    m_pxy = m_diag * pxy
+    a1 = float(np.dot(m_pxy, pxy))
+    if not np.isfinite(a1):
+        return False, np.nan
+
+    dl_dh = -0.5 * trace_hinv_m + 0.5 * n_samples * (a1 / y_pxy)
+    grad = -dl_dh
+    if not np.isfinite(grad):
+        return False, np.nan
+    return True, float(grad)
+
+
 def _profile_ml_state(
     h2: float,
     y: np.ndarray,
@@ -1003,6 +1052,135 @@ def _optimize_alt_h2_from_bracket(
     return best_state
 
 
+def _optimize_alt_h2_from_bracket_prepared(
+    y_local: np.ndarray,
+    x_local: np.ndarray,
+    eig_safe: np.ndarray,
+    m_diag: np.ndarray,
+    n_samples: int,
+    *,
+    lam_l: float,
+    lam_h: float,
+    grad_l: float,
+    grad_h: float,
+    tol: float = 1e-5,
+) -> _ProfileMLState:
+    """Root-solve a known bracket when inputs are already sanitized/prepared."""
+    lambda_min = _H2_MIN / (1.0 - _H2_MIN)
+    lambda_max = _H2_MAX / (1.0 - _H2_MAX)
+    lambda_tol = 1e-4
+    root_max_iter = 24
+
+    def _h2_from_lambda(lam: float) -> float:
+        lam = _clamp_scalar(float(lam), lambda_min, lambda_max)
+        return lam / (1.0 + lam)
+
+    def _gradient_at_lambda(lam: float) -> Tuple[bool, float]:
+        return _profile_ml_gradient_impl(
+            _h2_from_lambda(lam),
+            y_local,
+            x_local,
+            eig_safe,
+            m_diag,
+            n_samples,
+            trusted_inputs=True,
+        )
+
+    def _final_state_at_lambda(lam: float) -> _ProfileMLState:
+        return _profile_ml_state_impl(
+            _h2_from_lambda(lam),
+            y_local,
+            x_local,
+            eig_safe,
+            with_derivatives=False,
+            with_hessian=False,
+            n_samples=n_samples,
+            trusted_inputs=True,
+        )
+
+    a = float(lam_l)
+    b = float(lam_h)
+    fa = float(grad_l)
+    fb = float(grad_h)
+    if (not np.isfinite(fa)) or (not np.isfinite(fb)) or (fa * fb > 0.0):
+        return _ProfileMLState(False, 0.5, np.inf, 0.0, None, None)
+
+    if abs(fa) <= tol:
+        state_a = _final_state_at_lambda(a)
+        return (
+            state_a
+            if state_a.success
+            else _ProfileMLState(False, 0.5, np.inf, 0.0, None, None)
+        )
+    if abs(fb) <= tol:
+        state_b = _final_state_at_lambda(b)
+        return (
+            state_b
+            if state_b.success
+            else _ProfileMLState(False, 0.5, np.inf, 0.0, None, None)
+        )
+
+    def _grad_value(lam: float) -> float:
+        success, grad = _gradient_at_lambda(lam)
+        if not success or not np.isfinite(grad):
+            raise FloatingPointError("invalid profile-ML gradient")
+        return float(grad)
+
+    lam_root: Optional[float] = None
+    try:
+        lam_root = optimize.brentq(
+            _grad_value,
+            a,
+            b,
+            xtol=1e-4,
+            rtol=1e-4,
+            maxiter=50,
+        )
+    except Exception:
+        for _ in range(root_max_iter):
+            width = b - a
+            if width <= max(lambda_tol, lambda_tol * max(abs(a), abs(b), 1.0)):
+                lam_root = 0.5 * (a + b)
+                break
+
+            denom = fb - fa
+            if np.isfinite(denom) and abs(denom) > 1e-18:
+                c = (a * fb - b * fa) / denom
+            else:
+                c = 0.5 * (a + b)
+            if (not np.isfinite(c)) or c <= a or c >= b:
+                c = 0.5 * (a + b)
+
+            success_c, fc = _gradient_at_lambda(c)
+            if not success_c or not np.isfinite(fc):
+                c = 0.5 * (a + b)
+                success_c, fc = _gradient_at_lambda(c)
+                if not success_c or not np.isfinite(fc):
+                    break
+            fc = float(fc)
+
+            if abs(fc) <= tol:
+                lam_root = c
+                break
+            if fa * fc < 0.0:
+                b = c
+                fb = fc
+                fa *= 0.5
+            else:
+                a = c
+                fa = fc
+                fb *= 0.5
+        else:
+            lam_root = 0.5 * (a + b)
+
+    if lam_root is None:
+        return _ProfileMLState(False, 0.5, np.inf, 0.0, None, None)
+    state_root = _final_state_at_lambda(float(lam_root))
+    if not state_root.success or not np.isfinite(state_root.neg_loglik):
+        return _ProfileMLState(False, 0.5, np.inf, 0.0, None, None)
+    return state_root
+
+
 def fit_markers_lrt_batch_prebuilt(
     y_transformed: np.ndarray,
     X_transformed: np.ndarray,
@@ -1199,10 +1377,12 @@ def fit_markers_lrt_batch_prebuilt(
         X_alt[:, :-1] = X_local
         for marker_idx in single_idx:
             X_alt[:, -1] = G_local[:, marker_idx]
-            state = _optimize_alt_h2_from_bracket(
+            state = _optimize_alt_h2_from_bracket_prepared(
                 y_local,
                 X_alt,
                 eig_safe,
+                m_diag,
+                n_samples,
                 lam_l=float(first_lam_l[marker_idx]),
                 lam_h=float(first_lam_h[marker_idx]),
                 grad_l=float(first_grad_l[marker_idx]),
@@ -1211,6 +1391,8 @@ def fit_markers_lrt_batch_prebuilt(
             )
             if (not state.success) or (not np.isfinite(state.neg_loglik)) or (state.beta_hat is None) or (state.x_vix is None):
                 needs_fallback[marker_idx] = True
+                continue
+            if best_valid[marker_idx] and float(state.neg_loglik) >= best_neg[marker_idx]:
                 continue
             best_valid[marker_idx] = True
             best_neg[marker_idx] = float(state.neg_loglik)

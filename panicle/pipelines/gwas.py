@@ -703,9 +703,10 @@ class GWASPipeline:
         Args:
             n_pcs (int): Number of principal components to compute. Set to 0 to skip PCA.
                        Default: 3
-            calculate_kinship (bool): Whether to calculate kinship matrix. Only required
-                                    for MLM. Default: True (but can skip if only using
-                                    GLM, FarmCPU, or BLINK)
+            calculate_kinship (bool): Whether to calculate a global kinship matrix.
+                                    Only required for non-LOCO MLM. Default: True
+                                    (but can skip for map-backed MLM/LOCO, GLM,
+                                    FarmCPU, or BLINK)
 
         Sets:
             self.pcs: ndarray of shape (n_individuals, n_pcs) if n_pcs > 0
@@ -729,7 +730,8 @@ class GWASPipeline:
             - PCs are automatically used as covariates in subsequent run_analysis() calls
             - PCs are combined with any external covariates loaded via covariate_file
             - Kinship calculation uses VanRaden (2008) method: K = XX' / m
-            - Only MLM requires the kinship matrix; GLM, FarmCPU, and BLINK do not use it
+            - Only non-LOCO MLM requires the global kinship matrix; map-backed MLM uses LOCO
+              kinships during run_analysis(), and GLM, FarmCPU, and BLINK do not use it
             - If you skip kinship here, run_analysis() will auto-compute it when MLM is requested
               and no map data is available
             - Recommended to use 3-10 PCs depending on population structure complexity

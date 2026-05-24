@@ -12,6 +12,7 @@ import re
 from ..utils.data_types import (
     AssociationResults,
     GenotypeMap,
+    ManhattanLayout,
     infer_marker_id_column,
 )
 from ..association.farmcpu_resampling import FarmCPUResamplingResults
@@ -43,6 +44,31 @@ def _compute_marker_gap_y(ax, data_span: float, point_size: float) -> float:
     gap = marker_diam_px * data_per_px
     return max(gap, 0.02)  # Ensure a minimal visible gap
 
+
+def _draw_marker_points(
+    ax,
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    color,
+    point_size: float,
+    alpha: float = 0.8,
+) -> None:
+    """Draw dense marker clouds with Line2D markers, faster than scatter for PNG."""
+    if len(x) == 0:
+        return
+    ax.plot(
+        x,
+        y,
+        linestyle='None',
+        marker='o',
+        markersize=max(float(np.sqrt(point_size)), 1.0),
+        color=color,
+        alpha=alpha,
+        markeredgewidth=0,
+    )
+
+
 def PANICLE_Report(results: Union[AssociationResults, Dict],
                map_data: Optional[GenotypeMap] = None,
                threshold: float = 5e-8,
@@ -61,7 +87,8 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
                true_qtns: Optional[List[str]] = None,
                multi_panel: bool = False,
                method_lambda_gc: Optional[Dict[str, float]] = None,
-               method_lambda_gc_is_approx: Optional[Dict[str, bool]] = None) -> Dict:
+               method_lambda_gc_is_approx: Optional[Dict[str, bool]] = None,
+               png_compress_level: int = 3) -> Dict:
     """Generate comprehensive GWAS visualization report
 
     Creates Manhattan plots, Q-Q plots, and summary statistics for GWAS results.
@@ -81,6 +108,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
         save_plots: Save plots to files
         true_qtns: List of SNP names that are known true QTNs to highlight
         multi_panel: Create multi-panel Manhattan plot with all methods
+        png_compress_level: PNG compression level for saved plots (0-9)
 
     Returns:
         Dictionary with plot objects and summary statistics
@@ -94,6 +122,16 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
         'summary': {},
         'files_created': []
     }
+    png_compress_level = min(9, max(0, int(png_compress_level)))
+
+    def _save_png(fig, filename: str) -> None:
+        fig.savefig(
+            filename,
+            dpi=dpi,
+            bbox_inches='tight',
+            pil_kwargs={'compress_level': png_compress_level},
+        )
+        report['files_created'].append(filename)
 
     # Handle different input types
     if isinstance(results, AssociationResults):
@@ -136,8 +174,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
         
         if save_plots:
             filename = f"{output_prefix}_multi_panel_manhattan.png"
-            multi_panel_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-            report['files_created'].append(filename)
+            _save_png(multi_panel_fig, filename)
         
         # For multi-panel mode, skip individual method plotting for Manhattan plots
         # but still process other plot types and summary stats
@@ -178,8 +215,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
                 
                 if save_plots:
                     filename = f"{output_prefix}_{method_name}_qq.png"
-                    qq_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                    report['files_created'].append(filename)
+                    _save_png(qq_fig, filename)
             
             if "density" in plot_types:
                 if verbose:
@@ -193,8 +229,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
                 
                 if save_plots:
                     filename = f"{output_prefix}_{method_name}_density.png"
-                    density_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                    report['files_created'].append(filename)
+                    _save_png(density_fig, filename)
             
             report['plots'][method_name] = method_plots
             
@@ -257,8 +292,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
 
                 if save_plots:
                     filename = f"{output_prefix}_{method_name}_rmip_manhattan.png"
-                    rmip_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                    report['files_created'].append(filename)
+                    _save_png(rmip_fig, filename)
 
             report['plots'][method_name] = method_plots
 
@@ -322,8 +356,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
 
             if save_plots:
                 filename = f"{output_prefix}_{method_name}_manhattan.png"
-                manhattan_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                report['files_created'].append(filename)
+                _save_png(manhattan_fig, filename)
 
         if "qq" in plot_types:
             if verbose:
@@ -342,8 +375,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
 
             if save_plots:
                 filename = f"{output_prefix}_{method_name}_qq.png"
-                qq_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                report['files_created'].append(filename)
+                _save_png(qq_fig, filename)
 
         if "density" in plot_types:
             if verbose:
@@ -358,8 +390,7 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
 
             if save_plots:
                 filename = f"{output_prefix}_{method_name}_density.png"
-                density_fig.savefig(filename, dpi=dpi, bbox_inches='tight')
-                report['files_created'].append(filename)
+                _save_png(density_fig, filename)
 
         report['plots'][method_name] = method_plots
 
@@ -383,6 +414,182 @@ def PANICLE_Report(results: Union[AssociationResults, Dict],
         print(f"Report generation complete. Created {len(report['files_created'])} plot files.")
 
     return report
+
+
+def plot_manhattan_with_layout(
+    ax,
+    layout: ManhattanLayout,
+    log_pvalues: np.ndarray,
+    *,
+    finite_mask: Optional[np.ndarray] = None,
+    colors: Optional[List[str]] = None,
+    point_size: float = 3.0,
+    true_qtns: Optional[List[str]] = None,
+    marker_names: Optional[np.ndarray] = None,
+    highlight_mask: Optional[np.ndarray] = None,
+    highlight_kwargs: Optional[Dict] = None,
+    plot_mask: Optional[np.ndarray] = None,
+    decimate: bool = True,
+):
+    """Plot Manhattan points using cached map layout coordinates."""
+    log_pvalues = np.asarray(log_pvalues)
+    if finite_mask is None:
+        marker_indices = np.arange(log_pvalues.size, dtype=np.int64)
+    else:
+        finite_mask = np.asarray(finite_mask, dtype=bool)
+        if finite_mask.ndim != 1 or finite_mask.size != layout.x_positions.size:
+            raise ValueError("finite_mask must match the full marker layout length")
+        marker_indices = np.flatnonzero(finite_mask).astype(np.int64, copy=False)
+        if marker_indices.size != log_pvalues.size:
+            raise ValueError("log_pvalues length must match finite_mask true count")
+
+    if plot_mask is not None:
+        plot_mask = np.asarray(plot_mask, dtype=bool)
+        if plot_mask.shape != log_pvalues.shape:
+            raise ValueError("plot_mask must match the shape of the plotted values")
+    if highlight_mask is not None:
+        highlight_mask = np.asarray(highlight_mask, dtype=bool)
+        if highlight_mask.shape != log_pvalues.shape:
+            raise ValueError("highlight_mask must match the shape of the plotted values")
+    if marker_names is not None:
+        marker_names = np.asarray(marker_names)
+        if marker_names.shape != log_pvalues.shape:
+            raise ValueError("marker_names must match the shape of the plotted values")
+
+    qtn_mask = None
+    if true_qtns is not None and marker_names is not None:
+        qtn_mask = np.isin(marker_names.astype(str), np.asarray(true_qtns, dtype=str))
+
+    if plot_mask is not None and not decimate:
+        keep_mask = plot_mask.copy()
+        if highlight_mask is not None:
+            keep_mask |= highlight_mask
+        if qtn_mask is not None:
+            keep_mask |= qtn_mask
+        marker_indices = marker_indices[keep_mask]
+        log_pvalues = log_pvalues[keep_mask]
+        if marker_names is not None:
+            marker_names = marker_names[keep_mask]
+        if highlight_mask is not None:
+            highlight_mask = highlight_mask[keep_mask]
+        if qtn_mask is not None:
+            qtn_mask = qtn_mask[keep_mask]
+        plot_mask = None
+
+    if colors is None:
+        colors = ['#1f77b4', '#ff7f0e']
+
+    value_indices = np.arange(log_pvalues.size, dtype=np.int64)
+    valid_codes = layout.chrom_codes[marker_indices]
+    n_chroms = len(layout.tick_labels)
+    highlight_kwargs = highlight_kwargs or {}
+
+    for code in range(n_chroms):
+        value_mask = valid_codes == code
+        if not np.any(value_mask):
+            continue
+
+        chrom_value_indices = value_indices[value_mask]
+        chrom_marker_indices = marker_indices[value_mask]
+        chrom_x = layout.x_positions[chrom_marker_indices]
+        chrom_log_pvals = log_pvalues[value_mask]
+        color = colors[code % len(colors)]
+
+        chrom_plot_mask = np.ones_like(chrom_log_pvals, dtype=bool)
+        if plot_mask is not None:
+            chrom_plot_mask = plot_mask[chrom_value_indices]
+
+        sig_mask = chrom_log_pvals >= 1.0
+        noise_mask = ~sig_mask
+        sig_mask &= chrom_plot_mask
+        noise_mask &= chrom_plot_mask
+
+        if decimate:
+            if np.any(sig_mask):
+                _draw_marker_points(
+                    ax,
+                    chrom_x[sig_mask],
+                    chrom_log_pvals[sig_mask],
+                    color=color,
+                    point_size=point_size,
+                )
+            if np.any(noise_mask):
+                noise_indices = np.where(noise_mask)[0]
+                n_noise = len(noise_indices)
+                n_keep = max(1000, int(n_noise * 0.10))
+                if n_keep < n_noise:
+                    rng = np.random.default_rng(42 + code)
+                    keep_indices = rng.choice(noise_indices, n_keep, replace=False)
+                    _draw_marker_points(
+                        ax,
+                        chrom_x[keep_indices],
+                        chrom_log_pvals[keep_indices],
+                        color=color,
+                        point_size=point_size,
+                    )
+                else:
+                    _draw_marker_points(
+                        ax,
+                        chrom_x[noise_mask],
+                        chrom_log_pvals[noise_mask],
+                        color=color,
+                        point_size=point_size,
+                    )
+        else:
+            if np.any(chrom_plot_mask):
+                _draw_marker_points(
+                    ax,
+                    chrom_x[chrom_plot_mask],
+                    chrom_log_pvals[chrom_plot_mask],
+                    color=color,
+                    point_size=point_size,
+                )
+
+    if highlight_mask is not None and np.any(highlight_mask):
+        highlight_positions = layout.x_positions[marker_indices[highlight_mask]]
+        highlight_values = log_pvalues[highlight_mask]
+        ax.scatter(
+            highlight_positions,
+            highlight_values,
+            s=highlight_kwargs.get('s', point_size * 1.5),
+            facecolors=highlight_kwargs.get('facecolors', 'none'),
+            edgecolors=highlight_kwargs.get('edgecolors', 'black'),
+            linewidths=highlight_kwargs.get('linewidths', 0.5),
+            zorder=highlight_kwargs.get('zorder', 9),
+        )
+
+    if true_qtns is not None:
+        try:
+            if marker_names is None:
+                raise KeyError("Marker names are required to highlight true QTNs")
+            if qtn_mask is None:
+                qtn_mask = np.isin(marker_names.astype(str), np.asarray(true_qtns, dtype=str))
+            if np.any(qtn_mask):
+                ax.scatter(
+                    layout.x_positions[marker_indices[qtn_mask]],
+                    log_pvalues[qtn_mask],
+                    marker='^',
+                    s=point_size * 3,
+                    c='red',
+                    alpha=0.9,
+                    edgecolors='black',
+                    linewidth=0.5,
+                    zorder=10,
+                    label='True QTNs',
+                )
+                ax.legend(loc='upper right', fontsize=8)
+        except Exception as e:
+            warnings.warn(f"Could not highlight true QTNs: {e}")
+
+    ax.set_xticks(layout.tick_positions)
+    ax.set_xticklabels(layout.tick_labels)
+    ax.set_xlabel('Chromosome', fontsize=12)
+    ax.set_xlim(0, layout.max_position + layout.gap)
+    ax.margins(x=0)
+    ax.set_ylim(bottom=0)
+    for spine in ('top', 'right'):
+        if spine in ax.spines:
+            ax.spines[spine].set_visible(False)
 
 
 def create_manhattan_plot(pvalues: np.ndarray,
@@ -438,6 +645,15 @@ def create_manhattan_plot(pvalues: np.ndarray,
         max_bin = int(log_bins.max()) if log_bins.size else 0
         rng = np.random.default_rng(42)
 
+        if n_points >= 500_000:
+            counts = np.bincount(log_bins)
+            probabilities = np.minimum(
+                1.0,
+                1000.0 / np.maximum(counts, 1),
+            ).astype(np.float32)
+            keep_mask |= rng.random(n_points, dtype=np.float32) < probabilities[log_bins]
+            return keep_mask
+
         for bin_id in range(max_bin + 1):
             bin_indices = np.flatnonzero(log_bins == bin_id)
             if bin_indices.size == 0:
@@ -458,7 +674,41 @@ def create_manhattan_plot(pvalues: np.ndarray,
 
     pvalues = np.asarray(pvalues, dtype=float)
 
-    if map_data is not None and hasattr(map_data, 'to_dataframe'):
+    if isinstance(map_data, GenotypeMap):
+        if map_data.n_markers != len(pvalues):
+            plt.close(fig)
+            raise ValueError(
+                f"map_data has {map_data.n_markers} markers but pvalues has "
+                f"{len(pvalues)}; lengths must match for positional plotting"
+            )
+
+        finite_mask = np.isfinite(pvalues) & (pvalues > 0) & (pvalues <= 1)
+        pvals_for_plot = pvalues[finite_mask]
+        log_pvalues = -np.log10(pvals_for_plot)
+        plot_mask = _select_plot_mask(pvals_for_plot)
+        width_px = fig.get_size_inches()[0] * fig.dpi if fig and fig.dpi else 1200.0
+        layout = map_data.get_manhattan_layout(
+            point_size=point_size,
+            figure_width_px=width_px,
+            figure_dpi=fig.dpi if fig and fig.dpi else 100.0,
+        )
+        marker_names = None
+        if true_qtns is not None:
+            marker_names = map_data.marker_ids.astype(str).to_numpy()[finite_mask]
+
+        plot_manhattan_with_layout(
+            ax,
+            layout,
+            log_pvalues,
+            finite_mask=finite_mask,
+            colors=colors,
+            point_size=point_size,
+            true_qtns=true_qtns,
+            marker_names=marker_names,
+            plot_mask=plot_mask,
+            decimate=False,
+        )
+    elif map_data is not None and hasattr(map_data, 'to_dataframe'):
         # Use actual chromosomal positions. Apply the finite-pvalue mask to
         # *both* pvalues and map rows in lockstep so dropped markers (NaN
         # placeholders from MAC filtering, etc.) do not shift surviving
@@ -487,12 +737,14 @@ def create_manhattan_plot(pvalues: np.ndarray,
             pvals_for_plot = pvalues[finite_mask]
             chromosomes = map_df['CHROM'].values[finite_mask]
             positions = map_df['POS'].values[finite_mask]
-            marker_col = infer_marker_id_column(map_df.columns)
-            marker_names = (
-                map_df[marker_col].astype(str).values[finite_mask]
-                if marker_col is not None
-                else None
-            )
+            marker_names = None
+            if true_qtns is not None:
+                marker_col = infer_marker_id_column(map_df.columns)
+                marker_names = (
+                    map_df[marker_col].astype(str).values[finite_mask]
+                    if marker_col is not None
+                    else None
+                )
             log_pvalues = -np.log10(pvals_for_plot)
             plot_mask = _select_plot_mask(pvals_for_plot)
 
@@ -572,7 +824,52 @@ def create_rmip_manhattan_plot(result: FarmCPUResamplingResults,
     highlight_mask: Optional[np.ndarray]
 
     try:
-        if map_data is not None:
+        plotted_with_layout = False
+        if isinstance(map_data, GenotypeMap):
+            n_markers = map_data.n_markers
+            rmip_values = np.zeros(n_markers, dtype=np.float64)
+            scale = 1.0 / float(result.total_runs)
+            for marker_index, count in result.per_marker_counts.items():
+                idx = int(marker_index)
+                if 0 <= idx < n_markers:
+                    rmip_values[idx] = float(count) * scale
+
+            highlight_mask = rmip_values > 0
+            plot_mask = highlight_mask
+            width_px = fig.get_size_inches()[0] * fig.dpi if fig and fig.dpi else 1200.0
+            layout = map_data.get_manhattan_layout(
+                point_size=point_size,
+                figure_width_px=width_px,
+                figure_dpi=fig.dpi if fig and fig.dpi else 100.0,
+            )
+
+            if rmip_values.size == 0:
+                ax.set_xlabel('Chromosome', fontsize=12)
+                ax.set_ylabel('RMIP', fontsize=12)
+                if title and title.strip():
+                    ax.set_title(title)
+                ax.text(0.5, 0.5, 'No markers identified', transform=ax.transAxes,
+                        ha='center', va='center', fontsize=12)
+                plt.tight_layout()
+                return fig
+
+            plot_manhattan_with_layout(
+                ax,
+                layout,
+                rmip_values,
+                colors=colors,
+                point_size=point_size,
+                highlight_mask=highlight_mask,
+                plot_mask=plot_mask,
+                decimate=False,
+                highlight_kwargs={'s': point_size * 1.6,
+                                  'facecolors': 'none',
+                                  'edgecolors': 'black',
+                                  'linewidths': 0.5,
+                                  'zorder': 9}
+            )
+            plotted_with_layout = True
+        elif map_data is not None:
             map_df = map_data.to_dataframe()
             chromosomes = map_df['CHROM'].to_numpy()
             positions = map_df['POS'].to_numpy(dtype=np.float64)
@@ -604,22 +901,23 @@ def create_rmip_manhattan_plot(result: FarmCPUResamplingResults,
             plt.tight_layout()
             return fig
 
-        plot_manhattan_with_positions(
-            ax,
-            np.asarray(chromosomes),
-            np.asarray(positions, dtype=np.float64),
-            np.asarray(rmip_values, dtype=np.float64),
-            colors=colors,
-            point_size=point_size,
-            highlight_mask=highlight_mask,
-            plot_mask=plot_mask,
-            decimate=False,
-            highlight_kwargs={'s': point_size * 1.6,
-                              'facecolors': 'none',
-                              'edgecolors': 'black',
-                              'linewidths': 0.5,
-                              'zorder': 9}
-        )
+        if not plotted_with_layout:
+            plot_manhattan_with_positions(
+                ax,
+                np.asarray(chromosomes),
+                np.asarray(positions, dtype=np.float64),
+                np.asarray(rmip_values, dtype=np.float64),
+                colors=colors,
+                point_size=point_size,
+                highlight_mask=highlight_mask,
+                plot_mask=plot_mask,
+                decimate=False,
+                highlight_kwargs={'s': point_size * 1.6,
+                                  'facecolors': 'none',
+                                  'edgecolors': 'black',
+                                  'linewidths': 0.5,
+                                  'zorder': 9}
+            )
     except Exception as exc:
         warnings.warn(f"Falling back to sequential RMIP plotting: {exc}")
         rmip_values = np.asarray(result.rmip_values, dtype=np.float64)
@@ -761,8 +1059,13 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
         if decimate:
             # Plot all significant points
             if np.any(sig_mask):
-                ax.scatter(plot_positions[sig_mask], chrom_log_pvals[sig_mask],
-                          c=color, s=point_size, alpha=0.8, edgecolors='none')
+                _draw_marker_points(
+                    ax,
+                    plot_positions[sig_mask],
+                    chrom_log_pvals[sig_mask],
+                    color=color,
+                    point_size=point_size,
+                )
                 
             # Plot subsampled noise points
             if np.any(noise_mask):
@@ -774,15 +1077,30 @@ def plot_manhattan_with_positions(ax, chromosomes: np.ndarray, positions: np.nda
                     # Deterministic subsampling for reproducibility (visuals shouldn't flicker)
                     rng = np.random.default_rng(42 + i)
                     keep_indices = rng.choice(noise_indices, n_keep, replace=False)
-                    ax.scatter(plot_positions[keep_indices], chrom_log_pvals[keep_indices],
-                              c=color, s=point_size, alpha=0.8, edgecolors='none')
+                    _draw_marker_points(
+                        ax,
+                        plot_positions[keep_indices],
+                        chrom_log_pvals[keep_indices],
+                        color=color,
+                        point_size=point_size,
+                    )
                 else:
-                     ax.scatter(plot_positions[noise_mask], chrom_log_pvals[noise_mask],
-                              c=color, s=point_size, alpha=0.8, edgecolors='none')
+                     _draw_marker_points(
+                         ax,
+                         plot_positions[noise_mask],
+                         chrom_log_pvals[noise_mask],
+                         color=color,
+                         point_size=point_size,
+                     )
         else:
             if np.any(chrom_plot_mask):
-                ax.scatter(plot_positions[chrom_plot_mask], chrom_log_pvals[chrom_plot_mask],
-                          c=color, s=point_size, alpha=0.8, edgecolors='none')
+                _draw_marker_points(
+                    ax,
+                    plot_positions[chrom_plot_mask],
+                    chrom_log_pvals[chrom_plot_mask],
+                    color=color,
+                    point_size=point_size,
+                )
 
         if highlight_mask is not None:
             chrom_highlight = highlight_mask[indices_ordered]
@@ -864,7 +1182,7 @@ def plot_manhattan_sequential(ax,
             raise ValueError("plot_mask must match the shape of the plotted values")
         positions = positions[plot_mask]
         log_pvalues = log_pvalues[plot_mask]
-    ax.scatter(positions, log_pvalues, c='blue', s=point_size, alpha=0.8, edgecolors='none')
+    _draw_marker_points(ax, positions, log_pvalues, color='blue', point_size=point_size)
     ax.set_xlabel('Chromosome', fontsize=12)
     ax.margins(x=0)
     finite_vals = log_pvalues[np.isfinite(log_pvalues)]
@@ -1111,7 +1429,40 @@ def create_multi_panel_manhattan(results_dict: Dict,
         # Convert p-values to -log10 scale
         log_pvalues = -np.log10(valid_pvalues)
         
-        if map_data is not None and hasattr(map_data, 'to_dataframe'):
+        if isinstance(map_data, GenotypeMap):
+            try:
+                if map_data.n_markers != len(pvalues):
+                    plt.close(fig)
+                    raise ValueError(
+                        f"map_data has {map_data.n_markers} markers but pvalues has "
+                        f"{len(pvalues)}; lengths must match for positional plotting"
+                    )
+                width_px = fig.get_size_inches()[0] * fig.dpi if fig and fig.dpi else 1200.0
+                layout = map_data.get_manhattan_layout(
+                    point_size=point_size,
+                    figure_width_px=width_px,
+                    figure_dpi=fig.dpi if fig and fig.dpi else 100.0,
+                )
+                marker_names = None
+                if true_qtns is not None:
+                    marker_names = map_data.marker_ids.astype(str).to_numpy()[valid_mask]
+
+                plot_manhattan_with_layout(
+                    ax,
+                    layout,
+                    log_pvalues,
+                    finite_mask=valid_mask,
+                    colors=colors,
+                    point_size=point_size,
+                    true_qtns=true_qtns,
+                    marker_names=marker_names,
+                )
+            except Exception as e:
+                if isinstance(e, ValueError) and "lengths must match" in str(e):
+                    raise
+                warnings.warn(f"Could not use map data for {method_name}: {e}")
+                plot_manhattan_sequential(ax, log_pvalues, point_size=point_size)
+        elif map_data is not None and hasattr(map_data, 'to_dataframe'):
             try:
                 map_df = map_data.to_dataframe()
                 if len(map_df) != len(pvalues):
@@ -1125,12 +1476,14 @@ def create_multi_panel_manhattan(results_dict: Dict,
                     raise ValueError("map_data must contain CHROM and POS columns for positional plotting")
                 chromosomes = map_df['CHROM'].values[valid_mask]
                 positions = map_df['POS'].values[valid_mask]
-                marker_col = infer_marker_id_column(map_df.columns)
-                marker_names = (
-                    map_df[marker_col].astype(str).values[valid_mask]
-                    if marker_col is not None
-                    else None
-                )
+                marker_names = None
+                if true_qtns is not None:
+                    marker_col = infer_marker_id_column(map_df.columns)
+                    marker_names = (
+                        map_df[marker_col].astype(str).values[valid_mask]
+                        if marker_col is not None
+                        else None
+                    )
                 
                 # Create Manhattan plot with chromosomal positions
                 plot_manhattan_with_positions(

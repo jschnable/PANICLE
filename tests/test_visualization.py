@@ -111,31 +111,32 @@ def test_create_manhattan_plot_aligns_chrom_with_padded_pvalues(monkeypatch) -> 
 
     captured: dict = {}
 
-    def fake_plot_with_positions(ax, chromosomes, positions, log_pvalues, **kwargs):
-        captured["chromosomes"] = np.asarray(chromosomes).copy()
-        captured["positions"] = np.asarray(positions).copy()
+    def fake_plot_with_layout(ax, layout, log_pvalues, **kwargs):
+        finite_indices = np.flatnonzero(kwargs["finite_mask"])
+        captured["finite_indices"] = finite_indices.copy()
+        captured["chrom_codes"] = layout.chrom_codes[finite_indices].copy()
+        captured["tick_labels"] = list(layout.tick_labels)
         captured["log_pvalues"] = np.asarray(log_pvalues).copy()
 
     monkeypatch.setattr(
-        manhattan, "plot_manhattan_with_positions", fake_plot_with_positions
+        manhattan, "plot_manhattan_with_layout", fake_plot_with_layout
     )
 
     fig = manhattan.create_manhattan_plot(pvalues, map_data=geno_map, threshold=5e-8)
     plt.close(fig)
 
-    chroms = captured["chromosomes"]
-    positions = captured["positions"]
+    finite_indices = captured["finite_indices"]
+    chroms = [captured["tick_labels"][code] for code in captured["chrom_codes"]]
     log_pvals = captured["log_pvalues"]
 
     # The NaN holes must be excluded (4 surviving markers).
-    assert len(chroms) == 4
-    assert list(chroms) == ["1", "2", "3", "3"]
-    assert list(positions) == [20, 40, 50, 60]
+    assert list(finite_indices) == [1, 3, 4, 5]
+    assert chroms == ["1", "2", "3", "3"]
 
     # The strongest peak (-log10(1e-9)) must land on chr3, not shifted earlier.
     peak_idx = int(np.argmax(log_pvals))
     assert chroms[peak_idx] == "3"
-    assert positions[peak_idx] == 60
+    assert finite_indices[peak_idx] == 5
 
 
 def test_create_manhattan_plot_rejects_map_length_mismatch() -> None:
@@ -162,11 +163,11 @@ def test_create_manhattan_plot_filters_marker_names_with_padded_pvalues(monkeypa
     pvalues = np.array([np.nan, 0.5, np.nan, 0.4, 0.3, 1e-9])
     captured: dict = {}
 
-    def fake_plot_with_positions(ax, chromosomes, positions, log_pvalues, **kwargs):
+    def fake_plot_with_layout(ax, layout, log_pvalues, **kwargs):
         captured["marker_names"] = np.asarray(kwargs["marker_names"]).copy()
 
     monkeypatch.setattr(
-        manhattan, "plot_manhattan_with_positions", fake_plot_with_positions
+        manhattan, "plot_manhattan_with_layout", fake_plot_with_layout
     )
 
     fig = manhattan.create_manhattan_plot(
@@ -178,6 +179,26 @@ def test_create_manhattan_plot_filters_marker_names_with_padded_pvalues(monkeypa
     plt.close(fig)
 
     assert list(captured["marker_names"]) == ["s1", "s3", "s4", "s5"]
+
+
+def test_create_manhattan_plot_uses_genotype_map_layout_without_dataframe() -> None:
+    column_data = {
+        "MARKER": np.array(["s0", "s1", "s2", "s3"], dtype=object),
+        "CHROM": np.array(["1", "1", "2", "2"], dtype=object),
+        "POS": np.array([10, 20, 30, 40], dtype=np.int64),
+    }
+    geno_map = GenotypeMap.from_columns(column_data, column_order=["MARKER", "CHROM", "POS"])
+    assert geno_map._dataframe_cache is None
+
+    fig = manhattan.create_manhattan_plot(
+        np.array([0.05, 0.5, 1e-6, 0.2]),
+        map_data=geno_map,
+        threshold=5e-8,
+    )
+    plt.close(fig)
+
+    assert geno_map._dataframe_cache is None
+    assert geno_map._manhattan_layout_cache
 
 
 def test_create_rmip_manhattan_plot_with_counts_and_fallback() -> None:

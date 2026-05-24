@@ -2,6 +2,8 @@
 Core data structures for PANICLE package
 """
 
+from dataclasses import dataclass
+import re
 import numpy as np
 import pandas as pd
 from typing import Optional, Union, Tuple, Dict, Any, List, Sequence
@@ -124,6 +126,33 @@ def attach_genotype_map_metadata(df: pd.DataFrame) -> pd.DataFrame:
     df.attrs["chromosome_groups"] = chrom_groups
     df.attrs["chromosome_order"] = list(chrom_groups.keys())
     return df
+
+
+def _natural_label_sort_key(value) -> List[Union[int, str]]:
+    """Return a key for natural sorting of chromosome labels."""
+    text = str(value).strip()
+    if not text:
+        return [""]
+    parts = re.split(r"(\d+)", text)
+    key: List[Union[int, str]] = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        else:
+            key.append(part.lower())
+    return key
+
+
+@dataclass(frozen=True)
+class ManhattanLayout:
+    """Cached x-axis layout for genomic-position Manhattan plots."""
+
+    x_positions: np.ndarray
+    chrom_codes: np.ndarray
+    tick_positions: np.ndarray
+    tick_labels: List[str]
+    gap: float
+    max_position: float
 
 
 def _pack_chromosome_groups(
@@ -561,6 +590,7 @@ class GenotypeMap:
             column: self._dataframe_cache[column].to_numpy(copy=False)
             for column in self._column_order
         }
+        self._manhattan_layout_cache: Dict[Tuple[float, float, float], ManhattanLayout] = {}
 
     @classmethod
     def from_columns(
@@ -575,6 +605,7 @@ class GenotypeMap:
         obj._dataframe_cache = None
         obj._column_order = list(column_order) if column_order is not None else list(column_data.keys())
         obj._column_data = dict(column_data)
+        obj._manhattan_layout_cache = {}
         if MARKER_ID_COLUMN not in obj._column_data:
             raise ValueError(f"Missing required marker ID column '{MARKER_ID_COLUMN}'")
         if CHROM_COLUMN not in obj._column_data:
@@ -714,22 +745,109 @@ class GenotypeMap:
     def get_chromosome_groups(self) -> Dict[str, np.ndarray]:
         """Return cached chromosome-to-marker index groups."""
         chrom_groups = self.metadata.get("chromosome_groups")
-        if chrom_groups is None:
-            chrom_groups = self.data.attrs.get("chromosome_groups")
+        if chrom_groups is None and self._dataframe_cache is not None:
+            chrom_groups = self._dataframe_cache.attrs.get("chromosome_groups")
         if chrom_groups is None:
             chrom_groups = group_marker_indices_by_labels(
-                np.asarray(self.chromosomes).astype(str, copy=False)
+                np.asarray(self._get_column(CHROM_COLUMN)).astype(str, copy=False)
             )
         return chrom_groups
 
     def get_chromosome_order(self) -> List[str]:
         """Return chromosome labels in cached group order."""
         order = self.metadata.get("chromosome_order")
-        if order is None:
-            order = self.data.attrs.get("chromosome_order")
+        if order is None and self._dataframe_cache is not None:
+            order = self._dataframe_cache.attrs.get("chromosome_order")
         if order is None:
             order = list(self.get_chromosome_groups().keys())
         return list(order)
+
+    def get_manhattan_layout(
+        self,
+        *,
+        point_size: float = 3.0,
+        figure_width_px: float = 1200.0,
+        figure_dpi: float = 100.0,
+    ) -> ManhattanLayout:
+        """Return cached genomic x-axis coordinates for Manhattan plotting.
+
+        This avoids materializing the full map DataFrame in plot-heavy runs.
+        The gap depends on marker size and figure width, so those values are
+        part of the cache key.
+        """
+        key = (
+            round(float(point_size), 6),
+            round(float(figure_width_px), 3),
+            round(float(figure_dpi), 3),
+        )
+        cached = self._manhattan_layout_cache.get(key)
+        if cached is not None:
+            return cached
+
+        chrom_groups = self.get_chromosome_groups()
+        chrom_order = sorted((str(chrom) for chrom in chrom_groups), key=_natural_label_sort_key)
+        positions = np.asarray(self._get_column(POS_COLUMN))
+        n_markers = self.n_markers
+
+        chrom_items: List[Tuple[str, np.ndarray, float, float, float]] = []
+        chrom_lengths: List[float] = []
+        for chrom in chrom_order:
+            indices = np.asarray(chrom_groups[str(chrom)], dtype=np.int64)
+            if indices.size == 0:
+                continue
+            chrom_positions = np.asarray(positions[indices], dtype=np.float64)
+            min_pos = float(np.min(chrom_positions))
+            max_pos = float(np.max(chrom_positions))
+            chrom_length = (max_pos - min_pos) / 1e6 if max_pos > min_pos else 1.0
+            chrom_items.append((chrom, indices, min_pos, max_pos, chrom_length))
+            chrom_lengths.append(chrom_length)
+
+        median_len = float(np.median(chrom_lengths)) if chrom_lengths else 1.0
+        total_length = float(np.sum(chrom_lengths)) if chrom_lengths else float(len(chrom_items))
+        width_px = max(float(figure_width_px), 1.0)
+        data_per_px = total_length / width_px
+        marker_diam_points = max(float(np.sqrt(point_size)), 4.0)
+        marker_diam_px = marker_diam_points * (float(figure_dpi) / 72.0)
+        gap = max(marker_diam_px * data_per_px, 0.01 * median_len)
+
+        x_positions = np.zeros(n_markers, dtype=np.float64)
+        code_dtype = np.int16 if len(chrom_items) <= np.iinfo(np.int16).max else np.int32
+        chrom_codes = np.full(n_markers, -1, dtype=code_dtype)
+        tick_positions: List[float] = []
+        tick_labels: List[str] = []
+
+        current_pos = gap
+        max_position = 0.0
+        for code, (chrom, indices, min_pos, max_pos, chrom_length) in enumerate(chrom_items):
+            chrom_positions = np.asarray(positions[indices], dtype=np.float64)
+            order = np.argsort(chrom_positions, kind="mergesort")
+            ordered_indices = indices[order]
+            if max_pos > min_pos:
+                norm_positions = (
+                    (chrom_positions[order] - min_pos) / (max_pos - min_pos) * chrom_length
+                )
+            else:
+                norm_positions = np.zeros(order.size, dtype=np.float64)
+
+            plot_positions = current_pos + norm_positions
+            x_positions[ordered_indices] = plot_positions
+            chrom_codes[indices] = code
+            tick_positions.append(current_pos + chrom_length / 2)
+            tick_labels.append(str(chrom))
+            if plot_positions.size:
+                max_position = max(max_position, float(np.max(plot_positions)))
+            current_pos += chrom_length + gap
+
+        layout = ManhattanLayout(
+            x_positions=x_positions,
+            chrom_codes=chrom_codes,
+            tick_positions=np.asarray(tick_positions, dtype=np.float64),
+            tick_labels=tick_labels,
+            gap=float(gap),
+            max_position=float(max_position),
+        )
+        self._manhattan_layout_cache[key] = layout
+        return layout
 
 
 def impute_major_allele_inplace(geno: np.ndarray, missing_value: int = -9) -> int:

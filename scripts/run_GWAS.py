@@ -93,6 +93,11 @@ def _load_index_file(path: Optional[str]) -> Optional[list]:
     return out
 
 
+def _requires_global_kinship(valid_methods, pipeline) -> bool:
+    """Return whether the selected methods need a precomputed global kinship."""
+    return "MLM" in valid_methods and getattr(pipeline, "geno_map", None) is None
+
+
 class FarmCPUResamplingProgressReporter:
     """Lightweight progress reporter for FarmCPU resampling runs."""
 
@@ -184,8 +189,8 @@ def main():
 
     outputs = normalize_outputs(args.outputs)
 
-    # 4. Structure (kinship only needed for MLM)
-    need_kinship = 'MLM' in valid_methods
+    # 4. Structure (global kinship only needed for non-LOCO MLM)
+    need_kinship = _requires_global_kinship(valid_methods, pipeline)
     pipeline.compute_population_structure(n_pcs=args.n_pcs, calculate_kinship=need_kinship)
 
     # 5. Run Analysis
