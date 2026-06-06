@@ -41,6 +41,32 @@ def test_calculate_maf_from_genotypes_handles_missing() -> None:
     np.testing.assert_allclose(maf, np.array([1 / 3, 0.5, 0.0]))
 
 
+def test_calculate_maf_for_indices_matches_subset_with_missing() -> None:
+    genotypes = np.array(
+        [
+            [0, 1, -9],
+            [2, -9, -9],
+            [0, 1, 2],
+        ],
+        dtype=float,
+    )
+    indices = np.array([0, 2])
+
+    maf = stats_utils.calculate_maf_for_indices(
+        genotypes,
+        indices,
+        missing_value=-9,
+        max_dosage=2.0,
+    )
+
+    expected = stats_utils.calculate_maf_from_genotypes(
+        genotypes[:, indices],
+        missing_value=-9,
+        max_dosage=2.0,
+    )
+    np.testing.assert_allclose(maf, expected)
+
+
 def test_genomic_inflation_factor_handles_empty_and_valid_cases() -> None:
     assert stats_utils.genomic_inflation_factor(np.array([0, np.nan, -1])) == 1.0
 

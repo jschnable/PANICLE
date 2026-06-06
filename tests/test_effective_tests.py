@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from panicle.data.loaders import load_genotype_file
+from panicle.utils import effective_tests as effective_tests_utils
 from panicle.utils.data_types import GenotypeMap, GenotypeMatrix
 from panicle.utils.effective_tests import estimate_effective_tests_from_genotype
 
@@ -108,6 +109,52 @@ def test_estimate_effective_tests_rejects_negative_cpu() -> None:
 
     with pytest.raises(ValueError, match=">= 0"):
         estimate_effective_tests_from_genotype(genotype, geno_map, ncpus=-1)
+
+
+def test_trivial_effective_test_blocks_skip_eigendecomposition(monkeypatch) -> None:
+    def fail_eigvalsh(_matrix):
+        raise AssertionError("trivial blocks should not call eigvalsh")
+
+    monkeypatch.setattr(effective_tests_utils.np.linalg, "eigvalsh", fail_eigvalsh)
+
+    one_marker = GenotypeMatrix(np.array([[0], [1], [0], [1]], dtype=np.int8))
+    one_marker_map = GenotypeMap(
+        pd.DataFrame({"SNP": ["snp1"], "CHROM": ["1"], "POS": [100]})
+    )
+    one_result = estimate_effective_tests_from_genotype(one_marker, one_marker_map)
+    assert one_result["Me"] == 1
+    assert one_result["total_snps"] == 1
+
+    two_marker = GenotypeMatrix(
+        np.array(
+            [
+                [0, 0],
+                [0, 0],
+                [0, 0],
+                [1, 1],
+                [1, 1],
+                [1, 0],
+            ],
+            dtype=np.int8,
+        )
+    )
+    two_marker_map = GenotypeMap(
+        pd.DataFrame(
+            {
+                "SNP": ["snp1", "snp2"],
+                "CHROM": ["1", "1"],
+                "POS": [100, 200],
+            }
+        )
+    )
+    two_result = estimate_effective_tests_from_genotype(
+        two_marker,
+        two_marker_map,
+        corr_cutoff=0.5,
+        prune_redundant_threshold=None,
+    )
+    assert two_result["total_snps"] == 2
+    assert len(two_result["block_stats"]) == 1
 
 
 def test_run_gwas_cli_skips_global_kinship_for_loco_mlm() -> None:

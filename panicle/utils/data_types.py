@@ -1654,8 +1654,8 @@ class KinshipMatrix:
             try:
                 df = pd.read_csv(data, header=0)
                 self._data = df.values.astype(float)
-            except:
-                # Try without headers  
+            except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError, TypeError):
+                # Try without headers
                 self._data = np.loadtxt(data, delimiter=',', skiprows=1)
         elif isinstance(data, np.ndarray):
             self._data = data.copy()

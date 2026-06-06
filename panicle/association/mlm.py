@@ -102,7 +102,7 @@ if HAS_NUMBA:
         # Pre-compute UXWUX inverse (same for all markers)
         try:
             iUXWUX = np.linalg.inv(batch_UXWUX)
-        except:
+        except Exception:  # numba nopython mode supports bare Exception, not specific subclasses
             # Return NaN results if matrix is singular
             return np.full(n_markers, np.nan), np.full(n_markers, np.nan), np.full(n_markers, np.nan), np.full(n_markers, 1.0)
         

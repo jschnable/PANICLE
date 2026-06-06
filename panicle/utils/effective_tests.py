@@ -707,6 +707,12 @@ def _process_chromosome(
     Me_total = 0.0
 
     for block_indices, block_stat in zip(blocks, stats):
+        if len(block_indices) == 1:
+            Me_total += 1.0
+            block_stat.n_snps = 1
+            block_stat.Me = 1.0
+            continue
+
         ld_matrix = ld_source.sub_dense_matrix(block_indices)
 
         if ld_matrix.size == 0 or ld_matrix.shape[0] != ld_matrix.shape[1]:
@@ -719,9 +725,29 @@ def _process_chromosome(
             ld_matrix, list(block_indices), prune_redundant_threshold
         )
 
+        n_after_prune = ld_matrix.shape[0]
+        if n_after_prune == 0:
+            block_stat.n_snps = 0
+            block_stat.Me = 0.0
+            continue
+        if n_after_prune == 1:
+            Me_total += 1.0
+            block_stat.n_snps = 1
+            block_stat.Me = 1.0
+            continue
+
         ld_matrix = (ld_matrix + ld_matrix.T) / 2.0
         np.clip(ld_matrix, 0.0, 1.0, out=ld_matrix)
         np.fill_diagonal(ld_matrix, 1.0)
+
+        if n_after_prune == 2:
+            Me_block = 2.0 - float(ld_matrix[0, 1])
+            if Me_block < 0:
+                Me_block = 0.0
+            Me_total += Me_block
+            block_stat.n_snps = 2
+            block_stat.Me = Me_block
+            continue
 
         try:
             eigenvalues = np.linalg.eigvalsh(ld_matrix)

@@ -210,6 +210,47 @@ def calculate_maf_from_genotypes(
 
     return np.asarray(maf)
 
+def calculate_maf_for_indices(
+    genotypes,
+    indices: np.ndarray,
+    *,
+    missing_value: int = -9,
+    max_dosage: float = 2.0,
+) -> np.ndarray:
+    """Calculate minor allele frequencies for selected marker columns.
+
+    This avoids materializing all marker columns when only a small subset is
+    needed, while preserving the missing-value behavior of
+    ``calculate_maf_from_genotypes`` for plain arrays.
+    """
+    indices = np.asarray(indices, dtype=np.int64)
+    if indices.size == 0:
+        return np.array([], dtype=float)
+
+    if hasattr(genotypes, 'get_columns_imputed'):
+        geno_subset = genotypes.get_columns_imputed(indices, dtype=np.float64)
+        if geno_subset.ndim == 1:
+            geno_subset = geno_subset.reshape(-1, 1)
+        allele_freq = np.mean(geno_subset, axis=0, dtype=np.float64) / max(max_dosage, 1e-12)
+        return np.asarray(np.minimum(allele_freq, 1.0 - allele_freq))
+
+    if hasattr(genotypes, 'to_numpy'):
+        matrix = genotypes.to_numpy(copy=False)
+    elif hasattr(genotypes, '_data'):
+        matrix = genotypes._data
+    elif hasattr(genotypes, 'data'):
+        matrix = genotypes.data
+    else:
+        matrix = np.asarray(genotypes)
+
+    subset = np.asarray(matrix)[:, indices]
+    return calculate_maf_from_genotypes(
+        subset,
+        missing_value=missing_value,
+        max_dosage=max_dosage,
+    )
+
+
 def genomic_inflation_factor(pvalues: np.ndarray) -> float:
     """Calculate genomic inflation factor (lambda).
 

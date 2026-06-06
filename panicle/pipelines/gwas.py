@@ -21,6 +21,7 @@ from ..data.loaders import (
 )
 from ..utils.stats import (
     calculate_maf_from_genotypes,
+    calculate_maf_for_indices,
     compute_mac_keep_indices,
     pad_association_results,
     qq_compatible_genomic_inflation_factor,
@@ -555,7 +556,7 @@ class GWASPipeline:
                     non_numeric_chroms = [label for label in chrom_labels if not label.isdigit()]
                     if non_numeric_chroms:
                         self.log("   Note: htslib may print [W::vcf_parse] warnings for non-contig lines.")
-                except:
+                except (KeyError, AttributeError, TypeError):
                     pass
 
             self.effective_tests_info = self.geno_map.metadata.get("effective_tests")
@@ -1496,18 +1497,6 @@ class GWASPipeline:
                     cols.append('MAF')
             return cols
 
-        def _maf_for_indices(indices: np.ndarray) -> np.ndarray:
-            if indices.size == 0:
-                return np.array([], dtype=float)
-            geno_source = geno_for_maf or self.genotype_matrix
-            if hasattr(geno_source, 'get_columns_imputed'):
-                geno_subset = geno_source.get_columns_imputed(indices, dtype=np.float64)
-                allele_freq = geno_subset.mean(axis=0) / max(max_dosage, 1e-12)
-            else:
-                geno_subset = np.asarray(geno_source)[:, indices]
-                allele_freq = np.nanmean(geno_subset, axis=0) / max(max_dosage, 1e-12)
-            return np.minimum(allele_freq, 1.0 - allele_freq)
-
         def _json_default(obj):
             if isinstance(obj, (np.integer, np.floating)):
                 return obj.item()
@@ -1694,7 +1683,34 @@ class GWASPipeline:
                 sig_df = all_res_df.loc[any_hits].copy()
                 if 'MAF' not in sig_df.columns:
                     sig_indices = np.where(any_hits)[0]
-                    maf_subset = _maf_for_indices(sig_indices)
+                    geno_source = geno_for_maf or self.genotype_matrix
+                    if maf_keep_indices is not None and geno_for_maf is not None:
+                        keep_indices_arr = np.asarray(maf_keep_indices, dtype=np.int64)
+                        full_to_local = {
+                            int(full_idx): local_idx
+                            for local_idx, full_idx in enumerate(keep_indices_arr)
+                        }
+                        maf_subset = np.full(sig_indices.size, np.nan, dtype=float)
+                        local_indices = []
+                        output_positions = []
+                        for output_pos, full_idx in enumerate(sig_indices):
+                            local_idx = full_to_local.get(int(full_idx))
+                            if local_idx is not None:
+                                output_positions.append(output_pos)
+                                local_indices.append(local_idx)
+                        if local_indices:
+                            output_positions_arr = np.asarray(output_positions, dtype=np.int64)
+                            maf_subset[output_positions_arr] = calculate_maf_for_indices(
+                                geno_source,
+                                np.asarray(local_indices, dtype=np.int64),
+                                max_dosage=max_dosage,
+                            )
+                    else:
+                        maf_subset = calculate_maf_for_indices(
+                            geno_source,
+                            sig_indices,
+                            max_dosage=max_dosage,
+                        )
                     _insert_maf_column(sig_df, maf_subset)
                 sig_df['Method'] = [
                     "|".join(method_labels[idx]) for idx in np.where(any_hits)[0]

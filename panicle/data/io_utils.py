@@ -30,7 +30,7 @@ def read_phenotype(file_path: Union[str, Path]) -> pd.DataFrame:
             if df.shape[1] < 2:
                 # Try space-separated
                 df = pd.read_csv(file_path, sep=' ', header=0)
-    except:
+    except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError):
         # Try without header
         df = pd.read_csv(file_path, header=None)
         if df.shape[1] < 2:

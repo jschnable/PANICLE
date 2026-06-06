@@ -163,7 +163,7 @@ def detect_file_format(filepath: Union[str, Path]) -> str:
             return 'csv'
         else:
             return 'numeric'
-    except:
+    except (OSError, UnicodeDecodeError):
         return 'unknown'
 
 
@@ -224,7 +224,7 @@ def load_phenotype_file(filepath: Union[str, Path],
         # Try both comma and tab separation
         try:
             df = pd.read_csv(filepath, **read_kwargs)
-        except:
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError):
             df = pd.read_csv(filepath, sep='\t', **read_kwargs)
     
     # Standardize column names
@@ -794,7 +794,7 @@ def load_map_file(filepath: Union[str, Path]) -> GenotypeMap:
     else:
         try:
             df = pd.read_csv(filepath)
-        except:
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError):
             df = pd.read_csv(filepath, sep='\t')
     
     df = canonicalize_genotype_map_dataframe(df)
