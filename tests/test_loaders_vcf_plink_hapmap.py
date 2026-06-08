@@ -119,6 +119,136 @@ def test_load_genotype_vcf_bcf_requires_cyvcf2(tmp_path, monkeypatch) -> None:
         load_genotype_vcf.load_genotype_vcf(bcf_path, backend="auto")
 
 
+def test_load_genotype_vcf_builtin_bulk_gt_path_imputes_missing(tmp_path) -> None:
+    vcf_path = tmp_path / "simple_gt.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+        "1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\n"
+        "1\t20\t.\tC\tT\t.\tPASS\t.\tGT\t0|0\t./.\t0|1\n",
+        encoding="utf-8",
+    )
+
+    geno, ids, geno_map = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="builtin",
+        force_recache=True,
+        return_pandas=True,
+    )
+
+    assert ids == ["S1", "S2", "S3"]
+    np.testing.assert_array_equal(
+        geno,
+        np.array(
+            [
+                [0, 0],
+                [1, 0],  # rs2 missing call imputed to the marker's major allele
+                [2, 1],
+            ],
+            dtype=np.int8,
+        ),
+    )
+    assert list(geno_map["SNP"]) == ["rs1", "1:20:C:T"]
+    assert getattr(geno_map, "attrs", {}).get("is_imputed") is True
+
+
+def test_load_genotype_vcf_auto_uses_builtin_for_vcf_text(tmp_path, monkeypatch) -> None:
+    vcf_path = tmp_path / "simple_gt_auto.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n"
+        "1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\n",
+        encoding="utf-8",
+    )
+
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "cyvcf2":
+            raise AssertionError("auto should not import cyvcf2 for VCF text")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    geno, ids, geno_map = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="auto",
+        force_recache=True,
+        return_pandas=True,
+    )
+
+    assert ids == ["S1", "S2"]
+    np.testing.assert_array_equal(geno, np.array([[0], [1]], dtype=np.int8))
+    assert list(geno_map["SNP"]) == ["rs1"]
+
+
+def test_load_genotype_vcf_builtin_bulk_gt_path_drops_monomorphic_ref_alt(tmp_path) -> None:
+    vcf_path = tmp_path / "simple_gt_monomorphic.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+        "1\t10\tpoly\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\n"
+        "1\t20\tall_ref\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/0\t0/0\n"
+        "1\t30\tall_alt\tG\tA\t.\tPASS\t.\tGT\t1/1\t1/1\t1/1\n"
+        "1\t40\tall_het\tT\tC\t.\tPASS\t.\tGT\t0/1\t0/1\t0/1\n"
+        "1\t50\tmissing_ref\tA\tC\t.\tPASS\t.\tGT\t./.\t0/0\t0/0\n",
+        encoding="utf-8",
+    )
+
+    geno, ids, geno_map = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="builtin",
+        force_recache=True,
+        drop_monomorphic=True,
+        return_pandas=True,
+    )
+
+    assert ids == ["S1", "S2", "S3"]
+    np.testing.assert_array_equal(
+        geno,
+        np.array(
+            [
+                [0, 1],
+                [1, 1],
+                [2, 1],
+            ],
+            dtype=np.int8,
+        ),
+    )
+    assert list(geno_map["SNP"]) == ["poly", "all_het"]
+
+
+def test_load_genotype_vcf_builtin_bulk_gt_path_applies_qc_filters(tmp_path, monkeypatch) -> None:
+    vcf_path = tmp_path / "simple_gt_filters.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4\n"
+        "1\t10\tkeep\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\t0/1\n"
+        "1\t20\tindel\tC\tCT\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\t0/1\n"
+        "1\t30\tmissing\tG\tA\t.\tPASS\t.\tGT\t./.\t./.\t0/1\t1/1\n"
+        "1\t40\tlow_maf\tT\tC\t.\tPASS\t.\tGT\t0/0\t0/0\t0/0\t0/1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(load_genotype_vcf, "_SIMPLE_BULK_BATCH_MARKERS", 2)
+
+    geno, ids, geno_map = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="builtin",
+        force_recache=True,
+        include_indels=False,
+        max_missing=0.25,
+        min_maf=0.2,
+        return_pandas=True,
+    )
+
+    assert ids == ["S1", "S2", "S3", "S4"]
+    np.testing.assert_array_equal(
+        geno,
+        np.array([[0], [1], [2], [1]], dtype=np.int8),
+    )
+    assert list(geno_map["SNP"]) == ["keep"]
+
+
 def test_load_genotype_plink_monkeypatched(monkeypatch) -> None:
     def fake_open_bed(path):
         class FakeBed:

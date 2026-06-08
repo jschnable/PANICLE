@@ -224,13 +224,16 @@ class _CategoricalUtf8Column:
 
 def _pack_utf8_column(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Encode a string column as UTF-8 bytes with offsets."""
-    offsets = np.zeros(len(values) + 1, dtype=np.int64)
-    payload = bytearray()
-    for idx, value in enumerate(values):
-        encoded = str(value).encode("utf-8")
-        payload.extend(encoded)
-        offsets[idx + 1] = len(payload)
-    data = np.frombuffer(bytes(payload), dtype=np.uint8)
+    encoded_values = [str(value).encode("utf-8") for value in values]
+    lengths = np.fromiter(
+        (len(value) for value in encoded_values),
+        dtype=np.int64,
+        count=len(encoded_values),
+    )
+    offsets = np.empty(len(encoded_values) + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(lengths, out=offsets[1:])
+    data = np.frombuffer(b"".join(encoded_values), dtype=np.uint8)
     return offsets, data
 
 

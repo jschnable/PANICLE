@@ -32,6 +32,14 @@ try:
     import numpy as np
 except Exception as e:  # pragma: no cover
     raise ImportError("NumPy is required: pip install numpy")
+try:
+    from numba import njit, prange
+
+    _NUMBA_AVAILABLE = True
+except Exception:  # pragma: no cover - optional accelerator
+    _NUMBA_AVAILABLE = False
+    njit = None
+    prange = range
 from panicle.utils.data_types import (
     CHROM_COLUMN,
     LEGACY_MARKER_ID_COLUMN,
@@ -45,6 +53,7 @@ from panicle.utils.data_types import (
 
 
 MISSING = -9
+_SIMPLE_BULK_BATCH_MARKERS = 32768
 
 _GT_TOKEN_CACHE_SENTINEL = object()
 _GT_TOKEN_CACHE: Dict[str, Optional[Tuple[str, ...]]] = {}
@@ -67,6 +76,129 @@ _BIALLELIC_GT_DIRECT: Dict[str, Tuple[int, int]] = {
 }
 
 _FORMAT_CACHE: Dict[str, Tuple[Tuple[str, ...], Dict[str, int]]] = {}
+
+if _NUMBA_AVAILABLE:
+
+    @njit(cache=True, parallel=True)
+    def _decode_simple_gt_matrix_numba(raw, n_markers, n_samples):
+        out = np.empty((n_samples, n_markers), dtype=np.int8)
+        missing_counts = np.zeros(n_markers, dtype=np.int64)
+        invalid = 0
+        for marker_idx in prange(n_markers):
+            c0 = 0
+            c1 = 0
+            c2 = 0
+            marker_missing = 0
+            marker_invalid = 0
+            for sample_idx in range(n_samples):
+                offset = sample_idx * 4
+                allele_a = raw[marker_idx, offset]
+                separator = raw[marker_idx, offset + 1]
+                allele_b = raw[marker_idx, offset + 2]
+                if separator != 47 and separator != 124:  # '/' or '|'
+                    marker_invalid = 1
+                if sample_idx < n_samples - 1 and raw[marker_idx, offset + 3] != 9:
+                    marker_invalid = 1
+
+                value = np.int8(0)
+                if allele_a == 46 or allele_b == 46:  # '.'
+                    value = np.int8(-9)
+                    marker_missing += 1
+                else:
+                    if allele_a == 49:  # '1'
+                        value += 1
+                    elif allele_a != 48:  # not '0'
+                        marker_invalid = 1
+                    if allele_b == 49:
+                        value += 1
+                    elif allele_b != 48:
+                        marker_invalid = 1
+                    if value == 0:
+                        c0 += 1
+                    elif value == 1:
+                        c1 += 1
+                    elif value == 2:
+                        c2 += 1
+                out[sample_idx, marker_idx] = value
+
+            major = np.int8(0)
+            if c1 > c0 and c1 >= c2:
+                major = np.int8(1)
+            elif c2 > c0 and c2 > c1:
+                major = np.int8(2)
+            if marker_missing > 0:
+                for sample_idx in range(n_samples):
+                    if out[sample_idx, marker_idx] == -9:
+                        out[sample_idx, marker_idx] = major
+            missing_counts[marker_idx] = marker_missing
+            invalid += marker_invalid
+
+        return out, missing_counts, invalid
+
+    @njit(cache=True, parallel=True)
+    def _decode_simple_gt_matrix_stats_numba(raw, n_markers, n_samples):
+        out = np.empty((n_samples, n_markers), dtype=np.int8)
+        missing_counts = np.zeros(n_markers, dtype=np.int64)
+        counts_0 = np.zeros(n_markers, dtype=np.int64)
+        counts_1 = np.zeros(n_markers, dtype=np.int64)
+        counts_2 = np.zeros(n_markers, dtype=np.int64)
+        invalid = 0
+        for marker_idx in prange(n_markers):
+            c0 = 0
+            c1 = 0
+            c2 = 0
+            marker_missing = 0
+            marker_invalid = 0
+            for sample_idx in range(n_samples):
+                offset = sample_idx * 4
+                allele_a = raw[marker_idx, offset]
+                separator = raw[marker_idx, offset + 1]
+                allele_b = raw[marker_idx, offset + 2]
+                if separator != 47 and separator != 124:  # '/' or '|'
+                    marker_invalid = 1
+                if sample_idx < n_samples - 1 and raw[marker_idx, offset + 3] != 9:
+                    marker_invalid = 1
+
+                value = np.int8(0)
+                if allele_a == 46 or allele_b == 46:  # '.'
+                    value = np.int8(-9)
+                    marker_missing += 1
+                else:
+                    if allele_a == 49:  # '1'
+                        value += 1
+                    elif allele_a != 48:  # not '0'
+                        marker_invalid = 1
+                    if allele_b == 49:
+                        value += 1
+                    elif allele_b != 48:
+                        marker_invalid = 1
+                    if value == 0:
+                        c0 += 1
+                    elif value == 1:
+                        c1 += 1
+                    elif value == 2:
+                        c2 += 1
+                out[sample_idx, marker_idx] = value
+
+            major = np.int8(0)
+            if c1 > c0 and c1 >= c2:
+                major = np.int8(1)
+            elif c2 > c0 and c2 > c1:
+                major = np.int8(2)
+            if marker_missing > 0:
+                for sample_idx in range(n_samples):
+                    if out[sample_idx, marker_idx] == -9:
+                        out[sample_idx, marker_idx] = major
+            missing_counts[marker_idx] = marker_missing
+            counts_0[marker_idx] = c0
+            counts_1[marker_idx] = c1
+            counts_2[marker_idx] = c2
+            invalid += marker_invalid
+
+        return out, missing_counts, counts_0, counts_1, counts_2, invalid
+else:
+    _decode_simple_gt_matrix_numba = None
+    _decode_simple_gt_matrix_stats_numba = None
 
 
 class _DynamicInt8MatrixWriter:
@@ -113,6 +245,20 @@ class _DynamicInt8MatrixWriter:
         self.memmap[self.count, :] = column
         self.count += 1
 
+    def append_block(self, columns):
+        if columns.ndim != 2 or columns.shape[0] != self.n_rows:
+            raise ValueError(
+                f"Block shape mismatch: expected ({self.n_rows}, n_columns), got {columns.shape}"
+            )
+        n_columns = int(columns.shape[1])
+        if n_columns == 0:
+            return
+        new_count = self.count + n_columns
+        if new_count > self.capacity:
+            self._grow(new_count)
+        self.memmap[self.count:new_count, :] = columns.T
+        self.count = new_count
+
     def finalize(self):
         mm = self.memmap
         if mm is None:
@@ -131,6 +277,16 @@ class _DynamicInt8MatrixWriter:
         del mm
         return result
 
+    def discard(self):
+        if self.memmap is not None:
+            self.memmap.flush()
+            del self.memmap
+            self.memmap = None
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
 
 def _open_text(path):
     """Open VCF text transparently from plain or gzip-compressed files.
@@ -142,6 +298,16 @@ def _open_text(path):
     if pl.endswith('.gz') or pl.endswith('.bgz'):
         return io.TextIOWrapper(gzip.open(p, 'rb'))
     return open(p, 'r')
+
+
+def _open_binary(path):
+    """Open VCF bytes transparently from plain or gzip-compressed files."""
+    p = str(path)
+    pl = p.lower()
+    if pl.endswith('.gz') or pl.endswith('.bgz'):
+        raw = gzip.GzipFile(filename=p, mode='rb')
+        return io.BufferedReader(raw, buffer_size=128 * 1024)
+    return open(p, 'rb')
 
 
 def _parse_samples(header_line):
@@ -157,6 +323,364 @@ def _build_snp_id(chrom, pos, vid, ref, alt):
     if vid and vid != '.':
         return vid
     return "%s:%s:%s:%s" % (chrom, pos, ref, alt)
+
+
+def _find_first_tabs(line: bytes, count: int) -> Optional[Tuple[int, ...]]:
+    tabs = []
+    start = 0
+    for _ in range(count):
+        pos = line.find(b'\t', start)
+        if pos < 0:
+            return None
+        tabs.append(pos)
+        start = pos + 1
+    return tuple(tabs)
+
+
+def _parse_simple_biallelic_gt_line(
+    line: bytes,
+    n_samples: int,
+) -> Optional[Tuple[np.ndarray, str, int, str, str, str]]:
+    """Fast parse ``FORMAT=GT`` biallelic diploid records with fixed 3-byte calls.
+
+    The general parser below handles all other compatible VCF shapes. This
+    helper only accepts rows like ``...\\tGT\\t0/0\\t0/1\\t1/1`` (phased or
+    unphased, with ``./.``/``.|.`` missing calls). It deliberately returns
+    ``None`` for unusual allele codes, extra FORMAT fields, multiallelic rows,
+    variable ploidy, or non-fixed-width sample fields so existing behavior is
+    preserved by the fallback path.
+    """
+    if line.endswith(b'\n'):
+        line = line[:-1]
+    if line.endswith(b'\r'):
+        line = line[:-1]
+
+    tabs = _find_first_tabs(line, 9)
+    if tabs is None:
+        return None
+
+    t0, t1, t2, t3, t4, _t5, _t6, _t7, t8 = tabs
+    fmt = line[tabs[7] + 1 : t8]
+    if fmt != b'GT':
+        return None
+
+    alt = line[t3 + 1 : t4]
+    if not alt or alt == b'.' or b',' in alt:
+        return None
+
+    sample_blob = line[t8 + 1 :]
+    expected_len = n_samples * 4 - 1
+    if n_samples <= 0 or len(sample_blob) != expected_len:
+        return None
+
+    raw = np.frombuffer(sample_blob, dtype=np.uint8)
+    if raw.size != expected_len:
+        return None
+    if n_samples > 1 and not np.all(raw[3::4] == 9):  # tab separators
+        return None
+
+    separators = raw[1::4]
+    if not np.all((separators == 47) | (separators == 124)):  # '/' or '|'
+        return None
+
+    allele_a = raw[0::4]
+    allele_b = raw[2::4]
+    valid_a = (allele_a == 48) | (allele_a == 49) | (allele_a == 46)
+    valid_b = (allele_b == 48) | (allele_b == 49) | (allele_b == 46)
+    if not (np.all(valid_a) and np.all(valid_b)):
+        return None
+
+    col = ((allele_a == 49).astype(np.int8) + (allele_b == 49).astype(np.int8))
+    missing = (allele_a == 46) | (allele_b == 46)
+    if np.any(missing):
+        col = col.copy()
+        col[missing] = MISSING
+
+    chrom = line[:t0].decode()
+    pos = int(line[t0 + 1 : t1])
+    vid = line[t1 + 1 : t2].decode()
+    ref = line[t2 + 1 : t3].decode()
+    alt_str = alt.decode()
+    return col, chrom, pos, vid, ref, alt_str
+
+
+def _try_load_simple_biallelic_gt_vcf_bulk(
+    vcf_path,
+    include_indels=True,
+    drop_monomorphic=False,
+    max_missing=1.0,
+    min_maf=0.0,
+) -> Optional[Tuple[np.ndarray, list, list, int]]:
+    """Bulk-load simple ``FORMAT=GT`` biallelic diploid VCFs.
+
+    This is an internal fast path for the common case represented by PANICLE's
+    benchmarks. It is intentionally conservative: if any record is not
+    fixed-width biallelic diploid GT, it returns ``None`` and the general parser
+    handles the file. Large files are processed in marker batches.
+    """
+    individual_ids = None
+    sample_blobs = []
+    batch_marker_ids = []
+    batch_chrom_values = []
+    batch_pos_values = []
+    batch_ref_values = []
+    batch_alt_values = []
+    marker_ids = []
+    chrom_values = []
+    pos_values = []
+    ref_values = []
+    alt_values = []
+    n_samples = 0
+    expected_len = 0
+    writer = None
+    total_n_missing = 0
+
+    def process_batch(blobs, batch_marker_ids, batch_chrom_values, batch_pos_values, batch_ref_values, batch_alt_values):
+        if not blobs:
+            return None
+        n_markers = len(blobs)
+        raw = np.frombuffer(b''.join(blobs), dtype=np.uint8)
+        try:
+            raw = raw.reshape(n_markers, expected_len)
+        except ValueError:
+            return False
+
+        need_counts = drop_monomorphic or min_maf > 0.0
+        if _decode_simple_gt_matrix_numba is not None:
+            if need_counts:
+                decoded = _decode_simple_gt_matrix_stats_numba(raw, n_markers, n_samples)
+                geno, missing_counts, counts_0, counts_1, counts_2, invalid = decoded
+            else:
+                geno, missing_counts, invalid = _decode_simple_gt_matrix_numba(raw, n_markers, n_samples)
+                counts_0 = counts_1 = counts_2 = None
+            if invalid:
+                return False
+        else:
+            if n_samples > 1 and not np.all(raw[:, 3::4] == 9):  # tab separators
+                return False
+            separators = raw[:, 1::4]
+            if not np.all((separators == 47) | (separators == 124)):  # '/' or '|'
+                return False
+
+            allele_a = raw[:, 0::4]
+            allele_b = raw[:, 2::4]
+            valid_a = (allele_a == 48) | (allele_a == 49) | (allele_a == 46)
+            valid_b = (allele_b == 48) | (allele_b == 49) | (allele_b == 46)
+            if not (np.all(valid_a) and np.all(valid_b)):
+                return False
+
+            geno_marker_major = (
+                (allele_a == 49).astype(np.int8)
+                + (allele_b == 49).astype(np.int8)
+            )
+            missing = (allele_a == 46) | (allele_b == 46)
+            if np.any(missing):
+                geno_marker_major[missing] = MISSING
+
+            if need_counts or np.any(missing):
+                counts_0 = np.sum(geno_marker_major == 0, axis=1)
+                counts_1 = np.sum(geno_marker_major == 1, axis=1)
+                counts_2 = np.sum(geno_marker_major == 2, axis=1)
+            else:
+                counts_0 = counts_1 = counts_2 = None
+            missing_counts = np.sum(missing, axis=1)
+
+            if int(np.sum(missing_counts)) > 0:
+                if counts_0 is None:
+                    counts_0 = np.sum(geno_marker_major == 0, axis=1)
+                    counts_1 = np.sum(geno_marker_major == 1, axis=1)
+                    counts_2 = np.sum(geno_marker_major == 2, axis=1)
+                major = np.argmax(np.stack([counts_0, counts_1, counts_2], axis=0), axis=0)
+                major = major.astype(np.int8, copy=False)
+                geno_marker_major[missing] = np.broadcast_to(
+                    major[:, np.newaxis],
+                    geno_marker_major.shape,
+                )[missing]
+
+            geno = np.array(geno_marker_major.T, dtype=np.int8, copy=True, order='C')
+
+        keep_rows = missing_counts != n_samples
+        if not include_indels:
+            is_snp = np.fromiter(
+                (len(ref) == 1 and len(alt) == 1 for ref, alt in zip(batch_ref_values, batch_alt_values)),
+                dtype=np.bool_,
+                count=n_markers,
+            )
+            keep_rows &= is_snp
+        if max_missing < 1.0:
+            keep_rows &= (missing_counts / float(n_samples)) <= max_missing
+        if drop_monomorphic:
+            monomorphic_ref_alt = (
+                ((counts_0 > 0) & (counts_1 == 0) & (counts_2 == 0))
+                | ((counts_2 > 0) & (counts_0 == 0) & (counts_1 == 0))
+            )
+            keep_rows &= ~monomorphic_ref_alt
+        if min_maf > 0.0:
+            n_valid = counts_0 + counts_1 + counts_2
+            sum_dosage = counts_1 + (2 * counts_2)
+            valid_alleles = 2 * n_valid
+            minor_count = np.minimum(sum_dosage, valid_alleles - sum_dosage)
+            maf = minor_count / float(2 * n_samples)
+            keep_rows &= maf >= min_maf
+
+        if not np.all(keep_rows):
+            geno = geno[:, keep_rows]
+            missing_counts = missing_counts[keep_rows]
+            kept = keep_rows.tolist()
+            kept_marker_ids = [value for value, keep in zip(batch_marker_ids, kept) if keep]
+            kept_chrom_values = [value for value, keep in zip(batch_chrom_values, kept) if keep]
+            kept_pos_values = [value for value, keep in zip(batch_pos_values, kept) if keep]
+            kept_ref_values = [value for value, keep in zip(batch_ref_values, kept) if keep]
+            kept_alt_values = [value for value, keep in zip(batch_alt_values, kept) if keep]
+        else:
+            kept_marker_ids = batch_marker_ids
+            kept_chrom_values = batch_chrom_values
+            kept_pos_values = batch_pos_values
+            kept_ref_values = batch_ref_values
+            kept_alt_values = batch_alt_values
+        return (
+            geno,
+            int(np.sum(missing_counts)),
+            kept_marker_ids,
+            kept_chrom_values,
+            kept_pos_values,
+            kept_ref_values,
+            kept_alt_values,
+        )
+
+    def clear_batch():
+        del sample_blobs[:]
+        del batch_marker_ids[:]
+        del batch_chrom_values[:]
+        del batch_pos_values[:]
+        del batch_ref_values[:]
+        del batch_alt_values[:]
+
+    def append_result(result):
+        nonlocal writer, total_n_missing
+        if result is None:
+            return True
+        if result is False:
+            return False
+        geno, n_missing, kept_marker_ids, kept_chrom_values, kept_pos_values, kept_ref_values, kept_alt_values = result
+        if geno.shape[1] > 0:
+            if writer is None:
+                writer = _DynamicInt8MatrixWriter(n_samples)
+            writer.append_block(geno)
+        total_n_missing += n_missing
+        marker_ids.extend(kept_marker_ids)
+        chrom_values.extend(kept_chrom_values)
+        pos_values.extend(kept_pos_values)
+        ref_values.extend(kept_ref_values)
+        alt_values.extend(kept_alt_values)
+        return True
+
+    completed = False
+    try:
+        with _open_binary(vcf_path) as fh:
+            for line in fh:
+                if not line:
+                    continue
+                if line.startswith(b'##'):
+                    continue
+                if line.startswith(b'#CHROM'):
+                    individual_ids = _parse_samples(line.decode())
+                    n_samples = len(individual_ids)
+                    if n_samples == 0:
+                        raise ValueError('VCF contains no sample columns')
+                    expected_len = n_samples * 4 - 1
+                    continue
+                if individual_ids is None:
+                    raise ValueError('VCF header not found before data lines')
+
+                if line.endswith(b'\n'):
+                    line = line[:-1]
+                if line.endswith(b'\r'):
+                    line = line[:-1]
+
+                parts = line.split(b'\t', 9)
+                if len(parts) != 10:
+                    return None
+                chrom_b, pos_b, vid_b, ref_b, alt, _qual_b, _filter_b, _info_b, fmt_b, sample_blob = parts
+                if fmt_b != b'GT':
+                    return None
+                if not alt or alt == b'.' or b',' in alt:
+                    return None
+                if len(sample_blob) != expected_len:
+                    return None
+
+                sample_blobs.append(sample_blob)
+                chrom = chrom_b.decode()
+                pos = int(pos_b)
+                ref = ref_b.decode()
+                alt_str = alt.decode()
+                vid = vid_b.decode()
+                marker_id = vid if vid and vid != '.' else "%s:%s:%s:%s" % (chrom, pos, ref, alt_str)
+                batch_marker_ids.append(marker_id)
+                batch_chrom_values.append(chrom)
+                batch_pos_values.append(pos)
+                batch_ref_values.append(ref)
+                batch_alt_values.append(alt_str)
+
+                if len(sample_blobs) >= _SIMPLE_BULK_BATCH_MARKERS:
+                    if not append_result(process_batch(
+                        sample_blobs,
+                        batch_marker_ids,
+                        batch_chrom_values,
+                        batch_pos_values,
+                        batch_ref_values,
+                        batch_alt_values,
+                    )):
+                        return None
+                    clear_batch()
+            completed = True
+    finally:
+        if not completed and writer is not None:
+            writer.discard()
+
+    if individual_ids is None:
+        raise ValueError('No header line found; invalid VCF')
+    if not sample_blobs:
+        if writer is None:
+            geno = np.zeros((n_samples, 0), dtype=np.int8)
+        else:
+            geno = writer.finalize()
+    else:
+        final_result = process_batch(
+            sample_blobs,
+            batch_marker_ids,
+            batch_chrom_values,
+            batch_pos_values,
+            batch_ref_values,
+            batch_alt_values,
+        )
+        if final_result is False:
+            if writer is not None:
+                writer.discard()
+            return None
+        if writer is None:
+            geno, n_missing, kept_marker_ids, kept_chrom_values, kept_pos_values, kept_ref_values, kept_alt_values = final_result
+            total_n_missing += n_missing
+            marker_ids.extend(kept_marker_ids)
+            chrom_values.extend(kept_chrom_values)
+            pos_values.extend(kept_pos_values)
+            ref_values.extend(kept_ref_values)
+            alt_values.extend(kept_alt_values)
+        else:
+            append_result(final_result)
+            geno = writer.finalize()
+
+    map_rows = {
+        MARKER_ID_COLUMN: marker_ids,
+        LEGACY_MARKER_ID_COLUMN: list(marker_ids),
+        CHROM_COLUMN: chrom_values,
+        POS_COLUMN: pos_values,
+        'REF': ref_values,
+        'ALT': alt_values,
+    }
+
+    completed = True
+    return geno, individual_ids, map_rows, total_n_missing
 
 
 def _parse_format_keys(fmt_str: str) -> Tuple[Tuple[str, ...], Dict[str, int]]:
@@ -342,7 +866,8 @@ def load_genotype_vcf(
       (missing calls treated as major allele for filtering)
     - force_recache: if True, ignore any existing cache and overwrite it
     - return_pandas: return geno_map as pandas.DataFrame if pandas is available
-    - backend: 'auto' (prefers cyvcf2 when installed), 'cyvcf2', or 'builtin'
+    - backend: 'auto' (uses the builtin parser for VCF text and cyvcf2 for BCF),
+      'cyvcf2', or 'builtin'
     - threads: cyvcf2/htslib worker threads. None uses min(4, cpu_count);
       0 uses all detected CPUs. Ignored by the builtin text parser.
     """
@@ -351,7 +876,8 @@ def load_genotype_vcf(
     import numpy as np
     import pandas as pd
 
-    # Backend selection: prefer cyvcf2 when available; require cyvcf2 for BCF.
+    # Backend selection: auto uses the builtin text parser for VCF so the
+    # simple-GT bulk path gets first shot. BCF is binary and requires cyvcf2.
     # --- CACHING LOGIC START ---
     # Cache version 2: pre-imputes missing values (-9) at cache time for faster downstream
     cache_base = str(vcf_path)
@@ -407,16 +933,16 @@ def load_genotype_vcf(
     is_bcf = vcf_lower.endswith('.bcf')
 
     if backend == 'auto':
-        try:
-            import cyvcf2  # type: ignore
-            use_cyvcf2 = True
-        except ImportError:
-            use_cyvcf2 = False
-            # Check if BCF (which strictly requires cyvcf2)
-            if is_bcf:
+        if is_bcf:
+            try:
+                import cyvcf2  # type: ignore
+                use_cyvcf2 = True
+            except ImportError:
                 raise ImportError(
                     'Loading .bcf requires cyvcf2. Install with "pip install cyvcf2" or convert to .vcf/.vcf.gz.'
                 )
+        else:
+            use_cyvcf2 = False
     elif backend == 'cyvcf2':
         try:
             import cyvcf2  # type: ignore
@@ -466,6 +992,8 @@ def load_genotype_vcf(
     # Initialize
     individual_ids = None
     writer = None  # lazy initialised streaming writer
+    direct_geno = None
+    direct_n_missing = None
     map_rows = []  # dict rows
 
     # Helper to finalize a candidate variant column with QC
@@ -680,183 +1208,251 @@ def load_genotype_vcf(
         if is_bcf:
             raise ImportError('Builtin VCF parser does not support .bcf. Please install cyvcf2 or use .vcf/.vcf.gz.')
         sanity_checked = False
-        fh = _open_text(vcf_path)
+        bulk_result = _try_load_simple_biallelic_gt_vcf_bulk(
+            vcf_path,
+            include_indels=include_indels,
+            drop_monomorphic=drop_monomorphic,
+            max_missing=max_missing,
+            min_maf=min_maf,
+        )
+        if bulk_result is not None:
+            direct_geno, individual_ids, map_rows, direct_n_missing = bulk_result
+            fh = None
+        else:
+            fh = _open_binary(vcf_path)
         try:
-            for line in fh:
-                if not line:
-                    continue
-                if line.startswith('##'):
-                    continue
-                if line.startswith('#CHROM'):
-                    individual_ids = _parse_samples(line)
-                    n = len(individual_ids)
-                    # Edge: no samples
-                    if n == 0:
-                        raise ValueError('VCF contains no sample columns')
-                    continue
-                # Data line
-                if individual_ids is None:
-                    raise ValueError('VCF header not found before data lines')
-                parts = line.rstrip('\n').split('\t')
-                if len(parts) < 8:
-                    continue  # malformed
-                chrom, pos_str, vid, ref, alt_str = parts[0], parts[1], parts[2], parts[3], parts[4]
-                pos = int(pos_str)
+            if fh is not None:
+                for raw_line in fh:
+                    if not raw_line:
+                        continue
+                    if raw_line.startswith(b'##'):
+                        continue
+                    if raw_line.startswith(b'#CHROM'):
+                        individual_ids = _parse_samples(raw_line.decode())
+                        n = len(individual_ids)
+                        # Edge: no samples
+                        if n == 0:
+                            raise ValueError('VCF contains no sample columns')
+                        continue
+                    if individual_ids is None:
+                        raise ValueError('VCF header not found before data lines')
 
-                # Determine ALT alleles
-                alt_alleles = alt_str.split(',') if alt_str and alt_str != '.' else []
-                if not alt_alleles:
-                    continue  # no ALT
-
-                fmt = parts[8] if len(parts) >= 9 else ''
-                sample_fields = parts[9:] if len(parts) >= 10 else []
-                fmt_keys, key_to_idx = _parse_format_keys(fmt)
-
-                gt_index = key_to_idx.get('GT')
-                ds_index = key_to_idx.get('DS')
-                gt_primary = gt_index == 0
-
-                ds_array: Optional[np.ndarray]
-                if ds_index is None:
-                    ds_array = None
-                else:
-                    ds_array = np.full(len(individual_ids), MISSING, dtype=np.int16)
-                    if ds_index == 0:
-                        for si, field in enumerate(sample_fields):
-                            token = field.partition(':')[0]
-                            if token:
-                                ds_array[si] = _ds_to_int(token)
-                    elif ds_index == 1 and gt_primary:
-                        for si, field in enumerate(sample_fields):
-                            head, sep, tail = field.partition(':')
-                            if sep:
-                                token, _, _ = tail.partition(':')
-                                if token:
-                                    ds_array[si] = _ds_to_int(token)
-                    else:
-                        for si, field in enumerate(sample_fields):
-                            toks = field.split(':')
-                            if ds_index < len(toks):
-                                token = toks[ds_index]
-                                if token:
-                                    ds_array[si] = _ds_to_int(token)
-
-                is_biallelic = len(alt_alleles) == 1
-
-                if gt_index is not None:
-                    if gt_primary:
-                        gt_values = [
-                            field.partition(':')[0] if field else '' for field in sample_fields
-                        ]
-                    else:
-                        gt_values = []
-                        for field in sample_fields:
-                            if not field:
-                                gt_values.append('')
+                    fast_record = _parse_simple_biallelic_gt_line(raw_line, len(individual_ids))
+                    if fast_record is not None:
+                        col, chrom, pos, vid, ref, alt_base = fast_record
+                        if include_indels or (len(ref) == 1 and len(alt_base) == 1):
+                            valid = col != MISSING
+                            if not np.any(valid):
                                 continue
-                            toks = field.split(':')
-                            gt_values.append(toks[gt_index] if gt_index < len(toks) else '')
-                else:
-                    gt_values = [''] * len(sample_fields)
-                gt_array = np.array(gt_values, dtype='<U8') if gt_values else np.empty(len(sample_fields), dtype='<U8')
+                            if max_missing < 1.0:
+                                miss_rate = 1.0 - (np.count_nonzero(valid) / float(col.size))
+                                if miss_rate > max_missing:
+                                    continue
+                            if drop_monomorphic:
+                                valid_col = col[valid]
+                                if np.all(valid_col == 0) or np.all(valid_col == 2):
+                                    continue
+                            if min_maf > 0.0:
+                                valid_col = col[valid]
+                                valid_alleles = 2 * valid_col.size
+                                sum_dos = int(np.sum(valid_col))
+                                minor_count = min(sum_dos, valid_alleles - sum_dos)
+                                maf = minor_count / float(2 * col.size)
+                                if maf < min_maf:
+                                    continue
+                            if writer is None:
+                                writer = _DynamicInt8MatrixWriter(len(individual_ids))
+                            writer.append(col)
+                            marker_id = _build_snp_id(chrom, pos, vid, ref, alt_base)
+                            map_rows.append({
+                                MARKER_ID_COLUMN: marker_id,
+                                LEGACY_MARKER_ID_COLUMN: marker_id,
+                                CHROM_COLUMN: str(chrom),
+                                POS_COLUMN: int(pos),
+                                'REF': ref,
+                                'ALT': alt_base,
+                            })
+                            continue
+                        consider_variant(col, chrom, pos, vid, ref, alt_base, 2)
+                        continue
 
-                split_tokens = _split_gt_tokens
+                    line = raw_line.decode()
+                    if not line:
+                        continue
+                    if line.startswith('##'):
+                        continue
+                    if line.startswith('#CHROM'):
+                        individual_ids = _parse_samples(line)
+                        n = len(individual_ids)
+                        # Edge: no samples
+                        if n == 0:
+                            raise ValueError('VCF contains no sample columns')
+                        continue
+                    # Data line
+                    if individual_ids is None:
+                        raise ValueError('VCF header not found before data lines')
+                    parts = line.rstrip('\n').split('\t')
+                    if len(parts) < 8:
+                        continue  # malformed
+                    chrom, pos_str, vid, ref, alt_str = parts[0], parts[1], parts[2], parts[3], parts[4]
+                    pos = int(pos_str)
 
-                # Helper: build column(s) for this site
-                def build_columns_for_alt(alt_index, alt_base):
-                    nonlocal sanity_checked
-                    col = np.full(len(individual_ids), MISSING, dtype=np.int16)
-                    missing_mask = np.ones(len(individual_ids), dtype=bool)
-                    variant_ploidy = 0
-                    if is_biallelic and gt_index is not None:
-                        if not sanity_checked:
-                            if len(alt_alleles) != 1:
-                                raise ValueError(
-                                    "Multi-allelic variants are not supported by the fast builtin loader. "
-                                    "Please switch to the cyvcf2 backend."
-                                )
-                            subset = gt_array[: min(10, gt_array.size)]
-                            if subset.size:
-                                subset = subset[(subset != '') & (np.char.find(subset, '.') == -1)]
+                    # Determine ALT alleles
+                    alt_alleles = alt_str.split(',') if alt_str and alt_str != '.' else []
+                    if not alt_alleles:
+                        continue  # no ALT
+
+                    fmt = parts[8] if len(parts) >= 9 else ''
+                    sample_fields = parts[9:] if len(parts) >= 10 else []
+                    fmt_keys, key_to_idx = _parse_format_keys(fmt)
+
+                    gt_index = key_to_idx.get('GT')
+                    ds_index = key_to_idx.get('DS')
+                    gt_primary = gt_index == 0
+
+                    ds_array: Optional[np.ndarray]
+                    if ds_index is None:
+                        ds_array = None
+                    else:
+                        ds_array = np.full(len(individual_ids), MISSING, dtype=np.int16)
+                        if ds_index == 0:
+                            for si, field in enumerate(sample_fields):
+                                token = field.partition(':')[0]
+                                if token:
+                                    ds_array[si] = _ds_to_int(token)
+                        elif ds_index == 1 and gt_primary:
+                            for si, field in enumerate(sample_fields):
+                                head, sep, tail = field.partition(':')
+                                if sep:
+                                    token, _, _ = tail.partition(':')
+                                    if token:
+                                        ds_array[si] = _ds_to_int(token)
+                        else:
+                            for si, field in enumerate(sample_fields):
+                                toks = field.split(':')
+                                if ds_index < len(toks):
+                                    token = toks[ds_index]
+                                    if token:
+                                        ds_array[si] = _ds_to_int(token)
+
+                    is_biallelic = len(alt_alleles) == 1
+
+                    if gt_index is not None:
+                        if gt_primary:
+                            gt_values = [
+                                field.partition(':')[0] if field else '' for field in sample_fields
+                            ]
+                        else:
+                            gt_values = []
+                            for field in sample_fields:
+                                if not field:
+                                    gt_values.append('')
+                                    continue
+                                toks = field.split(':')
+                                gt_values.append(toks[gt_index] if gt_index < len(toks) else '')
+                    else:
+                        gt_values = [''] * len(sample_fields)
+                    gt_array = np.array(gt_values, dtype='<U8') if gt_values else np.empty(len(sample_fields), dtype='<U8')
+
+                    split_tokens = _split_gt_tokens
+
+                    # Helper: build column(s) for this site
+                    def build_columns_for_alt(alt_index, alt_base):
+                        nonlocal sanity_checked
+                        col = np.full(len(individual_ids), MISSING, dtype=np.int16)
+                        missing_mask = np.ones(len(individual_ids), dtype=bool)
+                        variant_ploidy = 0
+                        if is_biallelic and gt_index is not None:
+                            if not sanity_checked:
+                                if len(alt_alleles) != 1:
+                                    raise ValueError(
+                                        "Multi-allelic variants are not supported by the fast builtin loader. "
+                                        "Please switch to the cyvcf2 backend."
+                                    )
+                                subset = gt_array[: min(10, gt_array.size)]
                                 if subset.size:
-                                    cleaned_subset = np.char.replace(np.char.replace(subset, '/', ''), '|', '')
-                                    if np.any(np.char.find(cleaned_subset, '2') != -1) or np.any(np.char.find(cleaned_subset, '3') != -1):
-                                        raise ValueError(
-                                            "Detected genotype allele codes greater than 1. "
-                                            "Polyploid genotypes require the cyvcf2 backend."
-                                        )
-                                    lengths = np.char.str_len(cleaned_subset)
-                                    if np.any(lengths > 2):
-                                        raise ValueError(
-                                            "Detected genotypes with ploidy greater than diploid. "
-                                            "Please use the cyvcf2 backend for polyploid datasets."
-                                        )
-                            sanity_checked = True
+                                    subset = subset[(subset != '') & (np.char.find(subset, '.') == -1)]
+                                    if subset.size:
+                                        cleaned_subset = np.char.replace(np.char.replace(subset, '/', ''), '|', '')
+                                        if np.any(np.char.find(cleaned_subset, '2') != -1) or np.any(np.char.find(cleaned_subset, '3') != -1):
+                                            raise ValueError(
+                                                "Detected genotype allele codes greater than 1. "
+                                                "Polyploid genotypes require the cyvcf2 backend."
+                                            )
+                                        lengths = np.char.str_len(cleaned_subset)
+                                        if np.any(lengths > 2):
+                                            raise ValueError(
+                                                "Detected genotypes with ploidy greater than diploid. "
+                                                "Please use the cyvcf2 backend for polyploid datasets."
+                                            )
+                                sanity_checked = True
 
-                        unique_gts = np.unique(gt_array)
-                        for gt_code in unique_gts:
-                            mask = gt_array == gt_code
-                            if not gt_code:
-                                if ds_array is not None:
+                            unique_gts = np.unique(gt_array)
+                            for gt_code in unique_gts:
+                                mask = gt_array == gt_code
+                                if not gt_code:
+                                    if ds_array is not None:
+                                        ds_mask = mask & (ds_array != MISSING)
+                                        if np.any(ds_mask):
+                                            col[ds_mask] = ds_array[ds_mask]
+                                            missing_mask[ds_mask] = False
+                                    continue
+                                dosage, ploidy = _decode_biallelic_gt(gt_code)
+                                if dosage != MISSING:
+                                    col[mask] = dosage
+                                    missing_mask[mask] = False
+                                    variant_ploidy = max(variant_ploidy, ploidy)
+                                elif ds_array is not None:
                                     ds_mask = mask & (ds_array != MISSING)
                                     if np.any(ds_mask):
                                         col[ds_mask] = ds_array[ds_mask]
                                         missing_mask[ds_mask] = False
-                                continue
-                            dosage, ploidy = _decode_biallelic_gt(gt_code)
-                            if dosage != MISSING:
-                                col[mask] = dosage
-                                missing_mask[mask] = False
-                                variant_ploidy = max(variant_ploidy, ploidy)
-                            elif ds_array is not None:
-                                ds_mask = mask & (ds_array != MISSING)
-                                if np.any(ds_mask):
-                                    col[ds_mask] = ds_array[ds_mask]
-                                    missing_mask[ds_mask] = False
-                    else:
-                        for si, gt in enumerate(gt_values):
-                            ds_val = ds_array[si] if ds_array is not None else MISSING
-                            gt_tokens = split_tokens(gt) if gt else None
-                            if gt_tokens is not None:
-                                dosage, ploidy = _code_dosage_split(gt_tokens, alt_index)
-                                if dosage != MISSING:
-                                    col[si] = dosage
-                                    variant_ploidy = max(variant_ploidy, ploidy)
-                                    missing_mask[si] = False
+                        else:
+                            for si, gt in enumerate(gt_values):
+                                ds_val = ds_array[si] if ds_array is not None else MISSING
+                                gt_tokens = split_tokens(gt) if gt else None
+                                if gt_tokens is not None:
+                                    dosage, ploidy = _code_dosage_split(gt_tokens, alt_index)
+                                    if dosage != MISSING:
+                                        col[si] = dosage
+                                        variant_ploidy = max(variant_ploidy, ploidy)
+                                        missing_mask[si] = False
+                                    elif ds_val != MISSING:
+                                        col[si] = ds_val
+                                        missing_mask[si] = False
                                 elif ds_val != MISSING:
                                     col[si] = ds_val
                                     missing_mask[si] = False
-                            elif ds_val != MISSING:
-                                col[si] = ds_val
-                                missing_mask[si] = False
-                    if ds_array is not None:
-                        ds_mask = missing_mask & (ds_array != MISSING)
-                        if np.any(ds_mask):
-                            col[ds_mask] = ds_array[ds_mask]
-                            missing_mask[ds_mask] = False
-                    return col, variant_ploidy
+                        if ds_array is not None:
+                            ds_mask = missing_mask & (ds_array != MISSING)
+                            if np.any(ds_mask):
+                                col[ds_mask] = ds_array[ds_mask]
+                                missing_mask[ds_mask] = False
+                        return col, variant_ploidy
 
-                if len(alt_alleles) == 1:
-                    col, ploidy = build_columns_for_alt(1, alt_alleles[0])
-                    if ploidy == 0:
-                        ploidy = 2
-                    consider_variant(col, chrom, pos, vid, ref, alt_alleles[0], ploidy)
-                else:
-                    if not split_multiallelic:
-                        # Skip multi-allelic sites entirely in non-split mode
-                        continue
-                    for ai, alt_base in enumerate(alt_alleles, start=1):
-                        col, ploidy = build_columns_for_alt(ai, alt_base)
+                    if len(alt_alleles) == 1:
+                        col, ploidy = build_columns_for_alt(1, alt_alleles[0])
                         if ploidy == 0:
                             ploidy = 2
-                        consider_variant(col, chrom, pos, vid, ref, alt_base, ploidy)
+                        consider_variant(col, chrom, pos, vid, ref, alt_alleles[0], ploidy)
+                    else:
+                        if not split_multiallelic:
+                            # Skip multi-allelic sites entirely in non-split mode
+                            continue
+                        for ai, alt_base in enumerate(alt_alleles, start=1):
+                            col, ploidy = build_columns_for_alt(ai, alt_base)
+                            if ploidy == 0:
+                                ploidy = 2
+                            consider_variant(col, chrom, pos, vid, ref, alt_base, ploidy)
         finally:
             try:
                 fh.close()
             except Exception:
                 pass
 
-    if writer is None:
+    if direct_geno is not None:
+        geno = direct_geno
+    elif writer is None:
         # No variants passed filters
         geno = np.zeros((len(individual_ids or []), 0), dtype=np.int8)
     else:
@@ -881,7 +1477,14 @@ def load_genotype_vcf(
         except Exception:
             geno_map = map_rows
     else:
-        geno_map = map_rows
+        if isinstance(map_rows, dict):
+            row_count = len(next(iter(map_rows.values()), []))
+            geno_map = [
+                {column: values[row_idx] for column, values in map_rows.items()}
+                for row_idx in range(row_count)
+            ]
+        else:
+            geno_map = map_rows
 
     # Integrity checks
     if individual_ids is None:
@@ -900,7 +1503,10 @@ def load_genotype_vcf(
     try:
         # Impute missing values (-9) before caching
         # This avoids repeated -9 checks in downstream kinship/MLM code
-        n_missing = impute_major_allele_inplace(geno, missing_value=MISSING)
+        if direct_n_missing is None:
+            n_missing = impute_major_allele_inplace(geno, missing_value=MISSING)
+        else:
+            n_missing = direct_n_missing
         if n_missing > 0:
             logger.info("[Cache] Imputed %s missing values (%.2f%%)", f"{n_missing:,}", 100*n_missing/geno.size)
         if hasattr(geno_map, "attrs"):
@@ -942,7 +1548,7 @@ def _main(argv):  # pragma: no cover
     p.add_argument('--force-recache', action='store_true', help='Rebuild and overwrite cache files')
     p.add_argument('--no-pandas', action='store_true', help='Return map as list instead of DataFrame')
     p.add_argument('--backend', choices=['auto','cyvcf2','builtin'], default='auto',
-                   help='Choose parsing backend (auto prefers cyvcf2 when installed; cyvcf2 required for BCF)')
+                   help='Choose parsing backend (auto uses builtin for VCF text; cyvcf2 required for BCF)')
     p.add_argument('--threads', type=int, default=None,
                    help='cyvcf2/htslib worker threads; 0 uses all detected CPUs')
     args = p.parse_args(argv)
