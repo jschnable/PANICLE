@@ -30,11 +30,12 @@ from .mlm import (
 )
 from .lrt import fit_markers_lrt_batch_prebuilt
 from ._validation import missing_values_error
-from ..utils.perf import available_cpu_count, numba_thread_limit
+from ..utils.perf import available_cpu_count, numba_thread_limit, scaled_thread_count
 
-# Minimum LRT candidate markers per thread before the parallel kernel is worth
-# its thread-launch overhead (small-job guard for _apply_lrt_refinement).
+# Minimum markers per thread before a parallel numba kernel is worth its
+# thread-launch overhead (small-job guard for the LRT refinement and Wald scan).
 _LRT_MARKERS_PER_THREAD = 128
+_WALD_MARKERS_PER_THREAD = 128
 
 # NOTE: LOCO MLM no longer uses joblib. Chromosomes run sequentially and
 # parallelism is marker-level inside PANICLE_MLM (numba prange pinned to the
@@ -131,10 +132,10 @@ def _run_wald_with_pretransformed_genotypes(
     n_batches = (n_markers + maxLine - 1) // maxLine
 
     # Sequential batches with the per-marker numba kernels pinned to the CPU
-    # budget (BLAS still parallelizes each cross-product matmul). Mirrors the
-    # PANICLE_MLM cleanup: no joblib-over-batches layer, so this does not nest
-    # with the all-core BLAS/numba work inside each batch.
-    with numba_thread_limit(cpu):
+    # budget (BLAS still parallelizes each cross-product matmul), scaled down for
+    # small marker counts. Mirrors the PANICLE_MLM cleanup: no joblib-over-batches
+    # layer, so this does not nest with the all-core BLAS/numba work per batch.
+    with numba_thread_limit(scaled_thread_count(cpu, n_markers, _WALD_MARKERS_PER_THREAD)):
         for batch_idx in range(n_batches):
             start_marker = batch_idx * maxLine
             end_marker = min(start_marker + maxLine, n_markers)
@@ -324,14 +325,9 @@ def _apply_lrt_refinement(
         return chunk_indices, chunk_p, chunk_beta, chunk_se
 
     # Pin the compiled LRT kernel to the caller's CPU budget (the kernel is
-    # parallel=True and would otherwise grab every core). Small-job guard: when
-    # there are few candidates to refine, thread launch overhead can exceed the
-    # benefit, so give each thread a meaningful slice of work (>= _LRT_MARKERS_
-    # PER_THREAD) and otherwise fall back toward single-threaded.
-    if cpu and cpu > 1:
-        effective_cpu = max(1, min(int(cpu), n_candidates // _LRT_MARKERS_PER_THREAD))
-    else:
-        effective_cpu = cpu
+    # parallel=True and would otherwise grab every core), scaled down for small
+    # candidate sets so thread launch overhead doesn't dominate.
+    effective_cpu = scaled_thread_count(cpu, n_candidates, _LRT_MARKERS_PER_THREAD)
     with numba_thread_limit(effective_cpu):
         chunk_results = [
             _refine_chunk(chunk_indices, null_model)

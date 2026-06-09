@@ -22,7 +22,16 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
-from ..utils.perf import warn_if_potential_single_thread_blas, available_cpu_count, numba_thread_limit
+from ..utils.perf import (
+    warn_if_potential_single_thread_blas,
+    available_cpu_count,
+    numba_thread_limit,
+    scaled_thread_count,
+)
+
+# Minimum markers per thread before the parallel numba kernels are worth their
+# thread-launch overhead (small-job guard for the marker-level Wald scan).
+_MLM_MARKERS_PER_THREAD = 128
 from ._validation import missing_values_error
 import warnings
 import time
@@ -583,7 +592,7 @@ def PANICLE_MLM(phe: np.ndarray,
     # to the CPU budget and drop the previous joblib-over-batches layer, which
     # nested with both (cpu workers x all-core BLAS x all-core numba ->
     # oversubscription). Sequential batches keep memory bounded by maxLine.
-    with numba_thread_limit(cpu):
+    with numba_thread_limit(scaled_thread_count(cpu, n_markers, _MLM_MARKERS_PER_THREAD)):
         for batch_idx in range(n_batches):
             start_marker = batch_idx * maxLine
             end_marker = min(start_marker + maxLine, n_markers)

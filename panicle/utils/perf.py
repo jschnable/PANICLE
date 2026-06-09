@@ -10,6 +10,19 @@ from typing import Iterable, Optional, Set
 _blas_warning_emitted = False
 
 
+def scaled_thread_count(cpu: Optional[int], n_items: int, items_per_thread: int) -> Optional[int]:
+    """Thread count for a marker-parallel kernel, scaled down for small jobs.
+
+    Returns ``cpu`` unchanged when it is None or <=1. Otherwise caps the count so
+    each thread gets at least ``items_per_thread`` items, so tiny workloads don't
+    pay thread-launch overhead that exceeds the benefit. Pair with
+    ``numba_thread_limit``.
+    """
+    if cpu is None or int(cpu) <= 1:
+        return cpu
+    return max(1, min(int(cpu), int(n_items) // max(1, int(items_per_thread))))
+
+
 @contextmanager
 def numba_thread_limit(cpu: Optional[int]):
     """Cap numba's parallel kernels to ``cpu`` threads for the duration.

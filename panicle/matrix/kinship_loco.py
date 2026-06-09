@@ -6,7 +6,6 @@ is not adopted.
 """
 
 from typing import Dict, List, Optional, Union, Tuple
-import os
 import numpy as np
 import warnings
 import pandas as pd
@@ -20,14 +19,9 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     group_marker_indices_by_labels,
 )
-from ..utils.perf import available_cpu_count
 
-# Check for joblib availability
-try:
-    from joblib import Parallel, delayed
-    HAS_JOBLIB = True
-except ImportError:
-    HAS_JOBLIB = False
+# LOCO kinship is computed sequentially (one chromosome at a time); chromosome
+# parallelism was removed as it oversubscribed cores against BLAS and was slower.
 
 
 def _extract_chromosomes(map_data: Union[GenotypeMap, pd.DataFrame, np.ndarray, List],
@@ -196,46 +190,6 @@ class LocoKinship:
         return eigen
 
 
-def _compute_chrom_kinship(chrom: str,
-                           indices: np.ndarray,
-                           genotype: Union[GenotypeMatrix, np.ndarray],
-                           n_individuals: int,
-                           is_imputed: bool) -> Tuple[str, np.ndarray, np.ndarray]:
-    """Compute kinship contribution for a single chromosome.
-
-    This function is designed to be called in parallel.
-    Uses float32 for faster matmul operations.
-
-    Returns:
-        Tuple of (chrom, raw_kinship, diag) as float32 arrays
-    """
-    # Get genotype data for this chromosome (float32 for faster matmul)
-    Z = _get_genotype_columns(genotype, indices, dtype=np.float32)
-
-    if is_imputed:
-        means = np.mean(Z, axis=0)
-    else:
-        # Convert -9 to NaN so nanmean excludes them from mean calculation.
-        missing_mask = (Z == -9) | np.isnan(Z)
-        if missing_mask.any():
-            Z[missing_mask] = np.nan
-        means = np.nanmean(Z, axis=0)
-        means[np.isnan(means)] = 0.0
-    Z -= means[np.newaxis, :]
-
-    # Replace missing values with 0 (centered mean) for kinship calculation.
-    if not is_imputed and not np.all(np.isfinite(Z)):
-        Z[~np.isfinite(Z)] = 0.0
-
-    # Compute raw kinship contribution
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        raw = Z @ Z.T
-    diag = np.sum(Z * Z, axis=1)
-
-    return chrom, raw, diag
-
-
 def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
                         map_data: Union[GenotypeMap, pd.DataFrame, np.ndarray, List],
                         maxLine: int = 5000,
@@ -274,125 +228,76 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
         print(f"Calculating LOCO kinship for {n_individuals} individuals, {n_markers} markers")
         print(f"Chromosomes: {n_chroms}")
 
-    # Handle cpu=0 to mean use all available cores (affinity-aware)
-    if cpu == 0:
-        cpu = available_cpu_count()
+    # LOCO kinship is computed sequentially, one chromosome at a time. Each
+    # chromosome's contribution is a large BLAS matmul that already uses the BLAS
+    # thread pool, so chromosome-level threading was removed: it oversubscribed
+    # cores (joblib workers x all-core BLAS) and benchmarked slower than
+    # sequential on real datasets (170k-4.2M markers). `cpu` is accepted for API
+    # compatibility but no longer affects this computation.
+    raw_by_chrom = {}
+    diag_by_chrom = {}
 
-    # Determine if we should use parallel processing.
-    # Empirical runs on real sorghum datasets (170k to 4.2M markers) showed
-    # threading is typically slower for LOCO kinship due memory-bandwidth limits.
-    # Keep a high default threshold and expose an explicit override.
-    n_workers = min(cpu, n_chroms)
-    force_parallel = os.getenv("PANICLE_FORCE_LOCO_KINSHIP_PARALLEL", "").lower() in {
-        "1", "true", "yes", "on",
-    }
-    parallel_worthwhile = n_workers > 1 and n_markers >= 8_000_000 and n_chroms >= 3
-    if force_parallel:
-        parallel_worthwhile = n_workers > 1 and n_chroms >= 2
-    use_parallel = HAS_JOBLIB and parallel_worthwhile
+    # Process each chromosome separately
+    for chrom_idx, chrom in enumerate(chrom_order):
+        indices = chrom_groups[chrom]
+        n_chrom_markers = len(indices)
 
-    if use_parallel:
         if verbose:
-            suffix = " (forced by PANICLE_FORCE_LOCO_KINSHIP_PARALLEL)" if force_parallel else ""
-            print(f"Using parallel processing with {n_workers} workers{suffix}")
+            print(f"Processing chromosome {chrom} ({n_chrom_markers} markers)")
 
-        # Use threading to avoid expensive serialization of genotype arrays.
-        results = Parallel(
-            n_jobs=n_workers,
-            backend='threading',
-            pre_dispatch=n_workers,
-            batch_size=1,
-        )(
-            delayed(_compute_chrom_kinship)(chrom, indices, genotype_data, n_individuals, is_imputed)
-            for chrom, indices in chrom_groups.items()
-        )
+        # Initialize accumulator for this chromosome (float32 for faster matmul)
+        raw_chrom = np.zeros((n_individuals, n_individuals), dtype=np.float32)
+        diag_chrom = np.zeros(n_individuals, dtype=np.float32)
 
-        # Aggregate results (float32 for consistency)
-        raw_by_chrom = {}
-        diag_by_chrom = {}
-        raw_total = np.zeros((n_individuals, n_individuals), dtype=np.float32)
-        diag_total = np.zeros(n_individuals, dtype=np.float32)
+        # Process chromosome markers in batches
+        n_chrom_batches = (n_chrom_markers + maxLine - 1) // maxLine
+        for batch_idx in range(n_chrom_batches):
+            start_idx = batch_idx * maxLine
+            end_idx = min(start_idx + maxLine, n_chrom_markers)
+            batch_indices = indices[start_idx:end_idx]
 
-        for chrom, raw, diag in results:
-            raw_by_chrom[chrom] = (raw + raw.T) / 2.0  # Symmetrize
-            diag_by_chrom[chrom] = diag
-            raw_total += raw
-            diag_total += diag
+            # Get genotype data for this batch (float32 for faster matmul)
+            Z_batch = _get_genotype_columns(genotype_data, batch_indices, dtype=np.float32)
 
-        raw_total = (raw_total + raw_total.T) / 2.0
+            # Handle missing values only if data is not pre-imputed
+            if is_imputed:
+                # Data is pre-imputed, just use regular mean
+                means_batch = np.mean(Z_batch, axis=0)
+            else:
+                # Handle missing values: -9 sentinel and NaN
+                # Convert -9 to NaN so nanmean excludes them from mean calculation
+                missing_mask = (Z_batch == -9) | np.isnan(Z_batch)
+                if missing_mask.any():
+                    Z_batch[missing_mask] = np.nan
 
-    else:
-        # Sequential processing - optimized to process by chromosome
-        # This avoids redundant total matmul and per-batch chromosome splitting
-        if verbose and not HAS_JOBLIB and cpu > 1:
-            print("Note: joblib not available, using sequential processing")
-        elif verbose and cpu > 1 and not parallel_worthwhile:
-            print("Parallel overhead likely exceeds benefit for this workload; using sequential processing")
+                # Center by column means (nanmean excludes NaN/missing)
+                means_batch = np.nanmean(Z_batch, axis=0)
+                means_batch[np.isnan(means_batch)] = 0.0
 
-        raw_by_chrom = {}
-        diag_by_chrom = {}
+            Z_batch -= means_batch[np.newaxis, :]
 
-        # Process each chromosome separately
-        for chrom_idx, chrom in enumerate(chrom_order):
-            indices = chrom_groups[chrom]
-            n_chrom_markers = len(indices)
+            # Replace any remaining non-finite values with 0
+            if not is_imputed and not np.all(np.isfinite(Z_batch)):
+                Z_batch[~np.isfinite(Z_batch)] = 0.0
 
-            if verbose:
-                print(f"Processing chromosome {chrom} ({n_chrom_markers} markers)")
+            # Accumulate kinship contribution (guard against spurious BLAS FPE flags)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    raw_chrom += Z_batch @ Z_batch.T
+            diag_chrom += np.sum(Z_batch * Z_batch, axis=1)
 
-            # Initialize accumulator for this chromosome (float32 for faster matmul)
-            raw_chrom = np.zeros((n_individuals, n_individuals), dtype=np.float32)
-            diag_chrom = np.zeros(n_individuals, dtype=np.float32)
+        # Symmetrize and store (keep as float32, will convert for eigendecomp)
+        raw_by_chrom[chrom] = (raw_chrom + raw_chrom.T) / 2.0
+        diag_by_chrom[chrom] = diag_chrom
 
-            # Process chromosome markers in batches
-            n_chrom_batches = (n_chrom_markers + maxLine - 1) // maxLine
-            for batch_idx in range(n_chrom_batches):
-                start_idx = batch_idx * maxLine
-                end_idx = min(start_idx + maxLine, n_chrom_markers)
-                batch_indices = indices[start_idx:end_idx]
-
-                # Get genotype data for this batch (float32 for faster matmul)
-                Z_batch = _get_genotype_columns(genotype_data, batch_indices, dtype=np.float32)
-
-                # Handle missing values only if data is not pre-imputed
-                if is_imputed:
-                    # Data is pre-imputed, just use regular mean
-                    means_batch = np.mean(Z_batch, axis=0)
-                else:
-                    # Handle missing values: -9 sentinel and NaN
-                    # Convert -9 to NaN so nanmean excludes them from mean calculation
-                    missing_mask = (Z_batch == -9) | np.isnan(Z_batch)
-                    if missing_mask.any():
-                        Z_batch[missing_mask] = np.nan
-
-                    # Center by column means (nanmean excludes NaN/missing)
-                    means_batch = np.nanmean(Z_batch, axis=0)
-                    means_batch[np.isnan(means_batch)] = 0.0
-
-                Z_batch -= means_batch[np.newaxis, :]
-
-                # Replace any remaining non-finite values with 0
-                if not is_imputed and not np.all(np.isfinite(Z_batch)):
-                    Z_batch[~np.isfinite(Z_batch)] = 0.0
-
-                # Accumulate kinship contribution (guard against spurious BLAS FPE flags)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                        raw_chrom += Z_batch @ Z_batch.T
-                diag_chrom += np.sum(Z_batch * Z_batch, axis=1)
-
-            # Symmetrize and store (keep as float32, will convert for eigendecomp)
-            raw_by_chrom[chrom] = (raw_chrom + raw_chrom.T) / 2.0
-            diag_by_chrom[chrom] = diag_chrom
-
-        # Compute total from per-chromosome sums (avoids redundant computation)
-        # Keep as float32 for consistency; eigendecomp will convert to float64
-        raw_total = np.zeros((n_individuals, n_individuals), dtype=np.float32)
-        diag_total = np.zeros(n_individuals, dtype=np.float32)
-        for chrom in chrom_order:
-            raw_total += raw_by_chrom[chrom]
-            diag_total += diag_by_chrom[chrom]
+    # Compute total from per-chromosome sums (avoids redundant computation)
+    # Keep as float32 for consistency; eigendecomp will convert to float64
+    raw_total = np.zeros((n_individuals, n_individuals), dtype=np.float32)
+    diag_total = np.zeros(n_individuals, dtype=np.float32)
+    for chrom in chrom_order:
+        raw_total += raw_by_chrom[chrom]
+        diag_total += diag_by_chrom[chrom]
 
     return LocoKinship(
         total_raw=raw_total,
