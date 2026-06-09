@@ -35,6 +35,7 @@ from ..utils.data_types import (
     infer_marker_id_column,
 )
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
+from ..utils.perf import available_cpu_count
 from ..association.farmcpu_resampling import (
     PANICLE_FarmCPUResampling,
     FarmCPUResamplingResults,
@@ -86,7 +87,7 @@ def _resolve_method_cpu(ncpus: int, parallel_mode: str) -> int:
     if mode == "off":
         return 1
     if requested == 0:
-        return max(1, os.cpu_count() or 1)
+        return available_cpu_count()
     return max(1, requested)
 
 

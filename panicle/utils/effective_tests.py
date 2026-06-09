@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - optional dependency
     _NUMBA_AVAILABLE = False
 
 from .data_types import GenotypeMap, GenotypeMatrix
+from .perf import available_cpu_count
 
 
 class LDSparseMatrixProtocol:
@@ -999,7 +1000,7 @@ def estimate_effective_tests_from_genotype(
             if workers < 0:
                 raise ValueError("ncpus/cpu for effective tests must be >= 0")
             if workers == 0:
-                workers = max(1, os.cpu_count() or 1)
+                workers = available_cpu_count()
             if workers > 1:
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     return estimate_effective_tests(

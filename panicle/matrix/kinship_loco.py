@@ -20,6 +20,7 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     group_marker_indices_by_labels,
 )
+from ..utils.perf import available_cpu_count
 
 # Check for joblib availability
 try:
@@ -273,10 +274,9 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
         print(f"Calculating LOCO kinship for {n_individuals} individuals, {n_markers} markers")
         print(f"Chromosomes: {n_chroms}")
 
-    # Handle cpu=0 to mean use all available cores
+    # Handle cpu=0 to mean use all available cores (affinity-aware)
     if cpu == 0:
-        import multiprocessing
-        cpu = multiprocessing.cpu_count()
+        cpu = available_cpu_count()
 
     # Determine if we should use parallel processing.
     # Empirical runs on real sorghum datasets (170k to 4.2M markers) showed

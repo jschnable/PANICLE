@@ -91,7 +91,11 @@ def test_compute_fast_pvalues_handles_invalid_entries() -> None:
     assert pvals[2] == 1.0
 
 
-def test_mlm_loco_parallel_path_uses_stubbed_joblib(monkeypatch) -> None:
+def test_mlm_loco_multichrom_cpu_invariant() -> None:
+    # Chromosomes run sequentially; parallelism is marker-level inside
+    # PANICLE_MLM (pinned to `cpu`). Results must be invariant to the CPU
+    # budget, so cpu=1 and cpu=2 must produce identical output on a
+    # multi-chromosome map.
     rng = np.random.default_rng(2)
     geno = rng.integers(0, 3, size=(5, 4), dtype=np.int8)
     geno[1, 2] = -9  # trigger _subset_genotypes missing handling
@@ -107,33 +111,17 @@ def test_mlm_loco_parallel_path_uses_stubbed_joblib(monkeypatch) -> None:
     geno_matrix = GenotypeMatrix(geno)
     loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=2, verbose=False)
 
-    def fake_delayed(func):
-        def wrapper(*args, **kwargs):
-            return lambda: func(*args, **kwargs)
-        return wrapper
+    kwargs = dict(phe=phe, geno=geno_matrix, map_data=map_df,
+                  loco_kinship=loco, maxLine=2, verbose=False)
+    res1 = PANICLE_MLM_LOCO(cpu=1, **kwargs)
+    res2 = PANICLE_MLM_LOCO(cpu=2, **kwargs)
 
-    def fake_parallel(n_jobs=None, backend=None):
-        def runner(tasks):
-            return [task() for task in tasks]
-        return runner
-
-    monkeypatch.setattr(mlm_loco, "HAS_JOBLIB", True)
-    monkeypatch.setattr(mlm_loco, "Parallel", fake_parallel)
-    monkeypatch.setattr(mlm_loco, "delayed", fake_delayed)
-
-    res = PANICLE_MLM_LOCO(
-        phe=phe,
-        geno=geno_matrix,
-        map_data=map_df,
-        loco_kinship=loco,
-        cpu=2,
-        maxLine=2,
-        verbose=False,
-    )
-
-    assert res.effects.shape == (geno.shape[1],)
-    assert res.se.shape == (geno.shape[1],)
-    assert res.pvalues.shape == (geno.shape[1],)
+    assert res1.effects.shape == (geno.shape[1],)
+    assert res1.se.shape == (geno.shape[1],)
+    assert res1.pvalues.shape == (geno.shape[1],)
+    np.testing.assert_array_equal(res1.pvalues, res2.pvalues)
+    np.testing.assert_array_equal(res1.effects, res2.effects)
+    np.testing.assert_array_equal(res1.se, res2.se)
 
 
 def test_mlm_loco_lrt_refinement_uses_prebuilt_fast_path(monkeypatch) -> None:

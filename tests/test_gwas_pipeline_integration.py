@@ -85,7 +85,10 @@ def synthetic_data(tmp_path: Path):
 
 
 def test_resolve_method_cpu_modes(monkeypatch) -> None:
-    monkeypatch.setattr(gwas_module.os, "cpu_count", lambda: 6)
+    # ncpus=0 ("all cores") resolves via the affinity-aware helper, which
+    # respects cgroup/cpuset/scheduler allocations rather than the raw host
+    # core count.
+    monkeypatch.setattr(gwas_module, "available_cpu_count", lambda: 6)
 
     assert gwas_module._resolve_method_cpu(ncpus=0, parallel_mode="auto") == 6
     assert gwas_module._resolve_method_cpu(ncpus=3, parallel_mode="auto") == 3

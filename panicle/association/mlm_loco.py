@@ -30,16 +30,15 @@ from .mlm import (
 )
 from .lrt import fit_markers_lrt_batch_prebuilt
 from ._validation import missing_values_error
+from ..utils.perf import available_cpu_count, numba_thread_limit
 
-# Check for joblib availability
-try:
-    from joblib import Parallel, delayed
+# Minimum LRT candidate markers per thread before the parallel kernel is worth
+# its thread-launch overhead (small-job guard for _apply_lrt_refinement).
+_LRT_MARKERS_PER_THREAD = 128
 
-    HAS_JOBLIB = True
-except ImportError:
-    Parallel = None  # type: ignore[assignment,misc]
-    delayed = None  # type: ignore[assignment,misc]
-    HAS_JOBLIB = False
+# NOTE: LOCO MLM no longer uses joblib. Chromosomes run sequentially and
+# parallelism is marker-level inside PANICLE_MLM (numba prange pinned to the
+# CPU budget via numba_thread_limit).
 
 
 def _subset_genotypes(
@@ -131,41 +130,11 @@ def _run_wald_with_pretransformed_genotypes(
     p_values = np.ones(n_markers, dtype=np.float64)
     n_batches = (n_markers + maxLine - 1) // maxLine
 
-    if HAS_JOBLIB and cpu > 1:
-        def _iter_batch_data():
-            for batch_idx in range(n_batches):
-                start_marker = batch_idx * maxLine
-                end_marker = min(start_marker + maxLine, n_markers)
-                G_batch_f32 = np.ascontiguousarray(
-                    chrom_geno_eigen_f32[:, start_marker:end_marker],
-                    dtype=np.float32,
-                )
-                yield (
-                    G_batch_f32,
-                    weights_f32,
-                    XTW_f32,
-                    wy_f32,
-                    UXWUX_f64,
-                    UXWy_f64,
-                    vg_hat,
-                    start_marker,
-                )
-
-        batch_results = Parallel(
-            n_jobs=cpu,
-            backend="threading",
-            pre_dispatch=max(1, cpu),
-            batch_size=1,
-        )(
-            delayed(process_batch_parallel)(batch_data)
-            for batch_data in _iter_batch_data()
-        )
-        for start_marker, batch_effects, batch_se, batch_pvals in batch_results:
-            end_marker = min(start_marker + len(batch_effects), n_markers)
-            effects[start_marker:end_marker] = batch_effects
-            std_errors[start_marker:end_marker] = batch_se
-            p_values[start_marker:end_marker] = batch_pvals
-    else:
+    # Sequential batches with the per-marker numba kernels pinned to the CPU
+    # budget (BLAS still parallelizes each cross-product matmul). Mirrors the
+    # PANICLE_MLM cleanup: no joblib-over-batches layer, so this does not nest
+    # with the all-core BLAS/numba work inside each batch.
+    with numba_thread_limit(cpu):
         for batch_idx in range(n_batches):
             start_marker = batch_idx * maxLine
             end_marker = min(start_marker + maxLine, n_markers)
@@ -206,8 +175,13 @@ def _apply_lrt_refinement(
     lrt_batch_size: int,
     verbose: bool,
     trait_label: Optional[str] = None,
+    cpu: Optional[int] = None,
 ) -> None:
-    """Apply exact LRT refinement to top Wald hits in-place."""
+    """Apply exact LRT refinement to top Wald hits in-place.
+
+    ``cpu`` caps the compiled LRT kernel's thread count to the caller's resolved
+    CPU budget (already 0 -> all-cores expanded). None leaves numba's default.
+    """
     candidate_indices = np.where(p_values < screen_threshold)[0]
     n_candidates = len(candidate_indices)
 
@@ -349,10 +323,20 @@ def _apply_lrt_refinement(
         chunk_se[:] = batch_se
         return chunk_indices, chunk_p, chunk_beta, chunk_se
 
-    chunk_results = [
-        _refine_chunk(chunk_indices, null_model)
-        for chunk_indices, null_model in chunk_tasks
-    ]
+    # Pin the compiled LRT kernel to the caller's CPU budget (the kernel is
+    # parallel=True and would otherwise grab every core). Small-job guard: when
+    # there are few candidates to refine, thread launch overhead can exceed the
+    # benefit, so give each thread a meaningful slice of work (>= _LRT_MARKERS_
+    # PER_THREAD) and otherwise fall back toward single-threaded.
+    if cpu and cpu > 1:
+        effective_cpu = max(1, min(int(cpu), n_candidates // _LRT_MARKERS_PER_THREAD))
+    else:
+        effective_cpu = cpu
+    with numba_thread_limit(effective_cpu):
+        chunk_results = [
+            _refine_chunk(chunk_indices, null_model)
+            for chunk_indices, null_model in chunk_tasks
+        ]
 
     progress_step = max(10, lrt_batch_n)
     for chunk_indices, chunk_p, chunk_beta, chunk_se in chunk_results:
@@ -385,10 +369,12 @@ def _process_chromosome(
     CV: Optional[np.ndarray],
     vc_method: str,
     maxLine: int,
+    cpu: int = 1,
 ) -> Tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Process a single chromosome for LOCO MLM.
 
-    This function is designed to be called in parallel for each chromosome.
+    Chromosomes are run sequentially; ``cpu`` is the marker-level parallelism
+    budget handed to ``PANICLE_MLM`` for this chromosome's Wald scan.
 
     Returns:
         Tuple of (chrom, indices, effects, std_errors, pvalues)
@@ -405,7 +391,7 @@ def _process_chromosome(
         CV=CV,
         vc_method=vc_method,
         maxLine=maxLine,
-        cpu=1,  # Don't nest parallelism
+        cpu=cpu,  # marker-level parallelism (chromosomes run sequentially)
         verbose=False,
     )
 
@@ -499,67 +485,33 @@ def PANICLE_MLM_LOCO(
         print("=" * 60)
         print(f"Chromosomes: {n_chroms}")
 
-    # Handle cpu=0 to mean use all available cores
+    # Handle cpu=0 to mean use all available cores (affinity-aware)
     if cpu == 0:
-        import multiprocessing
+        cpu = available_cpu_count()
 
-        cpu = multiprocessing.cpu_count()
-
-    # Determine if we should use parallel processing.
-    # Small workloads usually run faster sequentially due scheduling overhead.
-    n_workers = min(cpu, n_chroms)
-    parallel_worthwhile = n_workers > 1 and n_markers >= 50_000 and n_chroms >= 3
-    use_parallel = HAS_JOBLIB and parallel_worthwhile
-
-    if use_parallel:
+    # Chromosomes are processed sequentially; parallelism happens at the
+    # marker level inside PANICLE_MLM (BLAS cross-products + numba prange,
+    # pinned to `cpu`). This avoids the previous chromosome-level joblib
+    # threading, which nested with the all-core BLAS/numba work inside each
+    # chromosome and oversubscribed cores.
+    for chrom, indices in chrom_items:
         if verbose:
-            print(f"Using parallel processing with {n_workers} workers")
+            print(f"Processing chromosome {chrom} ({indices.size} markers)")
 
-        # Threading avoids expensive process serialization for large genotype data.
-        results = Parallel(
-            n_jobs=n_workers,
-            backend="threading",
-            pre_dispatch=n_workers,
-            batch_size=1,
-        )(
-            delayed(_process_chromosome)(
-                chrom, indices, geno, phe, loco_kinship, CV, vc_method, maxLine
-            )
-            for chrom, indices in chrom_items
+        _, _, eff, se, pvals = _process_chromosome(
+            chrom=chrom,
+            indices=indices,
+            geno=geno,
+            phe=phe,
+            loco_kinship=loco_kinship,
+            CV=CV,
+            vc_method=vc_method,
+            maxLine=maxLine,
+            cpu=cpu,
         )
-
-        # Collect results
-        for chrom, indices, eff, se, pvals in results:
-            effects[indices] = eff
-            std_errors[indices] = se
-            p_values[indices] = pvals
-
-    else:
-        # Sequential processing (original behavior)
-        if verbose and not HAS_JOBLIB and cpu > 1:
-            print("Note: joblib not available, using sequential processing")
-        elif verbose and cpu > 1 and not parallel_worthwhile:
-            print(
-                "Parallel overhead likely exceeds benefit for this workload; using sequential processing"
-            )
-
-        for chrom, indices in chrom_items:
-            if verbose:
-                print(f"Processing chromosome {chrom} ({indices.size} markers)")
-
-            _, _, eff, se, pvals = _process_chromosome(
-                chrom=chrom,
-                indices=indices,
-                geno=geno,
-                phe=phe,
-                loco_kinship=loco_kinship,
-                CV=CV,
-                vc_method=vc_method,
-                maxLine=maxLine,
-            )
-            effects[indices] = eff
-            std_errors[indices] = se
-            p_values[indices] = pvals
+        effects[indices] = eff
+        std_errors[indices] = se
+        p_values[indices] = pvals
 
     if lrt_refinement:
         _apply_lrt_refinement(
@@ -577,6 +529,7 @@ def PANICLE_MLM_LOCO(
             lrt_batch_size=lrt_batch_size,
             verbose=verbose,
             trait_label=None,
+            cpu=cpu,
         )
 
     return AssociationResults(effects=effects, se=std_errors, pvalues=p_values)
@@ -772,6 +725,7 @@ def PANICLE_MLM_LOCO_MULTI(
                 lrt_batch_size=lrt_batch_size,
                 verbose=verbose,
                 trait_label=trait_name,
+                cpu=cpu,
             )
 
     return {

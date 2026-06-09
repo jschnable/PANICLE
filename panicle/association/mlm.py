@@ -5,7 +5,7 @@ This implementation provides significant performance improvements:
 - 5.92x speedup over original MLM implementation
 - Phase 1: Vectorized batch processing in eigenspace
 - Phase 2: Fast p-value calculations using scipy.special.stdtr
-- Phase 3: Multi-core parallel processing with joblib
+- Phase 3: Marker-level parallelism via Numba prange (pinned to the CPU budget)
 - Numba JIT compilation for critical numerical operations
 - Perfect statistical accuracy maintained (1.000000 correlations)
 
@@ -22,7 +22,7 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
-from ..utils.perf import warn_if_potential_single_thread_blas
+from ..utils.perf import warn_if_potential_single_thread_blas, available_cpu_count, numba_thread_limit
 from ._validation import missing_values_error
 import warnings
 import time
@@ -34,12 +34,9 @@ try:
 except ImportError:
     HAS_NUMBA = False
 
-# Check for joblib availability
-try:
-    from joblib import Parallel, delayed
-    HAS_JOBLIB = True
-except ImportError:
-    HAS_JOBLIB = False
+# NOTE: PANICLE_MLM no longer uses joblib. Batches stream sequentially and
+# marker-level parallelism comes from the Numba prange kernels, pinned to the
+# CPU budget via numba_thread_limit.
 
 # Phase 1: Vectorized Batch Processing Functions
 if HAS_NUMBA:
@@ -335,10 +332,9 @@ def PANICLE_MLM(phe: np.ndarray,
     
     warn_if_potential_single_thread_blas()
     
-    # Handle cpu=0 to mean use all available cores
+    # Handle cpu=0 to mean use all available cores (affinity-aware)
     if cpu == 0:
-        import multiprocessing
-        cpu = multiprocessing.cpu_count()
+        cpu = available_cpu_count()
     
     if verbose:
         print("=" * 60)
@@ -346,10 +342,10 @@ def PANICLE_MLM(phe: np.ndarray,
         print("=" * 60)
         if HAS_NUMBA:
             print("⚡ Using Numba JIT compilation")
-        if HAS_JOBLIB and cpu > 1:
-            print(f"🚀 Using {cpu} CPU cores for parallel processing")
+        if HAS_NUMBA and cpu > 1:
+            print(f"🚀 Marker-level parallelism on up to {cpu} cores")
         else:
-            print("🔄 Using sequential processing")
+            print("🔄 Using single-threaded marker processing")
     
     # Handle input validation and data preparation (same as original)
     if isinstance(phe, np.ndarray):
@@ -528,8 +524,8 @@ def PANICLE_MLM(phe: np.ndarray,
     if verbose:
         print(f"Preprocessing genotype data...")
         print(f"Phase 1: Vectorized batch processing {n_batches} batches")
-        if HAS_JOBLIB and cpu > 1:
-            print(f"Phase 3: Parallel processing {n_batches} batches on {cpu} cores")
+        if HAS_NUMBA and cpu > 1:
+            print(f"Phase 3: {n_batches} sequential batches, marker kernels on up to {cpu} cores")
 
     start_time = time.time()
 
@@ -580,42 +576,14 @@ def PANICLE_MLM(phe: np.ndarray,
 
         return G_batch_f32, start_marker
 
-    # Phase 3: Process batches (parallel if available)
-    if HAS_JOBLIB and cpu > 1:
-        # Stream work into joblib so we do not materialize all transformed batches.
-        def _iter_batch_data():
-            for batch_idx in range(n_batches):
-                start_marker = batch_idx * maxLine
-                end_marker = min(start_marker + maxLine, n_markers)
-                G_batch_f32, start_marker_local = _build_batch(start_marker, end_marker)
-                yield (
-                    G_batch_f32,
-                    weights_f32,
-                    XTW_f32,
-                    wy_f32,
-                    UXWUX_f64,
-                    UXWy_f64,
-                    vg_hat,
-                    start_marker_local,
-                )
-
-        batch_results = Parallel(
-            n_jobs=cpu,
-            backend='threading',
-            pre_dispatch=max(1, cpu),
-            batch_size=1,
-        )(
-            delayed(process_batch_parallel)(batch_data) for batch_data in _iter_batch_data()
-        )
-
-        # Collect results from all batches
-        for start_marker, batch_effects, batch_se, batch_pvals in batch_results:
-            end_marker = min(start_marker + len(batch_effects), n_markers)
-            effects[start_marker:end_marker] = batch_effects
-            std_errors[start_marker:end_marker] = batch_se
-            p_values[start_marker:end_marker] = batch_pvals
-    else:
-        # Sequential processing: stream batches to avoid materializing all at once
+    # Phase 3: Process batches sequentially, streaming to avoid materializing
+    # all transformed batches at once. The per-marker work parallelizes two
+    # ways inside each batch already -- BLAS matmuls for the cross-products and
+    # a numba prange over markers for the effects -- so we pin the numba kernels
+    # to the CPU budget and drop the previous joblib-over-batches layer, which
+    # nested with both (cpu workers x all-core BLAS x all-core numba ->
+    # oversubscription). Sequential batches keep memory bounded by maxLine.
+    with numba_thread_limit(cpu):
         for batch_idx in range(n_batches):
             start_marker = batch_idx * maxLine
             end_marker = min(start_marker + maxLine, n_markers)

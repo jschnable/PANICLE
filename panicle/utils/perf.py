@@ -4,9 +4,63 @@ Utilities for lightweight performance/environment checks.
 
 import os
 import warnings
+from contextlib import contextmanager
 from typing import Iterable, Optional, Set
 
 _blas_warning_emitted = False
+
+
+@contextmanager
+def numba_thread_limit(cpu: Optional[int]):
+    """Cap numba's parallel kernels to ``cpu`` threads for the duration.
+
+    numba's ``prange`` kernels otherwise use every core detected at import,
+    ignoring PANICLE's ``--ncpus`` budget. This pins the runtime thread count to
+    the caller's resolved CPU count (already 0 -> all-cores expanded upstream)
+    and restores the previous setting on exit. No-op when numba is absent or
+    ``cpu`` is None/<=0 (leave numba's default).
+    """
+    if cpu is None or int(cpu) <= 0:
+        yield
+        return
+    try:
+        import numba
+    except ImportError:
+        yield
+        return
+    try:
+        max_threads = int(numba.config.NUMBA_NUM_THREADS)
+        target = max(1, min(int(cpu), max_threads))
+        prev = numba.get_num_threads()
+        numba.set_num_threads(target)
+    except Exception:  # pragma: no cover - defensive; fall back to default
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            numba.set_num_threads(prev)
+        except Exception:  # pragma: no cover
+            pass
+
+
+def available_cpu_count() -> int:
+    """Number of CPUs this process may actually use.
+
+    Prefers the scheduler affinity mask (``os.sched_getaffinity``), which
+    respects cgroup/cpuset limits and HPC scheduler allocations (SLURM
+    ``--cpus-per-task``, etc.). Falls back to ``os.cpu_count()`` on platforms
+    without affinity support (macOS/Windows). Always returns at least 1.
+
+    Use this instead of ``os.cpu_count()`` / ``multiprocessing.cpu_count()``
+    when expanding a ``cpu=0`` ("all cores") request, so PANICLE never spins up
+    more threads than its allocation on a shared node.
+    """
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # pragma: no cover - non-Linux platforms
+        return max(1, os.cpu_count() or 1)
 
 
 def _normalise_tokens(values: Iterable[object]) -> Set[str]:

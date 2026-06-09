@@ -956,8 +956,8 @@ def load_genotype_vcf(
 
     # Determine thread count for cyvcf2/htslib. This mainly helps compressed
     # input decompression; variant decoding below still happens in this process.
-    import multiprocessing
-    cpu_count = multiprocessing.cpu_count()
+    from ..utils.perf import available_cpu_count
+    cpu_count = available_cpu_count()
     if threads is None:
         n_threads = min(4, cpu_count)
     else:

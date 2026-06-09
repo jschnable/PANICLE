@@ -9,6 +9,15 @@ from typing import Optional, Tuple
 
 from .mlm import _calculate_neg_ml_likelihood
 
+try:
+    import numba
+
+    HAS_NUMBA = True
+except ImportError:  # pragma: no cover - numba is a declared dependency
+    HAS_NUMBA = False
+
+from ..utils.perf import numba_thread_limit
+
 logger = logging.getLogger(__name__)
 
 _H2_MIN = 1e-3
@@ -1181,6 +1190,419 @@ def _optimize_alt_h2_from_bracket_prepared(
     return state_root
 
 
+if HAS_NUMBA:
+
+    @numba.njit(cache=True, fastmath=False)
+    def _gauss_solve(A, b):
+        """Solve A x = b for small symmetric A via Gaussian elimination with
+        partial pivoting. Returns (success, x). Avoids raising on singular
+        systems so the caller can flag those markers for exact fallback."""
+        p = A.shape[0]
+        M = A.copy()
+        x = b.copy()
+        for col in range(p):
+            # partial pivot
+            piv = col
+            best = abs(M[col, col])
+            for r in range(col + 1, p):
+                v = abs(M[r, col])
+                if v > best:
+                    best = v
+                    piv = r
+            if best < 1e-300:
+                return False, x
+            if piv != col:
+                for c in range(p):
+                    tmp = M[col, c]
+                    M[col, c] = M[piv, c]
+                    M[piv, c] = tmp
+                tmp = x[col]
+                x[col] = x[piv]
+                x[piv] = tmp
+            inv_p = 1.0 / M[col, col]
+            for r in range(col + 1, p):
+                f = M[r, col] * inv_p
+                if f != 0.0:
+                    for c in range(col, p):
+                        M[r, c] -= f * M[col, c]
+                    x[r] -= f * x[col]
+        # back-substitution
+        for col in range(p - 1, -1, -1):
+            s = x[col]
+            for c in range(col + 1, p):
+                s -= M[col, c] * x[c]
+            x[col] = s / M[col, col]
+        return True, x
+
+    @numba.njit(cache=True, fastmath=False)
+    def _lrt_eval(h2, y, Xa, eig, mdiag, n, want_state):
+        """Profile-ML evaluation at h2 for one marker's augmented design Xa.
+
+        Returns (ok, grad, negll, beta_marker, y_pxy, inv_b22). When
+        want_state is False only (ok, grad) are meaningful. Math mirrors
+        `_profile_ml_gradient_impl` / `_profile_ml_state_impl` exactly."""
+        nn = y.shape[0]
+        p = Xa.shape[1]
+        var = h2 * eig + (1.0 - h2)
+        inv = np.empty(nn)
+        sum_log = 0.0
+        for i in range(nn):
+            v = var[i]
+            if v <= 0.0 or not np.isfinite(v):
+                return False, 0.0, 0.0, 0.0, 0.0, 0.0
+            inv[i] = 1.0 / v
+            sum_log += np.log(v)
+        # A = Xa^T diag(inv) Xa ; rhs = Xa^T diag(inv) y
+        A = np.zeros((p, p))
+        rhs = np.zeros(p)
+        for a in range(p):
+            ra = 0.0
+            for b in range(a, p):
+                s = 0.0
+                for i in range(nn):
+                    s += Xa[i, a] * inv[i] * Xa[i, b]
+                A[a, b] = s
+                A[b, a] = s
+            for i in range(nn):
+                ra += Xa[i, a] * inv[i] * y[i]
+            rhs[a] = ra
+        ok, beta = _gauss_solve(A, rhs)
+        if not ok:
+            return False, 0.0, 0.0, 0.0, 0.0, 0.0
+        # pxy = inv*y - inv*(Xa @ beta) ; y_pxy = y . pxy
+        y_pxy = 0.0
+        trace = 0.0
+        a1 = 0.0
+        for i in range(nn):
+            fit = 0.0
+            for a in range(p):
+                fit += Xa[i, a] * beta[a]
+            pxy_i = inv[i] * (y[i] - fit)
+            y_pxy += y[i] * pxy_i
+            trace += mdiag[i] * inv[i]
+            a1 += mdiag[i] * pxy_i * pxy_i
+        if not np.isfinite(y_pxy) or y_pxy <= 0.0:
+            return False, 0.0, 0.0, 0.0, 0.0, 0.0
+        grad = 0.5 * trace - 0.5 * n * (a1 / y_pxy)
+        if not np.isfinite(grad):
+            return False, 0.0, 0.0, 0.0, 0.0, 0.0
+        if not want_state:
+            return True, grad, 0.0, 0.0, 0.0, 0.0
+        negll = 0.5 * (sum_log + n * np.log(y_pxy / n))
+        # inv_b22 = last diagonal entry of A^-1
+        e = np.zeros(p)
+        e[p - 1] = 1.0
+        ok2, z = _gauss_solve(A, e)
+        if (not ok2) or (not np.isfinite(negll)) or (not np.isfinite(z[p - 1])):
+            return False, grad, 0.0, 0.0, 0.0, 0.0
+        return True, grad, negll, beta[p - 1], y_pxy, z[p - 1]
+
+    @numba.njit(cache=True, parallel=True, fastmath=False)
+    def _solve_single_brackets_numba(
+        y, X, G, single_idx, eig, mdiag, n,
+        lam_l, lam_h, grad_l, grad_h, lambda_min, lambda_max,
+    ):
+        """Per-marker bracket root solve, JIT-compiled and parallel over markers.
+
+        Replaces the scalar scipy.brentq loop: for each single-bracket marker an
+        Illinois false-position iteration on the profile-ML derivative locates
+        the alternative-model h2, then the full state is evaluated there. All
+        arithmetic stays in compiled code, eliminating the Python/scipy/errstate
+        per-evaluation overhead that dominated the scalar path."""
+        k = single_idx.shape[0]
+        p0 = X.shape[1]
+        p = p0 + 1
+        nn = y.shape[0]
+        out_succ = np.zeros(k, dtype=np.bool_)
+        out_negll = np.zeros(k)
+        out_h2 = np.zeros(k)
+        out_beta = np.zeros(k)
+        out_ypxy = np.zeros(k)
+        out_invb22 = np.zeros(k)
+        tol = 1e-5
+        lambda_tol = 1e-4
+        max_iter = 100
+        for pos in numba.prange(k):
+            j = single_idx[pos]
+            Xa = np.empty((nn, p))
+            for i in range(nn):
+                for a in range(p0):
+                    Xa[i, a] = X[i, a]
+                Xa[i, p0] = G[i, j]
+
+            a = lam_l[pos]
+            b = lam_h[pos]
+            fa = grad_l[pos]
+            fb = grad_h[pos]
+            if (not np.isfinite(fa)) or (not np.isfinite(fb)) or (fa * fb > 0.0):
+                continue
+
+            lam_root = 0.5 * (a + b)
+            found = False
+            if abs(fa) <= tol:
+                lam_root = a
+                found = True
+            elif abs(fb) <= tol:
+                lam_root = b
+                found = True
+            if not found:
+                for _ in range(max_iter):
+                    width = b - a
+                    bound = lambda_tol
+                    sc = abs(a)
+                    if abs(b) > sc:
+                        sc = abs(b)
+                    if 1.0 > sc:
+                        sc = 1.0
+                    if width <= bound * sc:
+                        lam_root = 0.5 * (a + b)
+                        found = True
+                        break
+                    denom = fb - fa
+                    if np.isfinite(denom) and abs(denom) > 1e-18:
+                        c = (a * fb - b * fa) / denom
+                    else:
+                        c = 0.5 * (a + b)
+                    if (not np.isfinite(c)) or c <= a or c >= b:
+                        c = 0.5 * (a + b)
+                    h2c = c / (1.0 + c)
+                    ok, fc, _, _, _, _ = _lrt_eval(h2c, y, Xa, eig, mdiag, n, False)
+                    if not ok:
+                        c = 0.5 * (a + b)
+                        h2c = c / (1.0 + c)
+                        ok, fc, _, _, _, _ = _lrt_eval(h2c, y, Xa, eig, mdiag, n, False)
+                        if not ok:
+                            break
+                    if abs(fc) <= tol:
+                        lam_root = c
+                        found = True
+                        break
+                    if fa * fc < 0.0:
+                        b = c
+                        fb = fc
+                        fa *= 0.5
+                    else:
+                        a = c
+                        fa = fc
+                        fb *= 0.5
+                else:
+                    lam_root = 0.5 * (a + b)
+                    found = True
+
+            if not found:
+                continue
+            if lam_root < lambda_min:
+                lam_root = lambda_min
+            elif lam_root > lambda_max:
+                lam_root = lambda_max
+            h2r = lam_root / (1.0 + lam_root)
+            ok, _, negll, beta_m, ypxy, invb22 = _lrt_eval(
+                h2r, y, Xa, eig, mdiag, n, True)
+            if ok and np.isfinite(negll):
+                out_succ[pos] = True
+                out_negll[pos] = negll
+                out_h2[pos] = h2r
+                out_beta[pos] = beta_m
+                out_ypxy[pos] = ypxy
+                out_invb22[pos] = invb22
+        return out_succ, out_h2, out_negll, out_beta, out_ypxy, out_invb22
+
+    @numba.njit(cache=True, fastmath=False)
+    def _illinois_lambda_root(a, b, fa, fb, y, Xa, eig, mdiag, n,
+                              lambda_min, lambda_max):
+        """Illinois false-position root of the profile-ML derivative in lambda.
+
+        Returns (found, lam_root). Identical iteration to the scalar bracket
+        solver, but runs fully compiled."""
+        tol = 1e-5
+        lambda_tol = 1e-4
+        max_iter = 100
+        if (not np.isfinite(fa)) or (not np.isfinite(fb)) or (fa * fb > 0.0):
+            return False, 0.5 * (a + b)
+        if abs(fa) <= tol:
+            return True, a
+        if abs(fb) <= tol:
+            return True, b
+        lam_root = 0.5 * (a + b)
+        for _ in range(max_iter):
+            width = b - a
+            sc = abs(a)
+            if abs(b) > sc:
+                sc = abs(b)
+            if 1.0 > sc:
+                sc = 1.0
+            if width <= lambda_tol * sc:
+                return True, 0.5 * (a + b)
+            denom = fb - fa
+            if np.isfinite(denom) and abs(denom) > 1e-18:
+                c = (a * fb - b * fa) / denom
+            else:
+                c = 0.5 * (a + b)
+            if (not np.isfinite(c)) or c <= a or c >= b:
+                c = 0.5 * (a + b)
+            h2c = c / (1.0 + c)
+            ok, fc, _, _, _, _ = _lrt_eval(h2c, y, Xa, eig, mdiag, n, False)
+            if not ok:
+                c = 0.5 * (a + b)
+                h2c = c / (1.0 + c)
+                ok, fc, _, _, _, _ = _lrt_eval(h2c, y, Xa, eig, mdiag, n, False)
+                if not ok:
+                    return False, lam_root
+            if abs(fc) <= tol:
+                return True, c
+            if fa * fc < 0.0:
+                b = c
+                fb = fc
+                fa *= 0.5
+            else:
+                a = c
+                fa = fc
+                fb *= 0.5
+        return True, 0.5 * (a + b)
+
+    @numba.njit(cache=True, parallel=True, fastmath=False)
+    def _lrt_grid_solve_numba(
+        y, X, G, eig, mdiag, n, h2_edges, lambda_edges,
+        have_init, h2_init, lambda_init, lambda_min, lambda_max,
+    ):
+        """Full GEMMA-batch LRT core for one chunk, compiled and parallel.
+
+        For each marker this reproduces, entirely in compiled code, what the
+        NumPy Schur grid + Python bracket bookkeeping + scalar root solver did:
+          1. evaluate the profile-ML state at every h2 grid edge (and the null-h2
+             init point), tracking the best (lowest neg-loglik) state;
+          2. classify the marker's sign-change bracket using the exact same
+             order (init-split left then right, else a left-to-right region
+             scan taking the first bracket);
+          3. root-solve a single bracket and keep the better of root vs. grid.
+        Returns per-marker status (0 = resolved, 1 = send to exact fallback) and
+        the best-state arrays needed to emit p-value / beta / se."""
+        k = G.shape[1]
+        p0 = X.shape[1]
+        p = p0 + 1
+        nn = y.shape[0]
+        ne = h2_edges.shape[0]
+        status = np.ones(k, dtype=np.int8)  # default: fallback
+        bneg = np.full(k, np.inf)
+        bh2 = np.zeros(k)
+        bbeta = np.zeros(k)
+        bypxy = np.zeros(k)
+        binvb22 = np.zeros(k)
+        for pos in numba.prange(k):
+            Xa = np.empty((nn, p))
+            for i in range(nn):
+                for a in range(p0):
+                    Xa[i, a] = X[i, a]
+                Xa[i, p0] = G[i, pos]
+
+            grad_edge = np.empty(ne)
+            edge_ok = np.zeros(ne, dtype=np.bool_)
+            best_neg = np.inf
+            best_h2 = 0.0
+            best_beta = 0.0
+            best_ypxy = 0.0
+            best_invb22 = 0.0
+            bv = False
+            for e in range(ne):
+                ok, grad, negll, beta_m, ypxy, invb22 = _lrt_eval(
+                    h2_edges[e], y, Xa, eig, mdiag, n, True)
+                edge_ok[e] = ok and np.isfinite(grad)
+                grad_edge[e] = grad if edge_ok[e] else np.nan
+                if ok and np.isfinite(negll):
+                    if (not bv) or (negll < best_neg):
+                        bv = True
+                        best_neg = negll
+                        best_h2 = h2_edges[e]
+                        best_beta = beta_m
+                        best_ypxy = ypxy
+                        best_invb22 = invb22
+
+            g_init = np.nan
+            init_ok = False
+            if have_init:
+                ok, grad, negll, beta_m, ypxy, invb22 = _lrt_eval(
+                    h2_init, y, Xa, eig, mdiag, n, True)
+                init_ok = ok and np.isfinite(grad)
+                g_init = grad if init_ok else np.nan
+                if ok and np.isfinite(negll):
+                    if (not bv) or (negll < best_neg):
+                        bv = True
+                        best_neg = negll
+                        best_h2 = h2_init
+                        best_beta = beta_m
+                        best_ypxy = ypxy
+                        best_invb22 = invb22
+
+            grad_low = grad_edge[0]
+            low_ok = edge_ok[0]
+            grad_high = grad_edge[ne - 1]
+            high_ok = edge_ok[ne - 1]
+
+            count = 0
+            sel_ll = 0.0
+            sel_lh = 0.0
+            sel_gl = 0.0
+            sel_gh = 0.0
+            if have_init and init_ok:
+                if low_ok and (grad_low * g_init < 0.0):
+                    sel_ll = lambda_min
+                    sel_lh = lambda_init
+                    sel_gl = grad_low
+                    sel_gh = g_init
+                    count = 1
+                if high_ok and (g_init * grad_high < 0.0):
+                    if count == 0:
+                        sel_ll = lambda_init
+                        sel_lh = lambda_max
+                        sel_gl = g_init
+                        sel_gh = grad_high
+                    count += 1
+            if count == 0:
+                for i in range(ne - 1):
+                    if edge_ok[i] and edge_ok[i + 1] and (grad_edge[i] * grad_edge[i + 1] < 0.0):
+                        sel_ll = lambda_edges[i]
+                        sel_lh = lambda_edges[i + 1]
+                        sel_gl = grad_edge[i]
+                        sel_gh = grad_edge[i + 1]
+                        count = 1
+                        break
+
+            if count > 1 or (not bv):
+                status[pos] = 1
+                continue
+            if count == 1:
+                found, lamr = _illinois_lambda_root(
+                    sel_ll, sel_lh, sel_gl, sel_gh, y, Xa, eig, mdiag, n,
+                    lambda_min, lambda_max)
+                if not found:
+                    status[pos] = 1
+                    continue
+                if lamr < lambda_min:
+                    lamr = lambda_min
+                elif lamr > lambda_max:
+                    lamr = lambda_max
+                h2r = lamr / (1.0 + lamr)
+                ok, _, negll, beta_m, ypxy, invb22 = _lrt_eval(
+                    h2r, y, Xa, eig, mdiag, n, True)
+                if (not ok) or (not np.isfinite(negll)):
+                    status[pos] = 1
+                    continue
+                if negll < best_neg:
+                    best_neg = negll
+                    best_h2 = h2r
+                    best_beta = beta_m
+                    best_ypxy = ypxy
+                    best_invb22 = invb22
+            # count == 0 (boundary optimum) or resolved single bracket
+            status[pos] = 0
+            bneg[pos] = best_neg
+            bh2[pos] = best_h2
+            bbeta[pos] = best_beta
+            bypxy[pos] = best_ypxy
+            binvb22[pos] = best_invb22
+        return status, bneg, bh2, bbeta, bypxy, binvb22
+
+
 def fit_markers_lrt_batch_prebuilt(
     y_transformed: np.ndarray,
     X_transformed: np.ndarray,
@@ -1246,7 +1668,60 @@ def fit_markers_lrt_batch_prebuilt(
     lambda_min = _H2_MIN / (1.0 - _H2_MIN)
     lambda_max = _H2_MAX / (1.0 - _H2_MAX)
     tol = 1e-5
-    n_regions = 10
+    n_regions = 5
+
+    # Fully-compiled fast path: do the grid bracketing, root solve, and best
+    # state selection for the whole chunk inside a single parallel numba kernel,
+    # emitting only the exact per-marker fallback in Python. This removes both
+    # the NumPy Schur grid evaluations and the per-marker Python bookkeeping of
+    # the path below. The NumPy path remains as the (numba-less) fallback.
+    if HAS_NUMBA:
+        lambda_edges = np.geomspace(lambda_min, lambda_max, num=n_regions + 1)
+        h2_edges = lambda_edges / (1.0 + lambda_edges)
+        have_init = bool(null_h2 is not None and np.isfinite(null_h2))
+        if have_init:
+            h2_init = _clamp_h2(float(null_h2))
+            lambda_init = h2_init / max(1e-12, 1.0 - h2_init)
+        else:
+            h2_init = 0.5
+            lambda_init = 1.0
+        status, bneg, bh2, bbeta, bypxy, binvb22 = _lrt_grid_solve_numba(
+            y_local, X_local, G_local, eig_safe, m_diag, float(n_samples),
+            np.ascontiguousarray(h2_edges), np.ascontiguousarray(lambda_edges),
+            have_init, float(h2_init), float(lambda_init),
+            float(lambda_min), float(lambda_max),
+        )
+        needs_fallback = status != 0
+        valid_best = ~needs_fallback
+        if np.any(valid_best):
+            lrt_stat = 2.0 * (float(null_neg_loglik) - bneg[valid_best])
+            lrt_stat = np.maximum(np.where(np.isfinite(lrt_stat), lrt_stat, 0.0), 0.0)
+            p_values[valid_best] = stats.chi2.sf(lrt_stat, df=1)
+            betas[valid_best] = bbeta[valid_best]
+            df = max(1, n_samples - (X_local.shape[1] + 1))
+            v_base = bypxy[valid_best] / df
+            var_marker = v_base * binvb22[valid_best]
+            se_vals = np.sqrt(np.maximum(var_marker, 0.0))
+            finite = np.isfinite(se_vals) & np.isfinite(p_values[valid_best]) & np.isfinite(betas[valid_best])
+            std_errors[valid_best] = np.where(finite, se_vals, np.inf)
+            bad_emit_idx = np.where(valid_best)[0][~finite]
+            if bad_emit_idx.size:
+                needs_fallback[bad_emit_idx] = True
+        fallback_idx = np.where(needs_fallback)[0]
+        if fallback_idx.size:
+            X_alt = np.empty((X_local.shape[0], X_local.shape[1] + 1), dtype=np.float64)
+            X_alt[:, :-1] = X_local
+            for marker_idx in fallback_idx:
+                X_alt[:, -1] = G_local[:, marker_idx]
+                _, p_val, beta, se = fit_marker_lrt_prebuilt(
+                    y_local, X_alt, eig_safe, null_neg_loglik,
+                    null_h2=null_h2, solver_norm=solver_key, assume_sanitized=True,
+                )
+                p_values[marker_idx] = p_val
+                betas[marker_idx] = beta
+                std_errors[marker_idx] = se
+        return p_values, betas, std_errors
+
     # Shared Schur workspace across h2 evaluations avoids repeated large
     # temporary allocations for weighted genotype/covariate buffers.
     schur_scratch = _alloc_batch_schur_scratch(n_samples, X_local.shape[1], n_markers)
@@ -1370,9 +1845,52 @@ def fit_markers_lrt_batch_prebuilt(
 
     needs_fallback = bracket_count > 1
 
-    # Solve interior roots for markers with exactly one bracket.
+    # Solve interior roots for markers with exactly one bracket. These all
+    # share the same null-model context (y/X/eigenvals) and differ only by the
+    # marker column and their own h2 root. When numba is available the whole
+    # per-marker bracket solve runs in a compiled, parallel kernel; otherwise
+    # we fall back to the scalar scipy.brentq path.
     single_idx = np.where(bracket_count == 1)[0]
-    if single_idx.size:
+    if single_idx.size and HAS_NUMBA:
+        si = np.asarray(single_idx, dtype=np.int64)
+        succ, h2_arr, negll_arr, beta_arr, ypxy_arr, invb22_arr = (
+            _solve_single_brackets_numba(
+                y_local,
+                X_local,
+                G_local,
+                si,
+                eig_safe,
+                m_diag,
+                float(n_samples),
+                first_lam_l[si],
+                first_lam_h[si],
+                first_grad_l[si],
+                first_grad_h[si],
+                float(lambda_min),
+                float(lambda_max),
+            )
+        )
+        # Vectorized write-back: markers the kernel could not resolve go to the
+        # exact fallback; the rest update the best-state arrays only when the
+        # root improves on the seeded grid optimum (same rule as the scalar loop).
+        succ = np.asarray(succ, dtype=bool)
+        fail_idx = si[~succ]
+        if fail_idx.size:
+            needs_fallback[fail_idx] = True
+        ok_pos = np.where(succ)[0]
+        if ok_pos.size:
+            midx = si[ok_pos]
+            neg = negll_arr[ok_pos]
+            improve = (~best_valid[midx]) | (neg < best_neg[midx])
+            upd = midx[improve]
+            ip = ok_pos[improve]
+            best_valid[upd] = True
+            best_neg[upd] = neg[improve]
+            best_h2[upd] = h2_arr[ip]
+            best_beta[upd] = beta_arr[ip]
+            best_y_pxy[upd] = ypxy_arr[ip]
+            best_inv_b22[upd] = invb22_arr[ip]
+    elif single_idx.size:
         X_alt = np.empty((X_local.shape[0], X_local.shape[1] + 1), dtype=np.float64)
         X_alt[:, :-1] = X_local
         for marker_idx in single_idx:
