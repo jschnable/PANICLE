@@ -167,15 +167,43 @@ def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
     assert results_df['GLM_Effect'].dtype in [np.float64, np.float32, float]
 
 
-def test_gwas_pipeline_rejects_reordered_external_map(synthetic_data, tmp_path):
-    """A same-length map override must still match genotype marker order."""
-    bad_map_file = tmp_path / "bad_reordered_map.csv"
-    bad_map = pd.read_csv(synthetic_data['map_file']).iloc[::-1].reset_index(drop=True)
-    bad_map.to_csv(bad_map_file, index=False)
+def test_gwas_pipeline_accepts_renamed_external_map_as_positional(synthetic_data, tmp_path, capsys):
+    """A same-length map with different SNP names is a positional override (no raise, warns)."""
+    renamed_map_file = tmp_path / "renamed_map.csv"
+    renamed_map = pd.read_csv(synthetic_data['map_file'])
+    # Same length, same order, but differently named markers.
+    renamed_map['SNP'] = [f"marker_{i}" for i in range(len(renamed_map))]
+    renamed_map.to_csv(renamed_map_file, index=False)
 
-    pipeline = GWASPipeline(output_dir=str(tmp_path / "bad_map_results"))
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "renamed_map_results"))
 
-    with pytest.raises(ValueError, match="marker IDs/order"):
+    # Must not raise.
+    pipeline.load_data(
+        phenotype_file=str(synthetic_data['phenotype_file']),
+        genotype_file=str(synthetic_data['genotype_file']),
+        map_file=str(renamed_map_file),
+        trait_columns=['Height'],
+        genotype_format='csv',
+    )
+
+    # Positions applied by order from the supplied map.
+    assert pipeline.geno_map.n_markers == synthetic_data['n_markers']
+    assert list(pipeline.geno_map.marker_ids.astype(str))[0] == "marker_0"
+
+    # A warning about positional override was emitted.
+    captured = capsys.readouterr()
+    assert "positional override" in captured.out.lower()
+
+
+def test_gwas_pipeline_rejects_length_mismatched_external_map(synthetic_data, tmp_path):
+    """A map with a different number of markers is a genuine mismatch and must raise."""
+    bad_map_file = tmp_path / "short_map.csv"
+    short_map = pd.read_csv(synthetic_data['map_file']).iloc[:-5].reset_index(drop=True)
+    short_map.to_csv(bad_map_file, index=False)
+
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "short_map_results"))
+
+    with pytest.raises(ValueError, match="marker count"):
         pipeline.load_data(
             phenotype_file=str(synthetic_data['phenotype_file']),
             genotype_file=str(synthetic_data['genotype_file']),

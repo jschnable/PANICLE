@@ -624,10 +624,9 @@ def PANICLE_MLM_LOCO_MULTI(
             "recompute LOCO kinship after dropping missing phenotype rows."
         )
 
+    # Handle cpu=0 to mean use all available cores (affinity-aware)
     if cpu == 0:
-        import multiprocessing
-
-        cpu = multiprocessing.cpu_count()
+        cpu = available_cpu_count()
 
     X = _build_design_matrix(n_individuals, CV)
     effects_by_trait = {

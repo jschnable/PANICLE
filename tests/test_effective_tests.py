@@ -157,6 +157,54 @@ def test_trivial_effective_test_blocks_skip_eigendecomposition(monkeypatch) -> N
     assert len(two_result["block_stats"]) == 1
 
 
+def test_block_n_snps_is_pre_prune_count_in_all_paths() -> None:
+    """``n_snps`` reports the pre-prune block size regardless of code path.
+
+    A block of perfectly correlated SNPs collapses under redundancy pruning to a
+    single retained SNP, exercising the ``n_after_prune == 1`` shortcut path. The
+    reported per-block ``n_snps`` must still reflect the pre-prune block size,
+    matching the full-eigendecomposition path (which uses ``len(block_indices)``)
+    and the per-chromosome ``n_snps`` (the total SNP count).
+    """
+    # Three perfectly correlated SNPs in one tight window -> a single block that
+    # pruning collapses to one retained SNP (shortcut path). A fourth, well
+    # separated and uncorrelated SNP forms its own single-SNP block.
+    geno_array = np.array(
+        [
+            [0, 0, 0, 0],
+            [1, 1, 1, 1],
+            [0, 0, 0, 1],
+            [1, 1, 1, 0],
+            [0, 0, 0, 1],
+            [1, 1, 1, 0],
+        ],
+        dtype=np.int8,
+    )
+    genotype = GenotypeMatrix(geno_array)
+    map_df = pd.DataFrame(
+        {
+            "SNP": ["snp1", "snp2", "snp3", "snp4"],
+            "CHROM": ["1", "1", "1", "1"],
+            "POS": [100, 150, 200, 5_000_000],
+        }
+    )
+    geno_map = GenotypeMap(map_df)
+
+    result = estimate_effective_tests_from_genotype(genotype, geno_map)
+
+    chrom_info = result["per_chromosome"]["1"]
+    block_stats = chrom_info["block_stats"]
+
+    # Every SNP is accounted for once across blocks, using the pre-prune size.
+    assert sum(block["n_snps"] for block in block_stats) == chrom_info["n_snps"]
+    assert chrom_info["n_snps"] == 4
+
+    # The correlated trio forms a block reporting its full pre-prune size of 3,
+    # even though pruning collapsed it to a single retained SNP.
+    correlated_block = max(block_stats, key=lambda block: block["n_snps"])
+    assert correlated_block["n_snps"] == 3
+
+
 def test_run_gwas_cli_skips_global_kinship_for_loco_mlm() -> None:
     class PipelineWithMap:
         geno_map = object()

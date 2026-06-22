@@ -1200,6 +1200,20 @@ if HAS_NUMBA:
         p = A.shape[0]
         M = A.copy()
         x = b.copy()
+        # Relative pivot tolerance scaled by the matrix magnitude so that
+        # near-singular systems (e.g. a near-constant / very low-MAF marker
+        # column) are flagged as singular and routed to the exact fallback,
+        # matching `_solve_linear_system`'s ~1e-14 determinant guard. An
+        # absolute threshold would let tiny-but-nonzero pivots through and
+        # return large finite garbage beta / inv_b22.
+        scale = 0.0
+        for col in range(p):
+            d = abs(M[col, col])
+            if d > scale:
+                scale = d
+        pivot_tol = 1e-12 * scale
+        if pivot_tol < 1e-300:
+            pivot_tol = 1e-300
         for col in range(p):
             # partial pivot
             piv = col
@@ -1209,7 +1223,7 @@ if HAS_NUMBA:
                 if v > best:
                     best = v
                     piv = r
-            if best < 1e-300:
+            if best < pivot_tol:
                 return False, x
             if piv != col:
                 for c in range(p):

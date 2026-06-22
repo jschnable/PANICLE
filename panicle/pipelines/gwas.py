@@ -593,13 +593,16 @@ class GWASPipeline:
                 genotype_marker_ids = self.geno_map.marker_ids.astype(str).to_numpy()
                 supplied_marker_ids = supplied_map.marker_ids.astype(str).to_numpy()
                 if not np.array_equal(genotype_marker_ids, supplied_marker_ids):
+                    # Lengths already match (checked above); names differ. Treat the
+                    # supplied map as a positional override (legitimate for CSV/TSV
+                    # genotypes whose marker IDs come from column headers) and warn.
                     mismatch = np.flatnonzero(genotype_marker_ids != supplied_marker_ids)
                     first_idx = int(mismatch[0]) if mismatch.size else 0
-                    raise ValueError(
-                        "Map marker IDs/order do not match genotype markers "
-                        f"at position {first_idx}: genotype has "
-                        f"{genotype_marker_ids[first_idx]!r}, map has "
-                        f"{supplied_marker_ids[first_idx]!r}"
+                    self.log(
+                        "   Warning: Map marker IDs differ from genotype marker IDs "
+                        f"(e.g. position {first_idx}: genotype {genotype_marker_ids[first_idx]!r}, "
+                        f"map {supplied_marker_ids[first_idx]!r}). Lengths match; applying map "
+                        "positions by order (positional override)."
                     )
                 
                 self.geno_map = supplied_map
@@ -1286,7 +1289,7 @@ class GWASPipeline:
         n_excluded = int((~mask).sum())
         if n_excluded:
              excluded_ids = self.phenotype_df.loc[~mask, "ID"].astype(str).to_numpy()
-             shown = ", ".join(excluded_ids[:10])
+             shown = ", ".join(str(x) for x in excluded_ids[:10])
              if n_excluded > 10:
                   shown += f", ... and {n_excluded - 10} more"
              self.log(

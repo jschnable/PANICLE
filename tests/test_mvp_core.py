@@ -225,6 +225,40 @@ def test_panicle_excludes_missing_trait_values_per_trait(monkeypatch, tmp_path) 
     assert res["summary"]["trait_sample_sizes"]["Trait"] == 2
 
 
+def test_panicle_excluded_id_logging_handles_numeric_ids(monkeypatch, tmp_path, capsys) -> None:
+    """Numeric sample IDs must not crash the excluded-ID logging path (verbose=True)."""
+    geno_file = tmp_path / "geno_numeric.csv"
+    pd.DataFrame(
+        {
+            "ID": [1, 2, 3],
+            "m1": [0, 1, 2],
+            "m2": [2, 1, 0],
+        }
+    ).to_csv(geno_file, index=False)
+    geno_map = GenotypeMap(
+        pd.DataFrame({"SNP": ["m1", "m2"], "CHROM": [1, 1], "POS": [1, 2]})
+    )
+    phe_file = tmp_path / "phe_numeric.csv"
+    pd.DataFrame({"ID": [1, 2, 3], "Trait": [1.0, np.nan, 3.0]}).to_csv(phe_file, index=False)
+
+    dummy = DummyAssocResult(2, np.array([0.4, 0.5]))
+    monkeypatch.setattr(mvp, "PANICLE_GLM", lambda **kwargs: dummy)
+    monkeypatch.setattr(mvp, "PANICLE_Report", lambda **kwargs: {"files_created": []})
+
+    # Must not raise a TypeError from ", ".join on numeric IDs.
+    mvp.PANICLE(
+        phe=str(phe_file),
+        geno=str(geno_file),
+        map_data=geno_map,
+        method=["GLM"],
+        file_output=False,
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "Excluded sample IDs" in captured.out
+
+
 def test_panicle_computes_internal_pcs_and_appends_to_covariates(monkeypatch) -> None:
     phe, geno, geno_map = _basic_inputs(n=6, m=4)
     phenotype = pd.DataFrame({"ID": phe[:, 0], "Trait": phe[:, 1].astype(float)})

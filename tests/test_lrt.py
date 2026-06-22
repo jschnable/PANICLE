@@ -146,6 +146,50 @@ def test_fit_marker_lrt_gemma_stable_on_pathological_inputs() -> None:
     assert abs(beta_brent - beta_gemma) < 0.1
 
 
+def test_gauss_solve_flags_near_singular_design() -> None:
+    # Directly exercise the GEMMA Gaussian-elimination kernel on the augmented
+    # Gram matrix produced by a near-constant (effectively monomorphic, very
+    # low-MAF) marker. Such a system is near-singular: with the old absolute
+    # 1e-300 pivot threshold the elimination ran to completion and returned a
+    # huge finite garbage inv_b22 (~1e+13 -> SE ~1e+6) instead of being flagged
+    # singular. The relative pivot tolerance must now flag it (success=False)
+    # so the caller routes to the exact lstsq fallback, matching how an exactly
+    # singular system is handled.
+    from panicle.association.lrt import HAS_NUMBA, _gauss_solve
+
+    if not HAS_NUMBA:
+        import pytest
+
+        pytest.skip("Gaussian-elimination kernel only used on the Numba path")
+
+    n = 200
+    rng = np.random.default_rng(20260622)
+    x = rng.normal(size=n)
+    g = np.ones(n, dtype=np.float64)
+    g[0] = 1.0 + 1e-9  # near-constant marker column -> near-singular design
+    Xa = np.column_stack([np.ones(n), x, g]).astype(np.float64)
+    inv = np.ones(n, dtype=np.float64)
+    A = (Xa.T * inv) @ Xa  # Xa^T diag(inv) Xa, as built in _lrt_eval
+
+    # inv_b22 is the last diagonal entry of A^-1: solve A z = e_last.
+    e_last = np.zeros(3, dtype=np.float64)
+    e_last[-1] = 1.0
+    ok, z = _gauss_solve(A.copy(), e_last.copy())
+
+    # Must be flagged singular and routed to fallback, never returning the
+    # ~1e+13 finite garbage the absolute threshold produced.
+    assert ok is False or (np.isfinite(z[-1]) and abs(z[-1]) < 1e6)
+
+    # A well-conditioned design must still be solved (not over-flagged).
+    g_good = rng.integers(0, 3, size=n).astype(np.float64)
+    Xa_good = np.column_stack([np.ones(n), x, g_good]).astype(np.float64)
+    A_good = (Xa_good.T * inv) @ Xa_good
+    rhs = Xa_good.T @ (inv * rng.normal(size=n))
+    ok_good, beta = _gauss_solve(A_good.copy(), rhs.copy())
+    assert ok_good
+    np.testing.assert_allclose(beta, np.linalg.solve(A_good, rhs), rtol=1e-8, atol=1e-10)
+
+
 def test_fit_marker_lrt_auto_solver_uses_brent_for_small_n() -> None:
     rng = np.random.default_rng(99)
     n = 120

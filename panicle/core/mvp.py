@@ -355,7 +355,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 excluded = len(valid_mask) - n_valid
                 if verbose:
                     excluded_ids = trait_ids[~valid_mask]
-                    shown = ", ".join(excluded_ids[:10])
+                    shown = ", ".join(str(x) for x in excluded_ids[:10])
                     if excluded > 10:
                         shown += f", ... and {excluded - 10} more"
                     print(

@@ -274,6 +274,52 @@ def test_mlm_loco_multi_matches_single_trait_runs() -> None:
         )
 
 
+def test_mlm_loco_multi_cpu0_uses_affinity_aware_count(monkeypatch) -> None:
+    # cpu=0 ("all cores") must expand via the affinity/cgroup-aware helper, not
+    # multiprocessing.cpu_count(), so PANICLE never oversubscribes on a
+    # cgroup/SLURM-limited node.
+    rng = np.random.default_rng(202)
+    n, m = 14, 10
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+
+    trait1 = rng.normal(size=n)
+    trait2 = 0.2 * geno[:, 0].astype(np.float64) + rng.normal(scale=0.5, size=n)
+    phe_multi = np.column_stack([trait1, trait2]).astype(np.float64)
+
+    geno_matrix = GenotypeMatrix(geno)
+    loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=4, verbose=False)
+
+    calls = {"n": 0}
+
+    def fake_available_cpu_count() -> int:
+        calls["n"] += 1
+        return 1
+
+    monkeypatch.setattr(mlm_loco, "available_cpu_count", fake_available_cpu_count)
+
+    multi_results = PANICLE_MLM_LOCO_MULTI(
+        phe=phe_multi,
+        geno=geno_matrix,
+        map_data=map_df,
+        trait_names=["Trait1", "Trait2"],
+        loco_kinship=loco,
+        maxLine=4,
+        cpu=0,
+        lrt_refinement=False,
+        verbose=False,
+    )
+
+    assert calls["n"] >= 1, "cpu=0 MULTI path must expand via available_cpu_count()"
+    assert set(multi_results) == {"Trait1", "Trait2"}
+
+
 def test_glm_multi_matches_single_trait_runs() -> None:
     rng = np.random.default_rng(131)
     n, m, t = 24, 30, 3

@@ -708,9 +708,14 @@ def _process_chromosome(
     Me_total = 0.0
 
     for block_indices, block_stat in zip(blocks, stats):
-        if len(block_indices) == 1:
+        # n_snps reports the pre-prune block size, matching how BlockStat is
+        # constructed (n_snps=len(block_indices)) and ChromosomeResult.n_snps
+        # (=total_indices). Capture it before _prune_redundant_snps reassigns
+        # block_indices so every path stays consistent.
+        n_block_snps = len(block_indices)
+        if n_block_snps == 1:
             Me_total += 1.0
-            block_stat.n_snps = 1
+            block_stat.n_snps = n_block_snps
             block_stat.Me = 1.0
             continue
 
@@ -728,12 +733,12 @@ def _process_chromosome(
 
         n_after_prune = ld_matrix.shape[0]
         if n_after_prune == 0:
-            block_stat.n_snps = 0
+            block_stat.n_snps = n_block_snps
             block_stat.Me = 0.0
             continue
         if n_after_prune == 1:
             Me_total += 1.0
-            block_stat.n_snps = 1
+            block_stat.n_snps = n_block_snps
             block_stat.Me = 1.0
             continue
 
@@ -746,7 +751,7 @@ def _process_chromosome(
             if Me_block < 0:
                 Me_block = 0.0
             Me_total += Me_block
-            block_stat.n_snps = 2
+            block_stat.n_snps = n_block_snps
             block_stat.Me = Me_block
             continue
 
@@ -761,7 +766,7 @@ def _process_chromosome(
             Me_block = 0.0
 
         Me_total += Me_block
-        block_stat.n_snps = len(block_indices)
+        block_stat.n_snps = n_block_snps
         block_stat.Me = Me_block
 
     covered = sum(len(block) for block in blocks)
