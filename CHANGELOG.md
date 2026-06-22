@@ -5,6 +5,25 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-06-22
+
+### Changed
+- Faster LRT-based MLM: the per-marker likelihood-ratio refinement now runs through a dedicated Numba kernel (verified to reproduce the prior implementation to ~1e-15). CPU-budget parallelism is now affinity/cgroup-aware via `available_cpu_count()`, and small jobs are guarded against thread oversubscription.
+- Optimized builtin VCF parsing path (bulk/numba fast paths) for faster first-load; output encoding is unchanged.
+- `load_genotype_vcf(backend='auto')` uses the builtin text parser for `.vcf`/`.vcf.gz` and reserves cyvcf2 for `.bcf` (reverses the 0.3.3 note that `auto` preferred cyvcf2 for VCF text). Outputs are identical across paths.
+- Removed the LOCO-kinship per-chromosome threading in favor of the sequential batched path (performance only; results unchanged).
+- Tutorial notebooks moved from `docs/` to `examples/`; README opener reworked.
+
+### Fixed
+- A supplied `--map` whose marker IDs differ from the genotype's but match in count and order is now treated as a positional override (logged as a warning) instead of being rejected; a length mismatch still raises.
+- Near-singular (very low-MAF) designs in the LRT solver now route to the exact fallback via a relative pivot tolerance, instead of returning large finite (garbage) standard errors.
+- `PANICLE_MLM_LOCO_MULTI` now expands `cpu=0` via the affinity-aware `available_cpu_count()`, matching the other LOCO paths and avoiding oversubscription on cgroup/SLURM-limited nodes.
+- Excluded sample IDs are stringified before logging, so numeric IDs no longer raise a `TypeError` on the exclusion path.
+- Hardened marker-map alignment checks and guarded lazy genotype-subset storage access against reading the unsubsetted parent array.
+
+### Internal
+- `panicle.utils.effective_tests` now reports the pre-prune block size for `n_snps` consistently across the shortcut and eigendecomposition paths (`Me`/total counts were already correct).
+
 ## [0.3.4] - 2026-04-22
 
 ### Fixed
