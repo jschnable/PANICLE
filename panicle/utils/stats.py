@@ -59,18 +59,21 @@ def compute_mac_keep_indices(
     min_mac: int,
     *,
     max_dosage: float = 2.0,
+    missing_value: float = -9,
 ) -> Optional[np.ndarray]:
     """Return integer indices of markers whose minor allele count >= min_mac.
 
     Works on a GenotypeMatrix (preferred, uses zero-copy view) or numpy array.
-    Returns None when min_mac <= 0 (filter disabled). For a diploid 0/1/2 matrix
-    this is a single vectorized column-sum pass (~30 ms per 100k markers at
-    1000 individuals; see /tmp/bench_mac.py).
+    Returns None when min_mac <= 0 (filter disabled).
+
+    Missing genotypes (the sentinel *missing_value*, default ``-9``, and any
+    non-finite floating values) are excluded from both the allele sum and the
+    per-marker sample count.  Using the full cohort size while summing raw
+    ``-9`` entries would deflate MAC and drop markers incorrectly.
     """
     if min_mac is None or int(min_mac) <= 0:
         return None
     if hasattr(genotype, "n_individuals") and hasattr(genotype, "n_markers"):
-        n_ind = genotype.n_individuals
         n_mrk = genotype.n_markers
         if n_mrk == 0:
             return np.zeros(0, dtype=np.int64)
@@ -79,14 +82,28 @@ def compute_mac_keep_indices(
         arr = np.asarray(genotype)
         if arr.ndim != 2:
             raise ValueError("genotype must be 2D (n_individuals x n_markers)")
-        n_ind = arr.shape[0]
         n_mrk = arr.shape[1]
         if n_mrk == 0:
             return np.zeros(0, dtype=np.int64)
-    col_sums = arr.sum(axis=0, dtype=np.int64)
-    max_total = int(round(max_dosage * n_ind))
-    mac = np.minimum(col_sums, max_total - col_sums)
-    return np.flatnonzero(mac >= int(min_mac)).astype(np.int64, copy=False)
+
+    # Valid diploid dosages are non-negative (0/1/2, ...).  The package uses
+    # -9 as the missing sentinel; also drop non-finite floats if present.
+    if np.issubdtype(arr.dtype, np.floating):
+        valid = np.isfinite(arr) & (arr >= 0)
+    else:
+        valid = arr != missing_value
+        # Guard against other negative sentinels
+        valid &= arr >= 0
+
+    safe = np.where(valid, arr, 0)
+    col_sums = safe.sum(axis=0, dtype=np.float64)
+    n_valid = valid.sum(axis=0).astype(np.float64, copy=False)
+    max_total = float(max_dosage) * n_valid
+    # Markers with no valid calls have MAC 0.
+    with np.errstate(invalid="ignore"):
+        mac = np.minimum(col_sums, max_total - col_sums)
+    mac = np.where(n_valid > 0, mac, 0.0)
+    return np.flatnonzero(mac >= float(int(min_mac))).astype(np.int64, copy=False)
 
 
 def pad_association_results(

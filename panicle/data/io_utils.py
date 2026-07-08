@@ -2,13 +2,92 @@
 File I/O utilities for PANICLE package
 """
 
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
+
+import h5py
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Union, Tuple, Optional
-import h5py
 
 from ..utils.data_types import canonicalize_genotype_map_dataframe
+
+logger = logging.getLogger(__name__)
+
+# Sidecar written next to *.panicle.v2.geno.npy so cache hits only occur when
+# the requested QC/filter configuration matches what built the cache.
+GENOTYPE_CACHE_FILTERS_SUFFIX = ".panicle.v2.filters.json"
+
+
+def genotype_cache_filters_path(cache_base: Union[str, Path]) -> str:
+    """Return path of the filter-fingerprint sidecar for a genotype cache base."""
+    return str(cache_base) + GENOTYPE_CACHE_FILTERS_SUFFIX
+
+
+def normalize_cache_filters(filters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a JSON-stable, comparable filter fingerprint dict."""
+    out: Dict[str, Any] = {}
+    for key in sorted(filters.keys()):
+        val = filters[key]
+        if isinstance(val, (bool, np.bool_)):
+            out[key] = bool(val)
+        elif isinstance(val, (int, np.integer)) and not isinstance(val, (bool, np.bool_)):
+            out[key] = int(val)
+        elif isinstance(val, (float, np.floating)):
+            out[key] = float(val)
+        elif val is None:
+            out[key] = None
+        else:
+            out[key] = val
+    return out
+
+
+def save_genotype_cache_filters(
+    cache_base: Union[str, Path],
+    filters: Mapping[str, Any],
+) -> str:
+    """Write the filter fingerprint sidecar used for cache invalidation."""
+    path = genotype_cache_filters_path(cache_base)
+    payload = normalize_cache_filters(filters)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+    return path
+
+
+def load_genotype_cache_filters(
+    cache_base: Union[str, Path],
+) -> Optional[Dict[str, Any]]:
+    """Load a filter fingerprint sidecar, or None if missing/unreadable."""
+    path = genotype_cache_filters_path(cache_base)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None
+        return normalize_cache_filters(data)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def genotype_cache_filters_match(
+    cache_base: Union[str, Path],
+    filters: Mapping[str, Any],
+) -> bool:
+    """True only when a sidecar exists and exactly matches *filters*.
+
+    Legacy caches without a sidecar are treated as a mismatch so they are
+    rebuilt once under the requested filter configuration (safe default).
+    """
+    cached = load_genotype_cache_filters(cache_base)
+    if cached is None:
+        return False
+    return cached == normalize_cache_filters(filters)
+
 
 def read_phenotype(file_path: Union[str, Path]) -> pd.DataFrame:
     """Read phenotype file in rMVP format

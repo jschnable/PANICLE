@@ -99,6 +99,8 @@ PANICLE_FarmCPU_*/
 *.panicle.*.geno.npy
 *.panicle.ind.txt
 *.panicle.map.csv
+*.panicle.v2.filters.json
+*.panicle.v2.map.npz
 *.csv
 *.tsv
 *.txt

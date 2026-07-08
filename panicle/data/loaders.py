@@ -27,6 +27,10 @@ from ..utils.data_types import (
     load_genotype_map_cache,
     save_genotype_map_cache,
 )
+from .io_utils import (
+    genotype_cache_filters_match,
+    save_genotype_cache_filters,
+)
 from ..utils.memmap_utils import load_full_from_metadata
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
 try:
@@ -635,6 +639,17 @@ def load_genotype_file(filepath: Union[str, Path],
         min_maf = float(kwargs.get('min_maf', 0.0))
         max_missing = float(kwargs.get('max_missing', 1.0))
         drop_monomorphic = bool(kwargs.get('drop_monomorphic', False))
+        # Numeric CSV/TSV currently stores the full imputed matrix; filters are
+        # not applied at load time. Still fingerprint requested settings so a
+        # future filtering path (or mixed caches) cannot silently reuse the
+        # wrong marker set.
+        cache_filters = {
+            'cache_version': 2,
+            'drop_monomorphic': drop_monomorphic,
+            'format': 'numeric',
+            'max_missing': max_missing,
+            'min_maf': min_maf,
+        }
         geno_np = None
         individual_ids_csv: Optional[List[str]] = None
         geno_map_df = None
@@ -648,24 +663,22 @@ def load_genotype_file(filepath: Union[str, Path],
                     if (os.path.getmtime(cache_geno) > src_mtime and
                         os.path.getmtime(cache_ind) > src_mtime and
                         newest_map_cache > src_mtime):
-                        logger.info("[Cache] Loading binary cache for %s...", filepath)
-                        geno_np = np.load(cache_geno, mmap_mode='r')
-                        with open(cache_ind, 'r') as f:
-                            individual_ids_csv = [line.strip() for line in f]
-                        geno_map_df = load_genotype_map_cache(
-                            cache_map,
-                            legacy_csv_path=legacy_cache_map,
-                            migrate_legacy=True,
-                            legacy_is_imputed=True,
-                        )
-                        loaded_from_cache = True
-                        if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                            logger.warning(
-                                "[Cache] Cached genotype data loaded; "
-                                "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                                "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
-                                "Use --force-recache or delete the cache files to rebuild.",
-                                min_maf, max_missing, drop_monomorphic,
+                        if genotype_cache_filters_match(cache_base, cache_filters):
+                            logger.info("[Cache] Loading binary cache for %s...", filepath)
+                            geno_np = np.load(cache_geno, mmap_mode='r')
+                            with open(cache_ind, 'r') as f:
+                                individual_ids_csv = [line.strip() for line in f]
+                            geno_map_df = load_genotype_map_cache(
+                                cache_map,
+                                legacy_csv_path=legacy_cache_map,
+                                migrate_legacy=True,
+                                legacy_is_imputed=True,
+                            )
+                            loaded_from_cache = True
+                        else:
+                            logger.info(
+                                "[Cache] Filter fingerprint mismatch or missing for %s; rebuilding cache.",
+                                filepath,
                             )
         except Exception as e:
             logger.warning("[Cache] Failed to load cache: %s", e)
@@ -719,6 +732,7 @@ def load_genotype_file(filepath: Union[str, Path],
                     for ind in individual_ids_csv:
                         f.write(f"{ind}\n")
                 save_genotype_map_cache(cache_map, geno_map_df)
+                save_genotype_cache_filters(cache_base, cache_filters)
             except Exception as e:
                 logger.warning("[Cache] Failed to save cache: %s", e)
 

@@ -24,6 +24,10 @@ try:
     import numpy as np
 except Exception:
     raise ImportError("NumPy is required: pip install numpy")
+from panicle.data.io_utils import (
+    genotype_cache_filters_match,
+    save_genotype_cache_filters,
+)
 from panicle.utils.data_types import (
     CHROM_COLUMN,
     LEGACY_MARKER_ID_COLUMN,
@@ -142,6 +146,12 @@ def load_genotype_plink(
     cache_ind = cache_base + '.panicle.v2.ind.txt'
     cache_map = cache_base + '.panicle.v2.map.npz'
     legacy_cache_map = cache_base + '.panicle.v2.map.csv'
+    cache_filters = {
+        'cache_version': 2,
+        'drop_monomorphic': bool(drop_monomorphic),
+        'max_missing': float(max_missing),
+        'min_maf': float(min_maf),
+    }
 
     try:
         if not force_recache:
@@ -152,25 +162,22 @@ def load_genotype_plink(
                 if (os.path.getmtime(cache_geno) > newest_src and
                     os.path.getmtime(cache_ind) > newest_src and
                     newest_map_cache > newest_src):
-                    logger.info("[Cache] Loading binary cache for %s...", bed_path)
-                    if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                        logger.warning(
-                            "[Cache] Cached genotype data loaded; "
-                            "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                            "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
-                            "Use --force-recache or delete the cache files to rebuild.",
-                            min_maf, max_missing, drop_monomorphic,
+                    if genotype_cache_filters_match(cache_base, cache_filters):
+                        logger.info("[Cache] Loading binary cache for %s...", bed_path)
+                        geno_matrix = np.load(cache_geno, mmap_mode='r')
+                        with open(cache_ind, 'r') as f:
+                            individual_ids = [line.strip() for line in f]
+                        geno_map = load_genotype_map_cache(
+                            cache_map,
+                            legacy_csv_path=legacy_cache_map,
+                            migrate_legacy=True,
+                            legacy_is_imputed=True,
                         )
-                    geno_matrix = np.load(cache_geno, mmap_mode='r')
-                    with open(cache_ind, 'r') as f:
-                        individual_ids = [line.strip() for line in f]
-                    geno_map = load_genotype_map_cache(
-                        cache_map,
-                        legacy_csv_path=legacy_cache_map,
-                        migrate_legacy=True,
-                        legacy_is_imputed=True,
+                        return geno_matrix, individual_ids, geno_map
+                    logger.info(
+                        "[Cache] Filter fingerprint mismatch or missing for %s; rebuilding cache.",
+                        bed_path,
                     )
-                    return geno_matrix, individual_ids, geno_map
     except Exception as e:
         logger.warning("[Cache] Failed to load cache: %s", e)
 
@@ -257,6 +264,7 @@ def load_genotype_plink(
         if hasattr(map_df, "attrs"):
             map_df.attrs["is_imputed"] = True
         save_genotype_map_cache(cache_map, map_df)
+        save_genotype_cache_filters(cache_base, cache_filters)
     except Exception as e:
         logger.warning("[Cache] Failed to save cache: %s", e)
 

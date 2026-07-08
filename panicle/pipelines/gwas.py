@@ -151,8 +151,12 @@ def _run_single_method(
             return ('MLM', res, lambda_gc, lambda_gc_is_approx, None)
 
         elif method == 'FARMCPU':
-            # Pass alpha values (uncorrected) - FarmCPU applies multiple testing correction internally
-            fc_p = fc_params.get('p_threshold', alpha)  # Alpha level, e.g., 0.05
+            # Leave p_threshold as None unless the caller set it explicitly so
+            # PANICLE_FarmCPU can use its rMVP-style default early-stop
+            # (0.01 / n_tests) and keep QTN_threshold at the uncorrected 0.01
+            # default.  Defaulting to `alpha` (0.05) previously forced
+            # QTN_threshold = max(0.05, 0.01) and disabled the 0.01/n stop.
+            fc_p = fc_params.get('p_threshold', None)
             fc_qtn = fc_params.get('QTN_threshold', 0.01)  # Alpha for QTN selection, e.g., 0.01
             fc_bin = fc_params.get('bin_size')
             fc_method_bin = fc_params.get('method_bin', 'static')

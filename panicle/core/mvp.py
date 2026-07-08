@@ -28,7 +28,6 @@ from ..association.bayes_loco import PANICLE_BayesLOCO
 from ..association.farmcpu import PANICLE_FarmCPU
 from ..association.blink import PANICLE_BLINK
 from ..association.farmcpu_resampling import PANICLE_FarmCPUResampling
-from ..matrix.kinship import PANICLE_K_VanRaden
 from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from ..matrix.pca import PANICLE_PCA
 from ..visualization.manhattan import PANICLE_Report
@@ -62,7 +61,9 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             the trait value, a DataFrame, or a Phenotype object
         geno: Genotype data (file path, array, or GenotypeMatrix object)
         map_data: Genetic map data (file path, DataFrame, or GenotypeMap object)
-        K: Kinship matrix (optional, calculated if not provided for MLM/FarmCPU)
+        K: Kinship matrix (optional). MLM uses LOCO kinship when a genetic map
+            is available and does not consume a global ``K``. FarmCPU is
+            GLM-based with pseudo-QTNs and never uses kinship.
         CV: Covariate matrix (optional). If `n_pcs > 0`, computed PCs are appended
             after these columns.
         method: GWAS methods to run ["GLM", "MLM", "BAYESLOCO", "FarmCPU", "BLINK", "FarmCPUResampling"]
@@ -263,23 +264,10 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 print(f"PCA computation complete ({pca_time:.2f}s)")
                 print(f"  Added {pca_results.shape[1]} principal components as covariates")
 
-        if any(method_name in ["FarmCPU"] for method_name in method) and K is None:
-            if verbose:
-                print("\n[Phase 2] Computing kinship matrix...")
-            
-            kinship_start = time.time()
-            kinship_matrix = PANICLE_K_VanRaden(
-                genotype, 
-                maxLine=maxLine,
-                verbose=verbose
-            )
-            kinship_time = time.time() - kinship_start
-            analysis_results['summary']['runtime']['kinship'] = kinship_time
-            
-            if verbose:
-                print(f"Kinship matrix computation complete ({kinship_time:.2f}s)")
-        
-        elif K is not None:
+        # FarmCPU does not use kinship (pseudo-QTN GLM iterations). MLM builds
+        # LOCO kinship per trait when a map is present. Only retain a
+        # user-supplied global K for downstream inspection / legacy callers.
+        if K is not None:
             kinship_matrix = K
             if verbose:
                 print("\n[Phase 2] Using provided kinship matrix")

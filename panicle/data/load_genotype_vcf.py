@@ -40,6 +40,10 @@ except Exception:  # pragma: no cover - optional accelerator
     _NUMBA_AVAILABLE = False
     njit = None
     prange = range
+from panicle.data.io_utils import (
+    genotype_cache_filters_match,
+    save_genotype_cache_filters,
+)
 from panicle.utils.data_types import (
     CHROM_COLUMN,
     LEGACY_MARKER_ID_COLUMN,
@@ -879,14 +883,24 @@ def load_genotype_vcf(
     # Backend selection: auto uses the builtin text parser for VCF so the
     # simple-GT bulk path gets first shot. BCF is binary and requires cyvcf2.
     # --- CACHING LOGIC START ---
-    # Cache version 2: pre-imputes missing values (-9) at cache time for faster downstream
+    # Cache version 2: pre-imputes missing values (-9) at cache time for faster downstream.
+    # Filter fingerprint sidecar (*.panicle.v2.filters.json) invalidates the cache
+    # when QC parameters that change the marker set differ from the build config.
     cache_base = str(vcf_path)
     cache_geno = cache_base + '.panicle.v2.geno.npy'
     cache_ind = cache_base + '.panicle.v2.ind.txt'
     cache_map = cache_base + '.panicle.v2.map.npz'
     legacy_cache_map = cache_base + '.panicle.v2.map.csv'
+    cache_filters = {
+        'cache_version': 2,
+        'drop_monomorphic': bool(drop_monomorphic),
+        'include_indels': bool(include_indels),
+        'max_missing': float(max_missing),
+        'min_maf': float(min_maf),
+        'split_multiallelic': bool(split_multiallelic),
+    }
 
-    # Check if cache exists and is fresh
+    # Check if cache exists, is fresh, and matches requested filters
     try:
         if not force_recache:
             map_cache_paths = [path for path in (cache_map, legacy_cache_map) if os.path.exists(path)]
@@ -896,34 +910,30 @@ def load_genotype_vcf(
                 if (os.path.getmtime(cache_geno) > vcf_mtime and
                     os.path.getmtime(cache_ind) > vcf_mtime and
                     newest_map_cache > vcf_mtime):
+                    if genotype_cache_filters_match(cache_base, cache_filters):
+                        logger.info("[Cache] Loading binary cache for %s...", vcf_path)
 
-                    logger.info("[Cache] Loading binary cache for %s...", vcf_path)
-                    if min_maf > 0.0 or max_missing < 1.0 or drop_monomorphic:
-                        logger.warning(
-                            "[Cache] Cached genotype data loaded; "
-                            "min_maf/max_missing/drop_monomorphic filters are not re-applied "
-                            "(min_maf=%s, max_missing=%s, drop_monomorphic=%s). "
-                            "Use --force-recache or delete the cache files to rebuild.",
-                            min_maf, max_missing, drop_monomorphic,
+                        # Load Genotypes (memmap for speed/memory efficiency)
+                        geno_matrix = np.load(cache_geno, mmap_mode='r')
+
+                        # Load Individuals
+                        with open(cache_ind, 'r') as f:
+                            individual_ids = [line.strip() for line in f]
+
+                        # Load Map
+                        geno_map = load_genotype_map_cache(
+                            cache_map,
+                            legacy_csv_path=legacy_cache_map,
+                            migrate_legacy=True,
+                            legacy_is_imputed=True,
                         )
 
-                    # Load Genotypes (memmap for speed/memory efficiency)
-                    geno_matrix = np.load(cache_geno, mmap_mode='r')
-
-                    # Load Individuals
-                    with open(cache_ind, 'r') as f:
-                        individual_ids = [line.strip() for line in f]
-
-                    # Load Map
-                    geno_map = load_genotype_map_cache(
-                        cache_map,
-                        legacy_csv_path=legacy_cache_map,
-                        migrate_legacy=True,
-                        legacy_is_imputed=True,
+                        # If memmapped, we return it as is. GenotypeMatrix handles it.
+                        return geno_matrix, individual_ids, geno_map
+                    logger.info(
+                        "[Cache] Filter fingerprint mismatch or missing for %s; rebuilding cache.",
+                        vcf_path,
                     )
-
-                    # If memmapped, we return it as is. GenotypeMatrix handles it.
-                    return geno_matrix, individual_ids, geno_map
     except Exception as e:
         logger.warning("[Cache] Failed to load cache: %s", e)
     # --- CACHING LOGIC END ---
@@ -1528,6 +1538,7 @@ def load_genotype_vcf(
         if hasattr(map_df, "attrs"):
             map_df.attrs["is_imputed"] = True
         save_genotype_map_cache(cache_map, map_df)
+        save_genotype_cache_filters(cache_base, cache_filters)
 
     except Exception as e:
         logger.warning("[Cache] Failed to save cache: %s", e)

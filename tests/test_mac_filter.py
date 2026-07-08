@@ -64,6 +64,35 @@ def test_compute_mac_keep_indices_works_on_genotype_matrix() -> None:
     assert keep.tolist() == [1]
 
 
+def test_compute_mac_keep_indices_excludes_missing_sentinel() -> None:
+    """Missing genotype sentinel (-9) must not deflate allele counts."""
+    n_ind = 20
+    g = np.zeros((n_ind, 3), dtype=np.int8)
+    # Marker 0: ten hets among observed samples, rest missing → MAC = 10.
+    # If -9 were summed into the column total, MAC would be wrong and the
+    # marker would be dropped.
+    g[:, 0] = -9
+    g[:10, 0] = 1
+    # Marker 1: monomorphic ref with half missing — MAC should be 0.
+    g[10:, 1] = -9
+    # Marker 2: ten hets + five ref among 15 observed (5 missing) → MAC = 10.
+    g[:, 2] = -9
+    g[:10, 2] = 1
+    g[10:15, 2] = 0
+
+    keep = compute_mac_keep_indices(g, 10)
+    assert keep.tolist() == [0, 2]
+
+    # With min_mac=11, both borderline markers drop.
+    keep11 = compute_mac_keep_indices(g, 11)
+    assert keep11.tolist() == []
+
+    # Contrast: the pre-fix approach of summing raw values (including -9)
+    # would not keep marker 0 at min_mac=10.
+    raw_sum = int(g[:, 0].sum())
+    assert raw_sum != 10  # -9s deflate the sum
+
+
 def test_pad_association_results_noop_when_no_filter() -> None:
     res = AssociationResults(
         effects=np.array([0.1, 0.2, 0.3]),

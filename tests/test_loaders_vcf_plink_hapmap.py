@@ -78,6 +78,8 @@ def test_load_genotype_vcf_cyvcf2_stub(monkeypatch, tmp_path) -> None:
 
 
 def test_load_genotype_vcf_prefers_cache(tmp_path, monkeypatch) -> None:
+    import json
+
     vcf_path = tmp_path / "cacheme.vcf"
     vcf_path.write_text("", encoding="utf-8")
 
@@ -88,10 +90,25 @@ def test_load_genotype_vcf_prefers_cache(tmp_path, monkeypatch) -> None:
     ind_cache.write_text("S1\nS2\n", encoding="utf-8")
     map_cache = vcf_path.with_suffix(".vcf.panicle.v2.map.csv")
     pd.DataFrame({"SNP": ["rs1", "rs2"], "CHROM": ["1", "1"], "POS": [10, 20]}).to_csv(map_cache, index=False)
+    filters_cache = Path(str(vcf_path) + ".panicle.v2.filters.json")
+    filters_cache.write_text(
+        json.dumps(
+            {
+                "cache_version": 2,
+                "drop_monomorphic": False,
+                "include_indels": True,
+                "max_missing": 1.0,
+                "min_maf": 0.0,
+                "split_multiallelic": False,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
     # Ensure cache is strictly newer than VCF; equal mtimes should miss cache.
     newer = time.time() + 10
-    for f in (geno_cache, ind_cache, map_cache):
+    for f in (geno_cache, ind_cache, map_cache, filters_cache):
         f.touch()
         os.utime(f, (newer, newer))
 
@@ -100,6 +117,49 @@ def test_load_genotype_vcf_prefers_cache(tmp_path, monkeypatch) -> None:
     assert ids == ["S1", "S2"]
     np.testing.assert_array_equal(out_geno, geno)
     assert getattr(map_df, "attrs", {}).get("is_imputed") is True
+
+
+def test_load_genotype_vcf_cache_rebuilds_on_filter_mismatch(tmp_path) -> None:
+    """Changing QC filters must not silently reuse a stricter cache."""
+    import json
+
+    vcf_path = tmp_path / "filter_cache.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+        "1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\n"
+        "1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/0\t0/1\n",
+        encoding="utf-8",
+    )
+
+    # First load with min_maf=0.4 keeps only the common marker (rs1 MAF=0.5).
+    geno_strict, _, map_strict = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="builtin",
+        force_recache=True,
+        min_maf=0.4,
+        return_pandas=True,
+    )
+    assert geno_strict.shape[1] == 1
+    assert list(map_strict["SNP"]) == ["rs1"]
+
+    filters_path = Path(str(vcf_path) + ".panicle.v2.filters.json")
+    assert filters_path.exists()
+    strict_filters = json.loads(filters_path.read_text(encoding="utf-8"))
+    assert strict_filters["min_maf"] == 0.4
+
+    # Relaxed reload must rebuild rather than return the strict marker set.
+    geno_relaxed, _, map_relaxed = load_genotype_vcf.load_genotype_vcf(
+        vcf_path,
+        backend="builtin",
+        force_recache=False,
+        min_maf=0.0,
+        return_pandas=True,
+    )
+    assert geno_relaxed.shape[1] == 2
+    assert list(map_relaxed["SNP"]) == ["rs1", "rs2"]
+    relaxed_filters = json.loads(filters_path.read_text(encoding="utf-8"))
+    assert relaxed_filters["min_maf"] == 0.0
 
 
 def test_load_genotype_vcf_bcf_requires_cyvcf2(tmp_path, monkeypatch) -> None:
