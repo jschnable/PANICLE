@@ -137,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core: numpy, scipy, pandas, h5py, tables, statsmodels, scikit-learn, matplotlib, seaborn, tqdm, numba
 - Optional: cyvcf2 (VCF support), bed-reader (PLINK support)
 
-[0.1.0]: https://github.com/jschnable/PANICLE/releases/tag/v0.1.0
+[0.4.0]: https://github.com/jschnable/PANICLE/releases/tag/v0.4.0
+[0.3.5]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.5
+[0.3.4]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.4
+[0.3.3]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.3
 [0.3.2]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.2
 [0.3.1]: https://github.com/jschnable/PANICLE/releases/tag/v0.3.1
+[0.1.0]: https://github.com/jschnable/PANICLE/releases/tag/v0.1.0

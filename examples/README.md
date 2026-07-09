@@ -72,13 +72,13 @@ pipeline.run_analysis(traits=['Height'], methods=['GLM'])
 ```
 
 ### 02: MLM with Population Structure
-**What it does:** Uses kinship matrix and PCs to control for population structure
+**What it does:** Uses PCs plus default LOCO kinship (when a map is available) to control structure/relatedness
 **When to use:** Diverse populations, related individuals
 **Output:** Corrected association results with automatic LRT refinement for top hits
 
 ```python
-pipeline.compute_population_structure(n_pcs=5, calculate_kinship=True)
-pipeline.run_analysis(traits=['Height'], methods=['MLM'])
+pipeline.compute_population_structure(n_pcs=5, calculate_kinship=False)  # LOCO needs no global K
+pipeline.run_analysis(traits=['Height'], methods=['MLM'], mlm_mode='loco')
 ```
 
 ### 04: With Covariates
@@ -164,7 +164,7 @@ pipeline.run_analysis(
 - Verify first column in phenotype file is 'ID'
 
 ### "Kinship matrix missing"
-- Run `pipeline.compute_population_structure(calculate_kinship=True)` before MLM
+- Default LOCO MLM builds kinship during analysis when a map is present. For `mlm_mode='global'` or no map, use `compute_population_structure(calculate_kinship=True)` (or let `run_analysis` auto-compute global K).
 
 ### Very slow analysis
 - Start with GLM for quick results

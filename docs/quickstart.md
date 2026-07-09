@@ -49,16 +49,20 @@ pipeline.load_data(
 # 3. Align samples between phenotype and genotype data
 pipeline.align_samples()
 
-# 4. Compute population structure (PCs and optional kinship)
+# 4. Compute population structure (PCs; kinship only if needed)
+# Default MLM is LOCO when a map is available (VCF/PLINK/HapMap), so global
+# kinship is not required. Use calculate_kinship=True for mlm_mode='global'
+# or when no genetic map is available.
 pipeline.compute_population_structure(
-    n_pcs=3,              # Number of principal components
-    calculate_kinship=True # Needed for MLM (auto-computed if omitted, but slower)
+    n_pcs=3,
+    calculate_kinship=False,
 )
 
 # 5. Run GWAS analysis
 pipeline.run_analysis(
     traits=['Height', 'FloweringTime'],
-    methods=['GLM', 'MLM']
+    methods=['GLM', 'MLM'],
+    mlm_mode='loco',  # default; use 'global' for one VanRaden K for all markers
 )
 
 # Results are automatically saved to ./my_gwas_results/
@@ -167,11 +171,8 @@ Equivalent stepwise pipeline form:
 pipeline = GWASPipeline(output_dir='./mlm_analysis')
 pipeline.load_data(phenotype_file='phenos.csv', genotype_file='genos.vcf.gz')
 pipeline.align_samples()
-pipeline.compute_population_structure(
-    n_pcs=5,
-    calculate_kinship=True
-)
-pipeline.run_analysis(traits=['MyTrait'], methods=['MLM'])
+pipeline.compute_population_structure(n_pcs=5, calculate_kinship=False)
+pipeline.run_analysis(traits=['MyTrait'], methods=['MLM'], mlm_mode='loco')
 ```
 
 ### Scenario 3: Using External Covariates
@@ -201,13 +202,14 @@ With `GWASPipeline`, external covariates and PCs are also combined automatically
 pipeline = GWASPipeline(output_dir='./method_comparison')
 pipeline.load_data(phenotype_file='phenos.csv', genotype_file='genos.vcf.gz')
 pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)  # kinship for MLM
+pipeline.compute_population_structure(n_pcs=3, calculate_kinship=False)
 
 # Run multiple methods at once
 pipeline.run_analysis(
     traits=['MyTrait'],
-    methods=['GLM', 'MLM', 'FarmCPU', 'BLINK']
+    methods=['GLM', 'MLM', 'FarmCPU', 'BLINK'],
     # Add 'FarmCPUResampling' if needed (resampling is slow)
+    # mlm_mode='global' would require calculate_kinship=True above
 )
 
 # All results are in the same all_results.csv file
@@ -285,6 +287,7 @@ panicle-gwas \
 | `--methods` | Comma-separated methods: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling | GLM,MLM,FarmCPU |
 | `--n-pcs` | Number of principal components | 3 |
 | `--mlm-mode` | `loco` (default) or `global` relatedness for MLM | loco |
+| `--min-mac` | Per-trait minor allele count filter (0 disables) | 10 |
 | `--outputdir`, `-o` | Output directory | ./GWAS_results |
 | `--format`, `-f` | Genotype format (auto-detected if omitted) | Auto |
 | `--compute-effective-tests` | Use effective test count for Bonferroni | Off |
@@ -332,7 +335,7 @@ happens automatically on first VCF/PLINK/HapMap load if you skip pre-caching.
 **Solution:** Check that individual IDs match exactly between phenotype and genotype files (case-sensitive).
 
 ### Problem: "Kinship matrix missing"
-**Solution:** Run `pipeline.compute_population_structure(calculate_kinship=True)` for MLM. If omitted, MLM will auto-compute kinship internally, but precomputing avoids redundant work when analyzing multiple traits. FarmCPU and BLINK do not use kinship. For LOCO methods, ensure a map is available (VCF/PLINK/HapMap or `map_file`).
+**Solution:** With default `mlm_mode='loco'` and a genetic map, LOCO kinship is built during analysis—no precomputed global K is required. For `mlm_mode='global'` or MLM without a map, run `pipeline.compute_population_structure(calculate_kinship=True)` (or let `run_analysis` auto-compute it). FarmCPU and BLINK do not use kinship.
 
 ### Problem: Analysis is very slow
 **Solution:**

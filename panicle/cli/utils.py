@@ -108,7 +108,7 @@ def parse_args(argv=None):
                        type=normalize_format,
                        help="Genotype file format (csv, tsv, numeric, vcf, bcf, plink, hapmap)")
     parser.add_argument("--methods", default="GLM,MLM,FarmCPU",
-                       help="Methods to run (comma-separated: GLM, MLM, BAYESLOCO, FarmCPU, BLINK)")
+                       help="Methods to run (comma-separated: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling)")
     parser.add_argument("--n-pcs", type=int, default=3,
                        help="Number of PCs")
     parser.add_argument(

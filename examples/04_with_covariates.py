@@ -68,12 +68,12 @@ def main():
     print("\n2. Aligning samples...")
     pipeline.align_samples()
 
-    # Compute population structure
-    # PCs will be automatically combined with external covariates
+    # Compute PCs; they are combined with external covariates for the fixed model.
+    # Default LOCO MLM does not need a precomputed global kinship matrix.
     print("\n3. Computing population structure...")
     pipeline.compute_population_structure(
         n_pcs=args.n_pcs,
-        calculate_kinship=True
+        calculate_kinship=False,
     )
     if covariate_list:
         cov_label = ", ".join(covariate_list + [f"PC{i + 1}" for i in range(args.n_pcs)])

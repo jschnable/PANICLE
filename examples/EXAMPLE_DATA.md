@@ -50,7 +50,7 @@ pipeline.load_data(
     genotype_file='example_genotypes.vcf.gz'
 )
 pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)
+pipeline.compute_population_structure(n_pcs=3, calculate_kinship=False)  # LOCO MLM default; set True for global MLM
 pipeline.run_analysis(traits=['PlantHeight'], methods=['MLM'])
 
 # GWAS with covariates
@@ -62,7 +62,7 @@ pipeline.load_data(
     covariate_columns=['DaysToFlower']
 )
 pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)
+pipeline.compute_population_structure(n_pcs=3, calculate_kinship=False)  # LOCO MLM default; set True for global MLM
 pipeline.run_analysis(traits=['PlantHeight'], methods=['MLM'])
 ```
 

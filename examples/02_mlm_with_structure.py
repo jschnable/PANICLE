@@ -3,7 +3,8 @@
 Example 02: MLM with Population Structure Correction
 
 This example demonstrates how to use Mixed Linear Models (MLM) to account for
-population structure using kinship matrix and principal components.
+population structure using principal components and LOCO (leave-one-chromosome-out)
+kinship when a genetic map is available (default for VCF/PLINK/HapMap).
 
 MLM is recommended for:
 - Diverse populations with population structure
@@ -60,23 +61,23 @@ def main():
     print("\n2. Aligning samples...")
     pipeline.align_samples()
 
-    # Compute population structure
-    # This calculates:
-    #   - Principal components (PCs) for covariates
-    #   - Kinship matrix for random effects
+    # Compute PCs as fixed-effect covariates. With a map (VCF default), MLM uses
+    # LOCO kinship built during analysis — no global VanRaden K is required.
+    # For mlm_mode='global' or map-less genotypes, pass calculate_kinship=True.
     print("\n3. Computing population structure...")
     pipeline.compute_population_structure(
-        n_pcs=args.n_pcs,         # Calculate principal components
-        calculate_kinship=True   # Calculate kinship matrix (needed for MLM)
+        n_pcs=args.n_pcs,
+        calculate_kinship=False,
     )
     print("   PCs will be used as covariates")
-    print("   Kinship matrix will account for relatedness")
+    print("   LOCO kinship will be computed during MLM (default mlm_mode='loco')")
 
     # Run MLM analysis
     print("\n4. Running MLM analysis...")
     pipeline.run_analysis(
-        traits=[args.trait],     # Analyze requested trait
-        methods=['MLM']          # Use Mixed Linear Model
+        traits=[args.trait],
+        methods=['MLM'],
+        mlm_mode='loco',
     )
 
     print("\n" + "=" * 70)

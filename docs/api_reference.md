@@ -65,6 +65,7 @@ PANICLE(
     output_prefix='PANICLE',
     verbose=True,
     n_pcs=0,
+    min_mac=10,
     mlm_mode='loco',
     **kwargs,
 )
@@ -77,13 +78,14 @@ PANICLE(
 - `CV` (optional): External covariates `(n × p)`. If `n_pcs > 0`, computed PCs are appended after these columns
 - `method` (list): Methods to run. Typical values: `['GLM']`, `['MLM']`, `['GLM', 'MLM']`
 - `ncpus` (int): CPU count used by method engines. `0` means all available CPUs
-- `vc_method` (str): Variance-component estimator for MLM. Default: `'BRENT'`
+- `vc_method` (str): Variance-component estimator for MLM. Default: `'BRENT'` (only BRENT is implemented; other names raise at runtime)
 - `maxLine` (int): Marker batch size
 - `threshold` (float): Significance threshold used in summaries and file outputs
 - `file_output` (bool): Write CSV/plot outputs to disk
 - `output_prefix` (str): Prefix for output files
 - `verbose` (bool): Print progress messages
 - `n_pcs` (int): Number of genotype PCs to compute internally and append to `CV`. Set to `0` to skip PCA
+- `min_mac` (int): Per-trait minor allele count filter after phenotype missingness is applied. Default: `10`. Set to `0` to disable
 - `mlm_mode` (str): `'loco'` (default) uses leave-one-chromosome-out kinship when a map is available; `'global'` uses one internally computed VanRaden kinship for all markers. User-supplied kinship matrices are not accepted at this API.
 - `**kwargs`: Method-specific options such as `lrt_refinement=False`
 
@@ -446,16 +448,21 @@ results = PANICLE_FarmCPU(
     map_data,               # Genetic map (MARKER, Chr, Pos; legacy SNP accepted)
     CV=None,                # Covariates (n × p)
     maxLoop=10,             # Maximum iterations
-    p_threshold=0.05,       # P-value threshold for QTN selection
-    QTN_threshold=0.01,     # Threshold for QTN optimization
+    p_threshold=None,       # Early-stop threshold; None → rMVP-style 0.01/n_tests
+    QTN_threshold=0.01,     # Uncorrected alpha for pseudo-QTN selection
+    n_eff=None,             # Optional effective test count for default early-stop
     bin_size=None,          # Bin sizes for multi-scale binning (default: [5e5, 5e6, 5e7])
     method_bin='static',    # Binning method
     maxLine=5000,           # Batch size
     cpu=1,                  # Number of CPU cores
-    reward_method='min',    # Substitution method for pseudo-QTNs
+    reward_method='reward', # Substitution method for pseudo-QTNs
     verbose=True
 )
 ```
+
+**Notes:**
+- Default `p_threshold=None` keeps QTN selection at the uncorrected `QTN_threshold` (0.01) and uses early-stop `0.01 / n_tests` (`n_eff` if provided). Setting a non-`None` `p_threshold` also raises `QTN_threshold` via `max(p_threshold, QTN_threshold)`.
+- The high-level pipeline/CLI leave `p_threshold` unset unless `--farmcpu-p-threshold` (or related flags) is passed.
 
 **Returns:** `AssociationResults`
 
@@ -723,8 +730,8 @@ from panicle.pipelines.gwas import GWASPipeline
 pipeline = GWASPipeline(output_dir='./results')
 pipeline.load_data('phenos.csv', 'genos.vcf.gz')
 pipeline.align_samples()
-pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)
-pipeline.run_analysis(traits=['Trait1'], methods=['GLM', 'MLM'])
+pipeline.compute_population_structure(n_pcs=3, calculate_kinship=False)  # LOCO MLM default
+pipeline.run_analysis(traits=['Trait1'], methods=['GLM', 'MLM'], mlm_mode='loco')
 ```
 
 ### Workflow 2: Direct Association Testing
@@ -734,11 +741,11 @@ from panicle.association.mlm import PANICLE_MLM
 from panicle.matrix.kinship import PANICLE_K_VanRaden
 import numpy as np
 
-# Prepare data
+# Prepare data (low-level API accepts an explicit kinship matrix)
 phe = np.column_stack([np.arange(n), phenotype_values])
 K = PANICLE_K_VanRaden(genotype_matrix)
 
-# Run MLM
+# Run classic global MLM (not LOCO)
 results = PANICLE_MLM(phe, genotype_matrix, K)
 
 # Get significant markers

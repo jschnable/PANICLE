@@ -188,7 +188,7 @@ See [Output Files](output_files.md) for detailed format specifications.
 If you use PANICLE in your research, cite the software version you used, for example:
 
 ```
-PANICLE v0.3.2. https://github.com/jschnable/PANICLE
+PANICLE v0.4.0. https://github.com/jschnable/PANICLE
 ```
 
 ## See Also

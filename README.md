@@ -7,9 +7,9 @@
 
 **PANICLE finds the DNA variants driving traits** — crop yield, disease risk, plant height, anything you can measure — by scanning millions of genetic markers across hundreds or thousands of individuals. It's a fast, modern Python implementation of the four most-used GWAS algorithms (GLM, MLM, FarmCPU, BLINK), built for researchers who want to run GWAS inside their Python pipelines instead of bouncing through R or standalone binaries.
 
-![Example Manhattan plot from the bundled demo data](docs/images/example_manhattan.png)
+![Example multi-method GWAS comparison from demo analyses](docs/images/trait3_methods_comparison.png)
 
-*The classic GWAS payoff: peaks rising above the red significance threshold mark genomic regions associated with the trait. Generated end-to-end by the 30-second quick start below.*
+*Manhattan-style multi-method comparison on demo-scale data. The 30-second quick start below writes per-method Manhattan and QQ plots for your trait.*
 
 ## Try It in 30 Seconds
 
@@ -148,6 +148,7 @@ Related tool: **`panicle-cache-genotype`** pre-converts large genotype files for
 | **`--methods`** | GWAS methods: `GLM`, `MLM`, `BAYESLOCO`, `FarmCPU`, `BLINK`, `FarmCPUResampling`. | GLM,MLM,FarmCPU |
 | **`--n-pcs`** | Number of Principal Components for population structure. | 3 |
 | **`--mlm-mode`** | MLM relatedness: `loco` (default, leave-one-chromosome-out when a map is available) or `global` (one VanRaden kinship for all markers, computed internally). | loco |
+| **`--min-mac`** | Per-trait minor allele count filter after phenotype missingness (0 disables). | 10 |
 | **`--compute-effective-tests`** | Calculate Effective Marker Number (Me) and use it for Bonferroni correction. | False |
 | **`--alpha`** | Significance level (e.g., 0.05). Threshold = `alpha / Me` (or `M`). | 0.05 |
 | **`--significance`** | Fixed p-value threshold (overrides Bonferroni). | None |
@@ -160,10 +161,11 @@ Related tool: **`panicle-cache-genotype`** pre-converts large genotype files for
 | **`--outputdir`** | Output directory. | ./GWAS_results |
 | **`--outputs`** | Outputs to generate: `all_marker_pvalues`, `significant_marker_pvalues`, `manhattan`, `qq` (see [docs/output_files.md](docs/output_files.md)). | All |
 | **`--include-standard-errors`** | Include `{METHOD}_SE` columns in merged result CSV outputs. | False |
+| **`--version`** | Print package version and exit. | — |
 
 Other useful filters:
 - `--max-missing` (default 1.0), `--min-maf` (default 0.0)
-- `--drop-monomorphic` / `--keep-monomorphic`
+- `--drop-monomorphic` / `--keep-monomorphic` (drop monomorphic is **on** by default)
 - `--snps-only`, `--no-split-multiallelic`
 
 <a id="pipeline-api"></a>
