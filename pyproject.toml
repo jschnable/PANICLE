@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "panicle"
-version = "0.3.5"
+version = "0.4.0"
 description = "PANICLE: Python Algorithms for Nucleotide-phenotype Inference and Chromosome-wide Locus Evaluation - A comprehensive GWAS pipeline with Numba JIT acceleration"
 authors = [
     {name = "James C. Schnable", email = "james.schnable@gmail.com"}
@@ -57,6 +57,7 @@ Issues = "https://github.com/jschnable/PANICLE/issues"
 Changelog = "https://github.com/jschnable/PANICLE/blob/master/CHANGELOG.md"
 
 [project.scripts]
+panicle-gwas = "panicle.cli.gwas:main"
 panicle-cache-genotype = "panicle.tools.convert_genotype:main"
 
 [tool.setuptools.packages.find]

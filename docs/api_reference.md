@@ -3,11 +3,43 @@
 Complete reference for the PANICLE package.
 
 ## Table of Contents
+- [Command-line interface](#command-line-interface)
 - [PANICLE](#panicle)
 - [GWASPipeline](#gwaspipeline)
 - [Association Methods](#association-methods)
 - [Data Loaders](#data-loaders)
 - [Utility Functions](#utility-functions)
+
+---
+
+## Command-line interface
+
+After installing the package (`pip install panicle`), two console scripts are available:
+
+| Command | Module | Purpose |
+|---------|--------|---------|
+| `panicle-gwas` | `panicle.cli.gwas:main` | Full GWAS pipeline (phenotypes, genotypes, methods, outputs) |
+| `panicle-cache-genotype` | `panicle.tools.convert_genotype:main` | Pre-build genotype memmap caches |
+
+Also: `python -m panicle` invokes the same entry point as `panicle-gwas`.
+
+```bash
+panicle-gwas --version
+panicle-gwas -p phenos.csv -g genos.vcf.gz --methods GLM --outputdir ./results
+```
+
+Programmatic use of the CLI entry point:
+
+```python
+from panicle.cli.gwas import main
+
+raise SystemExit(main([
+    "--phenotype", "phenos.csv",
+    "--genotype", "genos.vcf.gz",
+    "--methods", "GLM",
+    "--outputdir", "./results",
+]))
+```
 
 ---
 

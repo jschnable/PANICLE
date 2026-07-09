@@ -2,7 +2,7 @@
 
 [![PyPI version](https://badge.fury.io/py/panicle.svg)](https://pypi.org/project/panicle/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![CI](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml/badge.svg)](https://github.com/jschnable/PANICLE/actions/workflows/publish.yml)
+[![CI](https://github.com/jschnable/PANICLE/actions/workflows/ci.yml/badge.svg)](https://github.com/jschnable/PANICLE/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **PANICLE finds the DNA variants driving traits** — crop yield, disease risk, plant height, anything you can measure — by scanning millions of genetic markers across hundreds or thousands of individuals. It's a fast, modern Python implementation of the four most-used GWAS algorithms (GLM, MLM, FarmCPU, BLINK), built for researchers who want to run GWAS inside their Python pipelines instead of bouncing through R or standalone binaries.
@@ -13,18 +13,20 @@
 
 ## Try It in 30 Seconds
 
-The repo ships with a small demo dataset — clone, install, and you get a real Manhattan plot:
+The repo ships with a small demo dataset — install, clone for the examples, and run:
 
 ```bash
 pip install panicle
 git clone https://github.com/jschnable/PANICLE.git && cd PANICLE
-python scripts/run_GWAS.py \
+panicle-gwas \
   --phenotype examples/example_phenotypes.csv \
   --genotype  examples/example_genotypes.vcf.gz \
   --traits PlantHeight \
   --methods GLM \
   --outputdir ./results
 ```
+
+Equivalent forms: `python -m panicle ...` or `python scripts/run_GWAS.py ...` (compatibility wrapper).
 
 Open `results/` and you'll find a Manhattan plot, a Q-Q plot, and a CSV of significant markers. That's a full GWAS, from raw VCF to publishable figure, with no setup beyond `pip install`.
 
@@ -112,10 +114,10 @@ Each run writes to `--outputdir` (default `./GWAS_results/`):
 
 ## CLI Reference
 
-The `run_GWAS.py` script provides a command-line interface for batch processing. A complete invocation using more options than the quick start:
+After `pip install panicle`, the primary entry point is **`panicle-gwas`** (also `python -m panicle`). A complete invocation:
 
 ```bash
-python scripts/run_GWAS.py \
+panicle-gwas \
   --phenotype examples/example_phenotypes.csv \
   --genotype  examples/example_genotypes.vcf.gz \
   --traits PlantHeight \
@@ -125,6 +127,13 @@ python scripts/run_GWAS.py \
   --outputs manhattan qq significant_marker_pvalues \
   --outputdir ./results
 ```
+
+```bash
+panicle-gwas --version   # e.g. panicle-gwas 0.4.0
+panicle-gwas --help
+```
+
+Related tool: **`panicle-cache-genotype`** pre-converts large genotype files for faster reloads.
 
 ### Parameters
 

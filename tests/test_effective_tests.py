@@ -2,31 +2,17 @@
 
 from __future__ import annotations
 
-from importlib import util
 from pathlib import Path
-from types import ModuleType
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from panicle.cli import gwas as cli_gwas
 from panicle.data.loaders import load_genotype_file
 from panicle.utils import effective_tests as effective_tests_utils
 from panicle.utils.data_types import GenotypeMap, GenotypeMatrix
 from panicle.utils.effective_tests import estimate_effective_tests_from_genotype
-
-
-def _load_run_gwas_module() -> ModuleType:
-    module_path = Path(__file__).resolve().parents[1] / "scripts" / "run_GWAS.py"
-    spec = util.spec_from_file_location("run_GWAS_cli_effective", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to load run_GWAS.py module for testing")
-    module = util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore[assignment]
-    return module
-
-
-RUN_GWAS = _load_run_gwas_module()
 
 
 def test_estimate_effective_tests_from_genotype_simple_case() -> None:
@@ -212,9 +198,12 @@ def test_run_gwas_cli_skips_global_kinship_for_loco_mlm() -> None:
     class PipelineWithoutMap:
         geno_map = None
 
-    assert RUN_GWAS._requires_global_kinship(["MLM"], PipelineWithoutMap())
-    assert not RUN_GWAS._requires_global_kinship(["MLM"], PipelineWithMap())
-    assert not RUN_GWAS._requires_global_kinship(["GLM"], PipelineWithoutMap())
+    assert cli_gwas._requires_global_kinship(["MLM"], PipelineWithoutMap())
+    assert not cli_gwas._requires_global_kinship(["MLM"], PipelineWithMap())
+    assert not cli_gwas._requires_global_kinship(["GLM"], PipelineWithoutMap())
+    assert cli_gwas._requires_global_kinship(
+        ["MLM"], PipelineWithMap(), mlm_mode="global"
+    )
 
 
 def test_load_genotype_file_records_effective_tests(tmp_path: Path) -> None:
@@ -274,7 +263,7 @@ def test_load_and_validate_data_returns_effective_tests(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    data = RUN_GWAS.load_and_validate_data(
+    data = cli_gwas.load_and_validate_data(  # type: ignore[attr-defined]
         phenotype_file=str(phe_file),
         genotype_file=str(geno_file),
         map_file=str(map_file),

@@ -60,13 +60,28 @@ def normalize_outputs(outputs: List[str]) -> List[str]:
             valid.append(o)
     return valid if valid else list(OUTPUT_CHOICES)
 
-def parse_args():
-    """Parse command line arguments for GWAS pipeline"""
+def parse_args(argv=None):
+    """Parse command line arguments for GWAS pipeline.
+
+    Parameters
+    ----------
+    argv :
+        Optional argument list (without the program name). When ``None``,
+        uses ``sys.argv[1:]``.
+    """
+    from panicle import __version__
+
     parser = argparse.ArgumentParser(
+        prog="panicle-gwas",
         description="Comprehensive GWAS Analysis using PANICLE",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+
     # Required arguments
     parser.add_argument("--phenotype", "-p", required=True,
                        help="Phenotype file (CSV/TSV with ID column and trait columns)")
@@ -224,4 +239,4 @@ def parse_args():
     # Set defaults
     parser.set_defaults(drop_monomorphic=True)
 
-    return parser.parse_args()
+    return parser.parse_args(argv)

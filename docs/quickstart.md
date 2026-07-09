@@ -261,12 +261,13 @@ pipeline.run_analysis(
 
 ## Command-Line Interface
 
-PANICLE includes a CLI script for running GWAS analyses without writing Python code.
+After `pip install panicle`, use the **`panicle-gwas`** console script (or
+`python -m panicle`). `scripts/run_GWAS.py` remains as a thin compatibility wrapper.
 
 ### Basic Usage
 
 ```bash
-python scripts/run_GWAS.py \
+panicle-gwas \
   --phenotype phenos.csv \
   --genotype genos.vcf.gz \
   --traits PlantHeight,DaysToFlower \
@@ -283,6 +284,7 @@ python scripts/run_GWAS.py \
 | `--traits` | Comma-separated trait names (case-sensitive) | All numeric columns |
 | `--methods` | Comma-separated methods: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling | GLM,MLM,FarmCPU |
 | `--n-pcs` | Number of principal components | 3 |
+| `--mlm-mode` | `loco` (default) or `global` relatedness for MLM | loco |
 | `--outputdir`, `-o` | Output directory | ./GWAS_results |
 | `--format`, `-f` | Genotype format (auto-detected if omitted) | Auto |
 | `--compute-effective-tests` | Use effective test count for Bonferroni | Off |
@@ -290,25 +292,26 @@ python scripts/run_GWAS.py \
 | `--min-maf` | Minimum minor allele frequency filter | 0.0 |
 | `--max-missing` | Maximum missing data proportion | 1.0 |
 | `--significance` | Fixed p-value threshold (overrides Bonferroni) | — |
+| `--version` | Print package version and exit | — |
 
 ### Examples
 
 ```bash
 # Quick GLM scan on a single trait
-python scripts/run_GWAS.py -p phenos.csv -g genos.vcf.gz \
+panicle-gwas -p phenos.csv -g genos.vcf.gz \
   --traits PlantHeight --methods GLM
 
 # Full analysis with effective tests correction
-python scripts/run_GWAS.py -p phenos.csv -g genos.vcf.gz \
+panicle-gwas -p phenos.csv -g genos.vcf.gz \
   --methods GLM,MLM,FarmCPU,BLINK \
   --compute-effective-tests --n-pcs 5
 
 # Only generate plots (no CSV output)
-python scripts/run_GWAS.py -p phenos.csv -g genos.vcf.gz \
+panicle-gwas -p phenos.csv -g genos.vcf.gz \
   --methods MLM --outputs manhattan qq
 ```
 
-Run `python scripts/run_GWAS.py --help` for the full list of options.
+Run `panicle-gwas --help` for the full list of options.
 
 ### Pre-caching Genotypes
 
@@ -319,10 +322,9 @@ binary cache format for faster loading (~26x speedup on subsequent runs):
 panicle-cache-genotype -i genotypes.vcf.gz -o genotypes_cached
 ```
 
-**Note:** The `panicle-cache-genotype` command is only available after installing the
-package with `pip install -e .` (or `pip install panicle`). If you skip installation,
-genotype caching still happens automatically on first load — this tool just lets you
-do it ahead of time.
+**Note:** Both `panicle-gwas` and `panicle-cache-genotype` are available after
+`pip install panicle` (or `pip install -e .` from a clone). Genotype caching still
+happens automatically on first VCF/PLINK/HapMap load if you skip pre-caching.
 
 ## Troubleshooting
 

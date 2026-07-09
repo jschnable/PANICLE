@@ -5,9 +5,11 @@ All notable changes to PANICLE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-08
 
 ### Added
+- **Packaged GWAS CLI:** `panicle-gwas` console script and `python -m panicle` after `pip install panicle`. Implementation lives in `panicle.cli.gwas`; `scripts/run_GWAS.py` is a thin compatibility wrapper.
+- `--version` on the GWAS CLI.
 - `mlm_mode` / `--mlm-mode` (`loco` default, or `global`) selects LOCO vs full-kinship MLM. Global kinship is always computed from genotypes when needed; external kinship inputs are not accepted on the high-level API or CLI.
 - PR/push CI workflow (`.github/workflows/ci.yml`) runs pytest across Python 3.9–3.13.
 
@@ -16,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GWASPipeline` FarmCPU defaults no longer force `p_threshold=alpha` (0.05). Unset thresholds now use the library rMVP-style early-stop (`0.01/n_tests`) and uncorrected QTN threshold of 0.01.
 - `compute_mac_keep_indices` excludes missing genotype sentinels (`-9`) and non-finite values from allele counts so unimputed matrices are not mis-filtered.
 - `PANICLE()` no longer eagerly computes an unused VanRaden kinship matrix when FarmCPU is requested (FarmCPU does not consume kinship).
-- `CITATION.cff` version aligned to 0.3.5.
 - GLM residual-df < 50 now uses Student-t p-values (with a one-time console warning) instead of a normal approximation that understates p-values on small cohorts.
 
 ## [0.3.5] - 2026-06-22

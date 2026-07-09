@@ -68,13 +68,15 @@ want the high-level one-call API and still want internal PCA via `n_pcs`.
 
 ### CLI Quick Start
 ```bash
-python scripts/run_GWAS.py \
+panicle-gwas \
   --phenotype examples/example_phenotypes.csv \
   --genotype examples/example_genotypes.vcf.gz \
   --traits PlantHeight \
   --methods GLM \
   --outputdir ./results
 ```
+
+(`python -m panicle ...` and `python scripts/run_GWAS.py ...` are equivalent.)
 
 ## Workflow Overview
 
