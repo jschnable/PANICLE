@@ -97,6 +97,16 @@ def parse_args():
     parser.add_argument("--n-pcs", type=int, default=3,
                        help="Number of PCs")
     parser.add_argument(
+        "--mlm-mode",
+        choices=["loco", "global"],
+        default="loco",
+        help=(
+            "MLM relatedness mode: 'loco' (default) uses leave-one-chromosome-out "
+            "kinship when a map is available; 'global' uses one VanRaden kinship "
+            "for all markers (computed internally). No user kinship file is accepted."
+        ),
+    )
+    parser.add_argument(
         "--ncpus",
         type=int,
         default=1,

@@ -38,6 +38,7 @@ def test_parse_args_defaults_and_flags(tmp_path) -> None:
     assert args.ncpus == 1
     assert args.parallel_mode == "auto"
     assert args.include_standard_errors is False
+    assert args.mlm_mode == "loco"
 
 
 def test_parse_args_respects_overrides(tmp_path) -> None:
@@ -65,6 +66,8 @@ def test_parse_args_respects_overrides(tmp_path) -> None:
             "--parallel-mode",
             "off",
             "--include-standard-errors",
+            "--mlm-mode",
+            "global",
             "--bayesloco-loco-mode",
             "refine",
             "--bayesloco-calibration",
@@ -78,6 +81,7 @@ def test_parse_args_respects_overrides(tmp_path) -> None:
     assert args.n_pcs == 5
     assert args.outputdir.endswith("results")
     assert args.ncpus == 4
+    assert args.mlm_mode == "global"
     assert args.parallel_mode == "off"
     assert args.include_standard_errors is True
     assert args.bayesloco_loco_mode == "refine"

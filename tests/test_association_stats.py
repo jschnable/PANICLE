@@ -3,6 +3,7 @@ import pytest
 import numpy as np
 from scipy import stats
 from panicle.association.glm import PANICLE_GLM
+from panicle.association import glm_fwl_qr
 import pandas as pd
 from panicle.association.mlm_loco import PANICLE_MLM_LOCO
 
@@ -27,13 +28,34 @@ def test_glm_statistical_correctness():
         g = geno[:, j]
         slope, intercept, r_value, p_value_t, std_err = stats.linregress(g, y)
 
-        # Note: MVP GLM uses normal approximation for speed instead of t-distribution.
-        # Compute normal-based p-value from t-statistic for comparison.
+        # Residual df = n - 2 = 98 >= 50 → normal (fast) approximation path.
         t_stat = slope / std_err
         p_value = 2 * stats.norm.sf(np.abs(t_stat))
 
         np.testing.assert_allclose(res.pvalues[j], p_value, rtol=1e-5,
             err_msg=f"P-value mismatch at marker {j}")
+
+
+def test_glm_low_df_uses_student_t(capsys):
+    """When residual df < 50, GLM must use Student-t tails (not normal)."""
+    rng = np.random.default_rng(7)
+    n = 30  # df = 30 - 1 - 1 = 28 < 50
+    n_markers = 4
+    y = rng.standard_normal(n)
+    phe = np.column_stack([np.arange(n), y])
+    geno = rng.integers(0, 3, size=(n, n_markers)).astype(float)
+
+    glm_fwl_qr._low_df_student_t_warned = False
+    res = PANICLE_GLM(phe, geno, cpu=1, verbose=False)
+    captured = capsys.readouterr()
+    assert "degrees of freedom" in captured.out
+    assert "student-t" in captured.out.lower()
+
+    for j in range(n_markers):
+        g = geno[:, j]
+        slope, intercept, r_value, p_value_t, std_err = stats.linregress(g, y)
+        np.testing.assert_allclose(res.pvalues[j], p_value_t, rtol=1e-5,
+            err_msg=f"Student-t p-value mismatch at marker {j}")
 
 def test_glm_covariates_correctness():
     """Verify GLM with covariates (Partial Regression)"""

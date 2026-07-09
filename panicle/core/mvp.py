@@ -16,7 +16,6 @@ from ..utils.data_types import (
     Phenotype,
     GenotypeMatrix,
     GenotypeMap,
-    KinshipMatrix,
     AssociationResults,
 )
 from ..data.loaders import load_genotype_file, load_map_file, load_phenotype_file
@@ -28,6 +27,7 @@ from ..association.bayes_loco import PANICLE_BayesLOCO
 from ..association.farmcpu import PANICLE_FarmCPU
 from ..association.blink import PANICLE_BLINK
 from ..association.farmcpu_resampling import PANICLE_FarmCPUResampling
+from ..matrix.kinship import PANICLE_K_VanRaden
 from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from ..matrix.pca import PANICLE_PCA
 from ..visualization.manhattan import PANICLE_Report
@@ -35,7 +35,6 @@ from ..visualization.manhattan import PANICLE_Report
 def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         geno: Union[str, Path, np.ndarray, GenotypeMatrix],
         map_data: Optional[Union[str, Path, pd.DataFrame, GenotypeMap]],
-        K: Optional[Union[KinshipMatrix, np.ndarray]] = None,
         CV: Optional[np.ndarray] = None,
         method: Optional[List[str]] = None,
         ncpus: int = 1,
@@ -48,6 +47,7 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         verbose: bool = True,
         n_pcs: int = 0,
         min_mac: int = 10,
+        mlm_mode: str = "loco",
         **kwargs) -> Dict[str, Any]:
     """Primary GWAS analysis function
     
@@ -61,9 +61,6 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             the trait value, a DataFrame, or a Phenotype object
         geno: Genotype data (file path, array, or GenotypeMatrix object)
         map_data: Genetic map data (file path, DataFrame, or GenotypeMap object)
-        K: Kinship matrix (optional). MLM uses LOCO kinship when a genetic map
-            is available and does not consume a global ``K``. FarmCPU is
-            GLM-based with pseudo-QTNs and never uses kinship.
         CV: Covariate matrix (optional). If `n_pcs > 0`, computed PCs are appended
             after these columns.
         method: GWAS methods to run ["GLM", "MLM", "BAYESLOCO", "FarmCPU", "BLINK", "FarmCPUResampling"]
@@ -77,6 +74,10 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
         verbose: Print progress information
         n_pcs: Number of principal components to compute from the aligned genotype
             matrix and append to covariates. Set to 0 to disable internal PCA.
+        mlm_mode: ``"loco"`` (default) uses leave-one-chromosome-out kinship when
+            a map is available; ``"global"`` uses a single VanRaden kinship for
+            all markers (computed internally). Falls back to global if loco is
+            requested without map data.
         **kwargs: Additional parameters for specific methods
 
     Notes:
@@ -264,15 +265,34 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
                 print(f"PCA computation complete ({pca_time:.2f}s)")
                 print(f"  Added {pca_results.shape[1]} principal components as covariates")
 
-        # FarmCPU does not use kinship (pseudo-QTN GLM iterations). MLM builds
-        # LOCO kinship per trait when a map is present. Only retain a
-        # user-supplied global K for downstream inspection / legacy callers.
-        if K is not None:
-            kinship_matrix = K
+        # Normalize MLM relatedness mode. FarmCPU never uses kinship.
+        mlm_mode_norm = str(mlm_mode or "loco").strip().lower().replace("-", "_")
+        if mlm_mode_norm in {"leave_one_chromosome_out"}:
+            mlm_mode_norm = "loco"
+        elif mlm_mode_norm in {"full", "classic"}:
+            mlm_mode_norm = "global"
+        if mlm_mode_norm not in {"loco", "global"}:
+            raise ValueError(f"Invalid mlm_mode={mlm_mode!r}; expected 'loco' or 'global'")
+        use_loco_mlm = (
+            "MLM" in method
+            and mlm_mode_norm == "loco"
+            and genetic_map is not None
+        )
+        need_global_kinship = "MLM" in method and not use_loco_mlm
+        if need_global_kinship:
             if verbose:
-                print("\n[Phase 2] Using provided kinship matrix")
-        
-        # Store kinship matrix
+                print("\n[Phase 2] Computing global kinship matrix for MLM...")
+            kinship_start = time.time()
+            kinship_matrix = PANICLE_K_VanRaden(
+                genotype,
+                maxLine=maxLine,
+                verbose=verbose,
+            )
+            analysis_results['summary']['runtime']['kinship'] = time.time() - kinship_start
+            if verbose:
+                print(f"Kinship matrix computation complete ({analysis_results['summary']['runtime']['kinship']:.2f}s)")
+
+        # Store kinship matrix when computed
         if kinship_matrix is not None:
             analysis_results['data']['kinship'] = kinship_matrix
         
@@ -421,34 +441,54 @@ def PANICLE(phe: Union[str, Path, np.ndarray, pd.DataFrame, Phenotype],
             # Run MLM
             if "MLM" in method:
                 if verbose:
-                    print(f"\nRunning MLM analysis on {trait_name}...")
+                    mode_label = "LOCO" if use_loco_mlm else "global"
+                    print(f"\nRunning MLM analysis ({mode_label}) on {trait_name}...")
 
                 mlm_start = time.time()
-                if K is not None and verbose and trait_idx == 0:
-                    warnings.warn("Provided kinship matrix is ignored; MLM now uses LOCO kinship.")
-                key_arr = np.ascontiguousarray(valid_indices, dtype=np.int64)
-                loco_key = (int(key_arr.size), hash(key_arr.tobytes()), id(trait_map))
-                trait_loco_kinship = loco_kinship_cache.get(loco_key)
-                if trait_loco_kinship is None:
-                    trait_loco_kinship = PANICLE_K_VanRaden_LOCO(
-                        trait_genotype,
-                        trait_map,
+                if use_loco_mlm:
+                    key_arr = np.ascontiguousarray(valid_indices, dtype=np.int64)
+                    loco_key = (int(key_arr.size), hash(key_arr.tobytes()), id(trait_map))
+                    trait_loco_kinship = loco_kinship_cache.get(loco_key)
+                    if trait_loco_kinship is None:
+                        trait_loco_kinship = PANICLE_K_VanRaden_LOCO(
+                            trait_genotype,
+                            trait_map,
+                            maxLine=maxLine,
+                            cpu=ncpus,
+                            verbose=False,
+                        )
+                        loco_kinship_cache[loco_key] = trait_loco_kinship
+                    mlm_results = PANICLE_MLM_LOCO(
+                        phe=phenotype_array,
+                        geno=trait_genotype,
+                        map_data=trait_map,
+                        loco_kinship=trait_loco_kinship,
+                        CV=trait_covariates,
+                        vc_method=vc_method,
                         maxLine=maxLine,
                         cpu=ncpus,
-                        verbose=False,
+                        verbose=verbose
                     )
-                    loco_kinship_cache[loco_key] = trait_loco_kinship
-                mlm_results = PANICLE_MLM_LOCO(
-                    phe=phenotype_array,
-                    geno=trait_genotype,
-                    map_data=trait_map,
-                    loco_kinship=trait_loco_kinship,
-                    CV=trait_covariates,
-                    vc_method=vc_method,
-                    maxLine=maxLine,
-                    cpu=ncpus,
-                    verbose=verbose
-                )
+                else:
+                    if kinship_matrix is None:
+                        raise ValueError("Global MLM requires a kinship matrix")
+                    # Subset global kinship to trait samples when phenotype missingness drops rows
+                    if valid_indices.size == kinship_matrix.shape[0] and np.array_equal(
+                        valid_indices, np.arange(kinship_matrix.shape[0])
+                    ):
+                        K_trait = kinship_matrix
+                    else:
+                        K_trait = np.asarray(kinship_matrix)[np.ix_(valid_indices, valid_indices)]
+                    mlm_results = PANICLE_MLM(
+                        phe=phenotype_array,
+                        geno=trait_genotype,
+                        K=K_trait,
+                        CV=trait_covariates,
+                        vc_method=vc_method,
+                        maxLine=maxLine,
+                        cpu=ncpus,
+                        verbose=verbose,
+                    )
                 mlm_time = time.time() - mlm_start
                 mlm_results = pad_association_results(
                     mlm_results, trait_keep_indices, full_n_markers, full_map=genetic_map

@@ -38,6 +38,7 @@ from ..utils.data_types import (
     ensure_eager_genotype,
 )
 from .glm import PANICLE_GLM
+from .glm_fwl_qr import _STUDENT_T_DF_THRESHOLD, _fast_t_pvalue
 
 
 def _pvalue_to_t_critical(p_threshold: float) -> float:
@@ -58,18 +59,28 @@ def _pvalue_to_t_critical(p_threshold: float) -> float:
     return np.sqrt(2.0) * special.erfcinv(p_threshold)
 
 
-def _t_stat_to_pvalue(t_stats: np.ndarray) -> np.ndarray:
+def _t_stat_to_pvalue(
+    t_stats: np.ndarray,
+    df: Optional[float] = None,
+) -> np.ndarray:
     """Convert |t|-statistics to two-tailed p-values.
 
-    Uses the normal approximation: p = erfc(|t| / sqrt(2))
+    When residual *df* is provided and below the shared GLM threshold, uses
+    Student-t tails (same path as GLM). Otherwise uses the normal approximation
+    ``p = erfc(|t| / sqrt(2))``.
 
     Args:
         t_stats: Array of absolute t-statistics
+        df: Residual degrees of freedom for the scan (optional)
 
     Returns:
         Two-tailed p-values
     """
-    p = special.erfc(t_stats / np.sqrt(2.0))
+    t_arr = np.asarray(t_stats, dtype=np.float64)
+    if df is not None and np.isfinite(df) and float(df) > 0:
+        df_arr = np.full(t_arr.shape, float(df), dtype=np.float64)
+        return _fast_t_pvalue(t_arr, df_arr)
+    p = special.erfc(np.abs(t_arr) / np.sqrt(2.0))
     return np.clip(p, 0.0, 1.0)
 
 # rMVP preprocessing replaces missing genotypes (-9/NA) with the heterozygote dosage (1).
@@ -1173,13 +1184,19 @@ def PANICLE_FarmCPU(phe: np.ndarray,
         final_cov_effect_summary = cov_effect_summary
         final_cov_se_summary = cov_se_summary
 
-    # Convert t-statistics back to p-values for final output
+    # Convert t-statistics back to p-values for final output (matches GLM
+    # Student-t / normal hybrid when residual df is known).
     final_tstats = final_pvalues
-    final_pvalues = _t_stat_to_pvalue(final_tstats)
+    final_pvalues = _t_stat_to_pvalue(final_tstats, df=final_df_full)
     if seq_qtn_save.size > 0 and final_df_full is not None and final_df_full > 0:
+        # QTN effects are conditional on other fixed effects; still use the
+        # residual df of the final model for their reported p-values.
         qtn_indices = seq_qtn_save.astype(int, copy=False)
         qtn_t = np.abs(final_tstats[qtn_indices])
-        final_pvalues[qtn_indices] = 2.0 * stats.t.sf(qtn_t, final_df_full)
+        if float(final_df_full) < _STUDENT_T_DF_THRESHOLD:
+            final_pvalues[qtn_indices] = 2.0 * stats.t.sf(qtn_t, final_df_full)
+        else:
+            final_pvalues[qtn_indices] = _t_stat_to_pvalue(qtn_t, df=final_df_full)
 
     # Substitute effects and SE for pseudo-QTNs
     # Use the covariate effect from the final model (mean across all marker tests)

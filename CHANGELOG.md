@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mlm_mode` / `--mlm-mode` (`loco` default, or `global`) selects LOCO vs full-kinship MLM. Global kinship is always computed from genotypes when needed; external kinship inputs are not accepted on the high-level API or CLI.
+- PR/push CI workflow (`.github/workflows/ci.yml`) runs pytest across Python 3.9–3.13.
+
 ### Fixed
 - Genotype binary caches (VCF/PLINK/HapMap/numeric) now fingerprint QC filter settings in a `*.panicle.v2.filters.json` sidecar. Changing `min_maf`, `max_missing`, `drop_monomorphic`, `include_indels`, or `split_multiallelic` rebuilds the cache instead of silently reusing a prior marker set. Legacy caches without a sidecar are rebuilt once.
 - `GWASPipeline` FarmCPU defaults no longer force `p_threshold=alpha` (0.05). Unset thresholds now use the library rMVP-style early-stop (`0.01/n_tests`) and uncorrected QTN threshold of 0.01.
 - `compute_mac_keep_indices` excludes missing genotype sentinels (`-9`) and non-finite values from allele counts so unimputed matrices are not mis-filtered.
 - `PANICLE()` no longer eagerly computes an unused VanRaden kinship matrix when FarmCPU is requested (FarmCPU does not consume kinship).
 - `CITATION.cff` version aligned to 0.3.5.
+- GLM residual-df < 50 now uses Student-t p-values (with a one-time console warning) instead of a normal approximation that understates p-values on small cohorts.
 
 ## [0.3.5] - 2026-06-22
 

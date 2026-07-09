@@ -93,9 +93,15 @@ def _load_index_file(path: Optional[str]) -> Optional[list]:
     return out
 
 
-def _requires_global_kinship(valid_methods, pipeline) -> bool:
+def _requires_global_kinship(valid_methods, pipeline, mlm_mode: str = "loco") -> bool:
     """Return whether the selected methods need a precomputed global kinship."""
-    return "MLM" in valid_methods and getattr(pipeline, "geno_map", None) is None
+    if "MLM" not in valid_methods:
+        return False
+    mode = str(mlm_mode or "loco").strip().lower()
+    if mode == "global":
+        return True
+    # LOCO needs a map; without one, fall back to global kinship.
+    return getattr(pipeline, "geno_map", None) is None
 
 
 class FarmCPUResamplingProgressReporter:
@@ -190,7 +196,7 @@ def main():
     outputs = normalize_outputs(args.outputs)
 
     # 4. Structure (global kinship only needed for non-LOCO MLM)
-    need_kinship = _requires_global_kinship(valid_methods, pipeline)
+    need_kinship = _requires_global_kinship(valid_methods, pipeline, mlm_mode=args.mlm_mode)
     pipeline.compute_population_structure(n_pcs=args.n_pcs, calculate_kinship=need_kinship)
 
     # 5. Run Analysis
@@ -281,6 +287,7 @@ def main():
         n_eff=args.n_eff,
         max_genotype_dosage=args.max_genotype_dosage,
         min_mac=args.min_mac,
+        mlm_mode=args.mlm_mode,
         farmcpu_params=farmcpu_params,
         bayesloco_params=(bayesloco_params or None),
         include_standard_errors=args.include_standard_errors,

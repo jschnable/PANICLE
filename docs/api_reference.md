@@ -22,7 +22,6 @@ PANICLE(
     phe,
     geno,
     map_data,
-    K=None,
     CV=None,
     method=None,
     ncpus=1,
@@ -34,6 +33,7 @@ PANICLE(
     output_prefix='PANICLE',
     verbose=True,
     n_pcs=0,
+    mlm_mode='loco',
     **kwargs,
 )
 ```
@@ -42,7 +42,6 @@ PANICLE(
 - `phe`: Phenotype data. File path, DataFrame, `Phenotype`, or `(n, 2)` numpy array with `[ID, trait]`
 - `geno`: Genotype data. File path, numpy array, or `GenotypeMatrix`
 - `map_data`: Genetic map. File path, DataFrame, or `GenotypeMap`
-- `K` (optional): Precomputed global kinship matrix used by methods that consume it
 - `CV` (optional): External covariates `(n × p)`. If `n_pcs > 0`, computed PCs are appended after these columns
 - `method` (list): Methods to run. Typical values: `['GLM']`, `['MLM']`, `['GLM', 'MLM']`
 - `ncpus` (int): CPU count used by method engines. `0` means all available CPUs
@@ -53,13 +52,14 @@ PANICLE(
 - `output_prefix` (str): Prefix for output files
 - `verbose` (bool): Print progress messages
 - `n_pcs` (int): Number of genotype PCs to compute internally and append to `CV`. Set to `0` to skip PCA
+- `mlm_mode` (str): `'loco'` (default) uses leave-one-chromosome-out kinship when a map is available; `'global'` uses one internally computed VanRaden kinship for all markers. User-supplied kinship matrices are not accepted at this API.
 - `**kwargs`: Method-specific options such as `lrt_refinement=False`
 
 **Behavior:**
 - Aligns phenotype IDs to genotype IDs when genotype sample names are available
 - Filters missing phenotype or covariate rows trait-by-trait
 - Computes PCs internally when `n_pcs > 0`
-- Uses LOCO MLM automatically when map data is available
+- MLM relatedness follows `mlm_mode` (LOCO when a map is present under the default)
 
 **Returns:**
 - Dictionary with `data`, `results`, `summary`, `visualization`, and `files`
@@ -215,17 +215,18 @@ pipeline.compute_population_structure(
 
 **Notes:**
 - PCs are automatically used as covariates in subsequent analyses
-- Kinship is only required for non-LOCO `MLM` runs without map data
+- Global kinship is required for `mlm_mode='global'` or when MLM runs without map data; under default LOCO MLM with a map, kinship is not needed here
 - `FarmCPU`, `BLINK`, and `BAYESLOCO` do not use the global kinship matrix in the current pipeline
 - Uses VanRaden (2008) method for kinship calculation
+- User-supplied external kinship files are not supported; kinship is always computed from genotypes when needed
 
 **Example:**
 ```python
-# Compute 5 PCs and kinship matrix
-pipeline.compute_population_structure(n_pcs=5, calculate_kinship=True)
+# Compute 5 PCs (and kinship only if you plan mlm_mode='global')
+pipeline.compute_population_structure(n_pcs=5, calculate_kinship=False)
 
-# Skip PCA, only compute kinship
-pipeline.compute_population_structure(n_pcs=0, calculate_kinship=True)
+# Global MLM path: precompute kinship
+pipeline.compute_population_structure(n_pcs=3, calculate_kinship=True)
 ```
 
 ---
@@ -246,6 +247,7 @@ pipeline.run_analysis(
     n_eff=None,
     use_effective_tests=True,
     max_genotype_dosage=2.0,
+    mlm_mode='loco',
     farmcpu_params=None,
     blink_params=None,
     bayesloco_params=None,
@@ -258,7 +260,7 @@ pipeline.run_analysis(
 - `traits` (list, optional): Which traits to analyze. If None, analyzes all numeric columns in phenotype data
 - `methods` (list): GWAS methods to run. Options:
   - `'GLM'`: General Linear Model (fast, no population structure correction)
-  - `'MLM'`: Mixed Linear Model. Uses LOCO + exact top-hit refinement when map data is available; falls back to global kinship otherwise
+  - `'MLM'`: Mixed Linear Model. Relatedness mode is controlled by `mlm_mode`
   - `'BAYESLOCO'`: Bayesian chromosome-aware association model
   - `'FarmCPU'`: Fixed and random model Circulating Probability Unification
   - `'BLINK'`: Bayesian-information and Linkage-disequilibrium Iteratively Nested Keyway
@@ -271,6 +273,7 @@ pipeline.run_analysis(
 - `n_eff` (int, optional): Effective number of tests for Bonferroni. If None, uses total markers or M_eff
 - `use_effective_tests` (bool): Whether to prefer computed effective tests when available
 - `max_genotype_dosage` (float): Maximum genotype dosage for MAF calculation. Default: 2.0
+- `mlm_mode` (str): `'loco'` (default) or `'global'`. LOCO uses leave-one-chromosome-out kinship when a map is available; global uses one VanRaden kinship for all markers (computed from genotypes)
 - `farmcpu_params` (dict, optional): Parameters for FarmCPU
 - `blink_params` (dict, optional): Parameters for BLINK
 - `bayesloco_params` (dict, optional): Parameters forwarded to `BayesLocoConfig`

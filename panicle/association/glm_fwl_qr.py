@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 import time
 import numpy as np
-from scipy import special
+from scipy import special, stats
 
 from panicle.utils.data_types import (
     GenotypeMatrix,
@@ -41,6 +41,9 @@ from ._validation import missing_values_error
 
 _PROFILE_GLM_BATCH = os.getenv("PANICLE_PROFILE_GLM_BATCH", "").lower() in {"1", "true", "yes"}
 _DEBUG_GLM_LAYOUT = os.getenv("PANICLE_DEBUG_GLM_LAYOUT", "").lower() in {"1", "true", "yes"}
+# Below this residual df, use Student-t tails instead of a normal approximation.
+_STUDENT_T_DF_THRESHOLD = 50
+_low_df_student_t_warned = False
 _GLM_BATCH_PROFILE = {
     "calls": 0,
     "XtG": 0.0,
@@ -75,18 +78,47 @@ def _reset_glm_batch_profile() -> None:
 
 
 def _fast_t_pvalue(t_stats: np.ndarray, df: np.ndarray) -> np.ndarray:
-    """Fast vectorized two-tailed t-test p-value calculation.
+    """Two-tailed p-values from t-statistics.
 
-    Uses a normal approximation (erfc) for speed on large arrays.
+    Uses a normal approximation (``erfc``) when residual degrees of freedom
+    are at least :data:`_STUDENT_T_DF_THRESHOLD` (fast path for large GWAS).
+    When any residual df is below that threshold, uses ``scipy.stats.t.sf``
+    for those entries (correct heavier tails) and prints a one-time warning.
 
     Args:
         t_stats: Array of absolute t-statistics
-        df: Array of degrees of freedom (same shape as t_stats)
+        df: Array of degrees of freedom (broadcastable to ``t_stats``)
 
     Returns:
         Two-tailed p-values
     """
-    p = special.erfc(t_stats / np.sqrt(2.0))
+    global _low_df_student_t_warned
+
+    t_arr = np.asarray(t_stats, dtype=np.float64)
+    df_arr = np.asarray(df, dtype=np.float64)
+    if df_arr.shape != t_arr.shape:
+        df_arr = np.broadcast_to(df_arr, t_arr.shape)
+
+    abs_t = np.abs(t_arr)
+    p = np.empty(t_arr.shape, dtype=np.float64)
+
+    use_t = np.isfinite(df_arr) & (df_arr < _STUDENT_T_DF_THRESHOLD) & (df_arr > 0)
+    use_norm = ~use_t
+
+    if np.any(use_t):
+        if not _low_df_student_t_warned:
+            min_df = float(np.nanmin(df_arr[use_t]))
+            # Round toward the displayed residual df (typically an integer).
+            print(
+                f"Only {int(round(min_df))} degrees of freedom, "
+                "defaulting to slower student-t test implementation."
+            )
+            _low_df_student_t_warned = True
+        p[use_t] = 2.0 * stats.t.sf(abs_t[use_t], df_arr[use_t])
+
+    if np.any(use_norm):
+        p[use_norm] = special.erfc(abs_t[use_norm] / np.sqrt(2.0))
+
     return np.clip(p, 0.0, 1.0)
 
 

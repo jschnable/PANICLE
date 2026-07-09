@@ -91,6 +91,20 @@ def _resolve_method_cpu(ncpus: int, parallel_mode: str) -> int:
     return max(1, requested)
 
 
+def normalize_mlm_mode(mlm_mode: Optional[str]) -> str:
+    """Normalize MLM mode to ``'loco'`` or ``'global'``."""
+    if mlm_mode is None:
+        return "loco"
+    mode = str(mlm_mode).strip().lower().replace("-", "_")
+    if mode in {"loco", "leave_one_chromosome_out"}:
+        return "loco"
+    if mode in {"global", "full", "classic"}:
+        return "global"
+    raise ValueError(
+        f"Invalid mlm_mode={mlm_mode!r}; expected 'loco' or 'global'"
+    )
+
+
 # Helper function for method dispatch
 def _run_single_method(
     method,
@@ -110,6 +124,7 @@ def _run_single_method(
     mlm_loco_kinship=None,
     mlm_kwargs=None,
     ncpus: int = 1,
+    mlm_mode: str = "loco",
 ):
     """Run a single GWAS method and return (name, result, lambda_gc, lambda_gc_is_approx, error)."""
     try:
@@ -126,7 +141,19 @@ def _run_single_method(
 
         elif method == 'MLM':
             mlm_kwargs = mlm_kwargs or {}
-            if map_data is None:
+            mode = normalize_mlm_mode(mlm_mode)
+            use_loco = mode == "loco" and map_data is not None
+            if use_loco:
+                res = PANICLE_MLM_LOCO(
+                    phe=y_sub,
+                    geno=g_sub,
+                    map_data=map_data,
+                    loco_kinship=mlm_loco_kinship,
+                    CV=cov_sub,
+                    verbose=False,
+                    **mlm_kwargs,
+                )
+            else:
                 if k_sub is None:
                     return ('MLM', None, None, False, "Kinship matrix missing")
                 res = PANICLE_MLM(
@@ -136,16 +163,6 @@ def _run_single_method(
                     K=k_sub,
                     cpu=ncpus,
                     verbose=False,
-                )
-            else:
-                res = PANICLE_MLM_LOCO(
-                    phe=y_sub,
-                    geno=g_sub,
-                    map_data=map_data,
-                    loco_kinship=mlm_loco_kinship,
-                    CV=cov_sub,
-                    verbose=False,
-                    **mlm_kwargs,
                 )
             lambda_gc, lambda_gc_is_approx = qq_compatible_genomic_inflation_factor(res.pvalues)
             return ('MLM', res, lambda_gc, lambda_gc_is_approx, None)
@@ -806,6 +823,7 @@ class GWASPipeline:
                      use_effective_tests: bool = True,
                      max_genotype_dosage: float = 2.0,
                      min_mac: int = 10,
+                     mlm_mode: str = "loco",
                      farmcpu_params: Optional[Dict] = None,
                      blink_params: Optional[Dict] = None,
                      bayesloco_params: Optional[Dict] = None,
@@ -813,9 +831,21 @@ class GWASPipeline:
                      include_standard_errors: bool = False):
         """
         Run GWAS analysis for specified traits and methods.
+
+        Parameters
+        ----------
+        mlm_mode : {'loco', 'global'}, default 'loco'
+            How MLM handles relatedness. ``'loco'`` uses leave-one-chromosome-out
+            kinship when a genetic map is available (falls back to global
+            kinship without a map). ``'global'`` always uses a single
+            VanRaden kinship for all markers (computed via
+            ``compute_population_structure(calculate_kinship=True)`` or
+            auto-computed when needed).
         """
         if self.phenotype_df is None:
             raise ValueError("Data not loaded.")
+
+        mlm_mode_norm = normalize_mlm_mode(mlm_mode)
 
         self.log_step("Step 4: Running GWAS analysis")
         method_cpus = _resolve_method_cpu(ncpus=ncpus, parallel_mode=parallel_mode)
@@ -875,8 +905,26 @@ class GWASPipeline:
                     "BAYESLOCO unrelated_subset calibration requires unrelated_subset_indices in bayesloco_params"
                 )
 
-        # Global kinship is only required for non-LOCO MLM runs.
-        need_kinship = 'MLM' in methods_upper_check and self.geno_map is None
+        # Global kinship is required for global MLM, or LOCO MLM when no map.
+        need_kinship = (
+            'MLM' in methods_upper_check
+            and (mlm_mode_norm == "global" or self.geno_map is None)
+        )
+        use_loco_mlm = (
+            'MLM' in methods_upper_check
+            and mlm_mode_norm == "loco"
+            and self.geno_map is not None
+        )
+        if 'MLM' in methods_upper_check:
+            if use_loco_mlm:
+                self.log("   MLM mode: loco (leave-one-chromosome-out kinship)")
+            else:
+                reason = (
+                    "mlm_mode=global"
+                    if mlm_mode_norm == "global"
+                    else "no genetic map; falling back to global kinship"
+                )
+                self.log(f"   MLM mode: global ({reason})")
         structure_n_pcs = self._structure_n_pcs
 
         # 2. Bonferroni / Thresholding Logic
@@ -1000,7 +1048,7 @@ class GWASPipeline:
                         tres, group_keep_indices, n_markers, full_map=self.geno_map,
                     )
 
-            if "MLM" in methods_upper_check and self.geno_map is not None:
+            if "MLM" in methods_upper_check and use_loco_mlm:
                 self.log(
                     "   Running grouped MLM LOCO for "
                     f"{len(group_items)} traits sharing {group_indices.size} samples"
@@ -1131,7 +1179,7 @@ class GWASPipeline:
             mlm_kwargs = {"cpu": method_cpus}
             use_grouped_glm = "GLM" in ordered_methods and trait_name in grouped_glm_results
             use_grouped_mlm = "MLM" in ordered_methods and trait_name in grouped_mlm_results
-            if "MLM" in ordered_methods and self.geno_map is not None and not use_grouped_mlm:
+            if "MLM" in ordered_methods and use_loco_mlm and not use_grouped_mlm:
                 # Keep MLM in-process so LOCO kinship/eigens can be cached across traits.
                 self.log("   Running MLM in main process (reusing LOCO cache)")
                 mlm_loco_kinship = self._get_or_create_loco_kinship(
@@ -1179,6 +1227,7 @@ class GWASPipeline:
                             loco_arg,
                             mlm_kw_arg,
                             ncpus=method_cpus,
+                            mlm_mode=mlm_mode_norm,
                         )
                         # Pad results back to full-map length (NaN for dropped markers).
                         res_obj = pad_association_results(

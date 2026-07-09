@@ -89,7 +89,7 @@ results = PANICLE(
 # Results are also saved to CSV files automatically.
 ```
 
-For finer control (custom alignment, manual kinship, looping over traits), see the [API Reference](docs/api_reference.md) and the [`GWASPipeline`](#pipeline-api) class below.
+For finer control (custom alignment, looping over traits, `mlm_mode`), see the [API Reference](docs/api_reference.md) and the [`GWASPipeline`](#pipeline-api) class below.
 
 ## What You Get
 
@@ -138,6 +138,7 @@ python scripts/run_GWAS.py \
 | **`--traits`** | Comma-separated list of columns to analyze. | All numeric |
 | **`--methods`** | GWAS methods: `GLM`, `MLM`, `BAYESLOCO`, `FarmCPU`, `BLINK`, `FarmCPUResampling`. | GLM,MLM,FarmCPU |
 | **`--n-pcs`** | Number of Principal Components for population structure. | 3 |
+| **`--mlm-mode`** | MLM relatedness: `loco` (default, leave-one-chromosome-out when a map is available) or `global` (one VanRaden kinship for all markers, computed internally). | loco |
 | **`--compute-effective-tests`** | Calculate Effective Marker Number (Me) and use it for Bonferroni correction. | False |
 | **`--alpha`** | Significance level (e.g., 0.05). Threshold = `alpha / Me` (or `M`). | 0.05 |
 | **`--significance`** | Fixed p-value threshold (overrides Bonferroni). | None |

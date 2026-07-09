@@ -369,3 +369,38 @@ def test_panicle_mlm_matches_direct_loco_when_trait_contains_missing_values() ->
         equal_nan=True,
     )
     assert high_level["summary"]["trait_sample_sizes"]["Trait"] == int(mask.sum())
+
+
+def test_panicle_mlm_global_mode_runs_without_loco() -> None:
+    """mlm_mode='global' should compute VanRaden K and use classic MLM."""
+    rng = np.random.default_rng(21)
+    n_individuals = 16
+    n_markers = 20
+    ids = np.array([f"G{i:03d}" for i in range(n_individuals)])
+    geno = rng.integers(0, 3, size=(n_individuals, n_markers), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(n_markers)],
+            "CHROM": ["1"] * (n_markers // 2) + ["2"] * (n_markers - n_markers // 2),
+            "POS": np.arange(1, n_markers + 1),
+        }
+    )
+    trait = 0.5 * geno[:, 1].astype(np.float64) + rng.normal(scale=0.4, size=n_individuals)
+    phenotype_df = pd.DataFrame({"ID": ids, "Trait": trait})
+
+    res = mvp.PANICLE(
+        phe=phenotype_df,
+        geno=GenotypeMatrix(geno),
+        map_data=GenotypeMap(map_df),
+        method=["MLM"],
+        mlm_mode="global",
+        file_output=False,
+        verbose=False,
+        min_mac=0,
+    )
+
+    assert "kinship" in res["data"]
+    assert res["data"]["kinship"].shape == (n_individuals, n_individuals)
+    mlm_res = res["results"]["Trait"]["MLM"]
+    assert mlm_res.pvalues.shape == (n_markers,)
+    assert np.all(np.isfinite(mlm_res.pvalues))
