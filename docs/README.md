@@ -22,12 +22,12 @@ Welcome to the PANICLE documentation! This guide will help you perform genome-wi
   - Working with output in Python/R
 
 ### Tutorials & Examples
-- **[Sorghum GWAS Tutorial](gwas_sorghum_tutorial.ipynb)** - Interactive Jupyter notebook
+- **[GWAS Tutorial notebook](../examples/gwas_sorghum_tutorial.ipynb)** - Interactive Jupyter notebook on bundled demo data
   - Complete GWAS workflow with real sorghum data (725 samples, 170K markers)
   - Demonstrates GLM, MLM, FarmCPU, and BLINK methods
   - Visualizations and result interpretation
 
-- **[Multi-Trait eQTL Acceleration Tutorial](eqtl_multitrait_acceleration_tutorial.ipynb)** - Interactive Jupyter notebook
+- **[Multi-Trait eQTL Acceleration Tutorial](../examples/eqtl_multitrait_acceleration_tutorial.ipynb)** - Interactive Jupyter notebook
   - Demonstrates eQTL-style many-traits LOCO MLM workflow
   - Shows chromosome-major acceleration (`PANICLE_MLM_LOCO_MULTI`)
   - Includes writing top QTL hits to CSV output

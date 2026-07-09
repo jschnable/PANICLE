@@ -84,6 +84,9 @@ harmonized_gec_spec.md
 *results*/
 *_results/
 *_output/
+examples/tutorial_results/
+examples/eqtl_tutorial_out/
+examples/*.panicle.v2.*
 gwas_analysis_results/
 farmcpu_comparison_results/
 rMVP_FarmCPU_*/

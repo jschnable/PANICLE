@@ -348,7 +348,7 @@ happens automatically on first VCF/PLINK/HapMap load if you skip pre-caching.
 
 ## Next Steps
 
-- **Try the [Sorghum GWAS Tutorial](gwas_sorghum_tutorial.ipynb)**: Interactive Jupyter notebook with real data
+- **Try the [GWAS Tutorial notebook](../examples/gwas_sorghum_tutorial.ipynb)**: Interactive end-to-end GWAS on bundled demo data
 - **See [examples/](../examples/)**: More detailed example scripts with test data
 - **See [api_reference.md](api_reference.md)**: Complete API documentation
 - **See [output_files.md](output_files.md)**: Detailed output format specifications

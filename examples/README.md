@@ -11,6 +11,8 @@ This directory contains example scripts demonstrating different PANICLE workflow
 | [04_with_covariates.py](04_with_covariates.py) | Including external covariates | Intermediate | 5 min |
 | [05_reading_results.py](05_reading_results.py) | Analyzing and visualizing results | Intermediate | 5 min |
 | [06_farmcpu_resampling.py](06_farmcpu_resampling.py) | FarmCPU resampling with RMIP output | Intermediate | 10 min |
+| [gwas_sorghum_tutorial.ipynb](gwas_sorghum_tutorial.ipynb) | Full pipeline notebook (demo VCF; LOCO MLM) | Beginner | 5 min |
+| [eqtl_multitrait_acceleration_tutorial.ipynb](eqtl_multitrait_acceleration_tutorial.ipynb) | Multi-trait LOCO MLM acceleration | Intermediate | 2 min |
 
 ## Running the Examples
 
@@ -23,7 +25,7 @@ This directory contains example scripts demonstrating different PANICLE workflow
 
 See [EXAMPLE_DATA.md](EXAMPLE_DATA.md) for details about the dataset.
 
-All examples use these file names by default. You can also use your own data or the full sorghum dataset in `../sorghum_data/`.
+All scripts and the GWAS notebook use these files by default.
 
 ### Running an Example
 
@@ -32,9 +34,13 @@ All examples use these file names by default. You can also use your own data or 
 cd /path/to/PANICLE
 pip install -e .
 
-# Run an example
+# Run a script example
 cd examples
 python 01_basic_gwas.py
+
+# Open notebooks (Jupyter)
+jupyter notebook gwas_sorghum_tutorial.ipynb
+# or: jupyter notebook eqtl_multitrait_acceleration_tutorial.ipynb
 ```
 
 Or with custom data (all examples accept CLI overrides):

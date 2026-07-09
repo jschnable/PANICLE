@@ -219,8 +219,8 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 
 ### Interactive Tutorials
 
-- **[Sorghum GWAS Tutorial](examples/gwas_sorghum_tutorial.ipynb)** — Jupyter notebook walking through a complete GWAS workflow on a sorghum dataset.
-- **[eQTL Multi-Trait LOCO MLM Acceleration](examples/eqtl_multitrait_acceleration_tutorial.ipynb)** — Practical eQTL/QTL pattern: many traits (e.g. gene expression) tested against the same genotype matrix and shared LOCO kinship, with the acceleration tricks that make it tractable.
+- **[GWAS Tutorial notebook](examples/gwas_sorghum_tutorial.ipynb)** — End-to-end `GWASPipeline` on the bundled demo VCF/phenotypes (LOCO MLM, FarmCPU, BLINK).
+- **[eQTL Multi-Trait LOCO MLM Acceleration](examples/eqtl_multitrait_acceleration_tutorial.ipynb)** — Synthetic multi-trait LOCO: per-trait vs `PANICLE_MLM_LOCO_MULTI` speedup and hit table.
 
 ### Example Scripts
 
