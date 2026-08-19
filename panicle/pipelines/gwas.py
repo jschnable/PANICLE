@@ -91,6 +91,26 @@ def _resolve_method_cpu(ncpus: int, parallel_mode: str) -> int:
     return max(1, requested)
 
 
+def _map_has_non_numeric_chrom_labels(geno_map) -> bool:
+    """Return True if any chromosome label is non-numeric (e.g. ``chr1``).
+
+    Uses the cached chromosome order on ``GenotypeMap`` so this does not
+    materialize a full marker-map DataFrame. On a cache-backed VCF that
+    DataFrame is 12M+ rows and was previously built only to decide whether
+    to print an htslib contig warning.
+    """
+    if geno_map is None:
+        return False
+    try:
+        if hasattr(geno_map, "get_chromosome_order"):
+            labels = geno_map.get_chromosome_order()
+        else:
+            return False
+        return any(not str(label).isdigit() for label in labels)
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return False
+
+
 def normalize_mlm_mode(mlm_mode: Optional[str]) -> str:
     """Normalize MLM mode to ``'loco'`` or ``'global'``."""
     if mlm_mode is None:
@@ -375,6 +395,7 @@ class GWASPipeline:
         # Cache LOCO kinship objects keyed by trait-specific sample subsets.
         self._loco_kinship_cache: Dict[Tuple[int, int], Any] = {}
         self._loco_kinship_cache_max_entries: int = 4
+        self.genotype_file: Optional[str] = None
         
         # Analysis State
         self.results: Dict[str, Dict[str, Any]] = {}  # {trait: {method: result}}
@@ -403,6 +424,7 @@ class GWASPipeline:
         *,
         maxLine: int = 5000,
         map_data=None,
+        keep_indices: Optional[np.ndarray] = None,
     ):
         """Return cached LOCO kinship for a trait sample subset, computing on miss.
 
@@ -422,11 +444,12 @@ class GWASPipeline:
         if cached is not None:
             return cached
 
-        loco_kinship = PANICLE_K_VanRaden_LOCO(
+        loco_kinship = self._load_or_compute_loco_kinship(
             genotype_subset,
-            map_data,
+            subset_indices,
+            map_data=map_data,
             maxLine=maxLine,
-            verbose=False,
+            keep_indices=keep_indices,
         )
         self._loco_kinship_cache[key] = loco_kinship
 
@@ -436,6 +459,73 @@ class GWASPipeline:
             del self._loco_kinship_cache[first_key]
 
         return loco_kinship
+
+    def _load_or_compute_loco_kinship(
+        self,
+        genotype_subset: GenotypeMatrix,
+        subset_indices: np.ndarray,
+        *,
+        map_data,
+        maxLine: int,
+        keep_indices: Optional[np.ndarray] = None,
+    ):
+        """Load leave-one-group Gram objects from disk, or compute and store them."""
+        from ..matrix.loco_cache import (
+            load_loco_kinship,
+            loco_cache_digest,
+            loco_cache_path,
+            resolve_chrom_order,
+            save_loco_kinship,
+        )
+
+        cache_path = None
+        cache_base = self.genotype_file
+        if cache_base:
+            digest = loco_cache_digest(
+                subset_indices,
+                keep_indices,
+                resolve_chrom_order(map_data),
+                n_markers=int(genotype_subset.n_markers),
+                max_line=int(maxLine),
+            )
+            cache_path = loco_cache_path(cache_base, digest)
+            loaded = load_loco_kinship(cache_path)
+            if loaded is not None:
+                self.log(f"   [Cache] Using cached LOCO kinship ({digest[:12]})")
+                return loaded
+
+        loco_kinship = PANICLE_K_VanRaden_LOCO(
+            genotype_subset,
+            map_data,
+            maxLine=maxLine,
+            verbose=False,
+        )
+        if cache_path is not None:
+            try:
+                save_loco_kinship(cache_path, loco_kinship)
+            except OSError as exc:
+                self.log(f"   [Cache] Could not write LOCO kinship cache: {exc}")
+        return loco_kinship
+
+    @staticmethod
+    def _association_genotype(
+        genotype_view: GenotypeMatrix,
+        keep_indices: Optional[np.ndarray],
+    ) -> GenotypeMatrix:
+        """Pack a (possibly lazy) aligned view into the scan matrix.
+
+        When ``keep_indices`` is set this run-length-compacts those columns
+        and the selected rows into a dense ``(n_valid, n_keep)`` buffer.
+        """
+        if keep_indices is None:
+            if getattr(genotype_view, "has_row_subset", False):
+                return genotype_view.subset_individuals(
+                    np.arange(genotype_view.n_individuals, dtype=np.int64),
+                    materialize=True,
+                    precompute_alleles=not genotype_view.is_imputed,
+                )
+            return genotype_view
+        return genotype_view.subset_markers(keep_indices)
 
     @staticmethod
     def _ensure_gwas_eager_genotype(genotype_subset: GenotypeMatrix) -> GenotypeMatrix:
@@ -540,6 +630,7 @@ class GWASPipeline:
         self._clear_trait_cache()
         self._matched_indices = None
         self._structure_indices = None
+        self.genotype_file = str(genotype_file)
 
         # 1. Phenotype
         try:
@@ -571,15 +662,11 @@ class GWASPipeline:
             )
             self.log(f"   Loaded {self.genotype_matrix.n_individuals} individuals x {self.genotype_matrix.n_markers} markers")
             
-            # VCF warning handler
-            if genotype_format == 'vcf':
-                try:
-                    chrom_labels = self.geno_map.to_dataframe()['CHROM'].astype(str).unique()
-                    non_numeric_chroms = [label for label in chrom_labels if not label.isdigit()]
-                    if non_numeric_chroms:
-                        self.log("   Note: htslib may print [W::vcf_parse] warnings for non-contig lines.")
-                except (KeyError, AttributeError, TypeError):
-                    pass
+            # VCF warning handler. Chromosome order is already cached on the
+            # map; do not call to_dataframe() here (that materializes every
+            # marker row just to inspect a handful of contig labels).
+            if genotype_format == 'vcf' and _map_has_non_numeric_chrom_labels(self.geno_map):
+                self.log("   Note: htslib may print [W::vcf_parse] warnings for non-contig lines.")
 
             self.effective_tests_info = self.geno_map.metadata.get("effective_tests")
             if self.effective_tests_info:
@@ -777,12 +864,24 @@ class GWASPipeline:
             structure_indices.size == self.genotype_matrix.n_individuals
             and np.array_equal(structure_indices, np.arange(self.genotype_matrix.n_individuals))
         )
-        if is_full_geno:
+        already_eager = (
+            is_full_geno
+            and not getattr(self.genotype_matrix, "is_memmap", False)
+            and not getattr(self.genotype_matrix, "has_row_subset", False)
+        )
+        if already_eager:
             geno_for_structure = self.genotype_matrix
         else:
-            geno_for_structure = self.genotype_matrix.subset_individuals(structure_indices)
+            self.log(
+                f"   Materializing aligned genotype "
+                f"({structure_indices.size} × {self.genotype_matrix.n_markers})"
+            )
+            geno_for_structure = self.genotype_matrix.subset_individuals(
+                structure_indices,
+                materialize=True,
+            )
         self._structure_indices = structure_indices
-        # Cache the genotype subset for reuse in _prepare_trait_data
+        # Eager aligned buffer: PCA and per-mask compact read from this, not the mmap.
         self._structure_genotype = geno_for_structure
 
         # PCA
@@ -995,6 +1094,11 @@ class GWASPipeline:
 
         grouped_glm_results: Dict[str, AssociationResults] = {}
         grouped_mlm_results: Dict[str, AssociationResults] = {}
+        packed_by_subset: Dict[Tuple[int, int], GenotypeMatrix] = {}
+        remaining_pack_uses: Dict[Tuple[int, int], int] = {}
+        for item in prepared_traits:
+            subset_key = self._sample_subset_cache_key(item[5])
+            remaining_pack_uses[subset_key] = remaining_pack_uses.get(subset_key, 0) + 1
         subset_groups: Dict[
             Tuple[int, int],
             List[
@@ -1023,11 +1127,12 @@ class GWASPipeline:
             y_matrix = np.column_stack(
                 [item[1][:, 1].astype(np.float64) for item in group_items]
             )
-            group_geno = group_items[0][2]
             group_cov = group_items[0][3]
             group_indices = group_items[0][5]
             group_map = group_items[0][6]
             group_keep_indices = group_items[0][7]
+            group_geno = self._association_genotype(group_items[0][2], group_keep_indices)
+            packed_by_subset[self._sample_subset_cache_key(group_indices)] = group_geno
 
             if "GLM" in methods_upper_check:
                 self.log(
@@ -1058,6 +1163,7 @@ class GWASPipeline:
                     group_indices,
                     maxLine=5000,
                     map_data=group_map,
+                    keep_indices=group_keep_indices,
                 )
                 raw_mlm = PANICLE_MLM_LOCO_MULTI(
                     phe=y_matrix,
@@ -1074,11 +1180,16 @@ class GWASPipeline:
                         tres, group_keep_indices, n_markers, full_map=self.geno_map,
                     )
 
-        for (trait_name, y_sub, g_sub, cov_sub, k_sub, trait_geno_idx,
+        for (trait_name, y_sub, g_view, cov_sub, k_sub, trait_geno_idx,
              trait_geno_map, trait_keep_indices) in prepared_traits:
             self.log(f"\n-- Analyzing Trait: {trait_name} --")
             trait_start_time = time.time()
             n_samples_trait = y_sub.shape[0]
+            subset_key = self._sample_subset_cache_key(trait_geno_idx)
+            g_sub = packed_by_subset.get(subset_key)
+            if g_sub is None:
+                g_sub = self._association_genotype(g_view, trait_keep_indices)
+                packed_by_subset[subset_key] = g_sub
 
             # Run methods in deterministic order. Method engines may still use
             # internal threading based on `cpu`.
@@ -1187,6 +1298,7 @@ class GWASPipeline:
                     trait_geno_idx,
                     maxLine=5000,
                     map_data=trait_geno_map,
+                    keep_indices=trait_keep_indices,
                 )
 
             # Per-trait effective marker count for Bonferroni reporting
@@ -1294,6 +1406,15 @@ class GWASPipeline:
             )
             summary_rows.extend(trait_summary)
             self.log(f"Trait {trait_name} completed in {trait_runtime:.2f} seconds")
+            remaining_pack_uses[subset_key] = remaining_pack_uses.get(subset_key, 1) - 1
+            if remaining_pack_uses[subset_key] <= 0:
+                packed_by_subset.pop(subset_key, None)
+                if (
+                    self._trait_cache_genotype is not None
+                    and self._trait_cache_indices is not None
+                    and np.array_equal(self._trait_cache_indices, trait_geno_idx)
+                ):
+                    self._trait_cache_genotype = None
 
         # Final Summary
         if summary_rows:
@@ -1381,22 +1502,22 @@ class GWASPipeline:
                 and np.array_equal(self._structure_indices, geno_idx)
             ):
                 # Exact match - reuse cached structure genotype directly
-                g_final = self._ensure_gwas_eager_genotype(self._structure_genotype)
+                g_final = self._structure_genotype
             elif (
                 self._structure_genotype is not None
                 and self._structure_indices is not None
                 and len(geno_idx) < len(self._structure_indices)
             ):
                 # Trait indices are likely a subset of structure indices (due to missing phenotypes)
-                # Subset from the in-memory cached genotype (fast) instead of memmap (slow)
-                # Create mapping: structure_indices -> local position
+                # Keep a lazy row view of the aligned in-RAM buffer. Compact
+                # reads those rows directly into the packed keep-set.
                 structure_set = set(self._structure_indices)
                 if all(idx in structure_set for idx in geno_idx):
                     idx_map = {v: i for i, v in enumerate(self._structure_indices)}
                     local_indices = np.array([idx_map[idx] for idx in geno_idx], dtype=int)
                     g_final = self._structure_genotype.subset_individuals(
                         local_indices,
-                        materialize=True,
+                        materialize=False,
                     )
                 else:
                     # Fallback: some trait indices not in structure (shouldn't happen normally)
@@ -1475,7 +1596,9 @@ class GWASPipeline:
                 trait_geno_map = self.geno_map
             else:
                 if keep_indices.size != g_final.n_markers:
-                    g_final = g_final.subset_markers(keep_indices)
+                    # Leave g_final as the (possibly lazy) unfiltered view.
+                    # Packing into the keep-set happens once per sample mask
+                    # at scan time so we do not hold every mask's buffer.
                     if self.geno_map is not None:
                         trait_geno_map = self.geno_map.subset_markers(keep_indices)
                     else:
@@ -1525,8 +1648,21 @@ class GWASPipeline:
         """Internal helper to save tables and plots"""
         
         summary_data = []
-        base_df = self.geno_map.to_dataframe().copy() if hasattr(self.geno_map, 'to_dataframe') else pd.DataFrame()
-        marker_id_col = infer_marker_id_column(base_df.columns)
+        want_full_table = 'all_marker_pvalues' in outputs
+        if want_full_table and self.geno_map is not None:
+            # One copy of the map frame. to_dataframe() already copies; do not
+            # copy again.
+            if hasattr(self.geno_map, "data") and getattr(self.geno_map, "_dataframe_cache", None) is not None:
+                base_df = self.geno_map.data.copy()
+            elif hasattr(self.geno_map, "to_dataframe"):
+                base_df = self.geno_map.to_dataframe()
+            else:
+                base_df = pd.DataFrame()
+        elif want_full_table:
+            base_df = pd.DataFrame()
+        else:
+            base_df = pd.DataFrame()
+        marker_id_col = infer_marker_id_column(base_df.columns) if not base_df.empty else None
         if marker_id_col is None and not base_df.empty:
             raise ValueError("Genotype map is missing a marker ID column")
         if marker_id_col is not None and marker_id_col != MARKER_ID_COLUMN:
@@ -1563,7 +1699,7 @@ class GWASPipeline:
                 return bool(obj)
             raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-        all_res_df = base_df.copy()
+        all_res_df = base_df
         sig_snps = []
         hits_by_method = {}
         resampling_hit_snps = set()
@@ -1629,11 +1765,11 @@ class GWASPipeline:
                 continue
 
             # Standard Results
-            # Add to big table
-            all_res_df[f'{method}_P'] = Res.pvalues
-            all_res_df[f'{method}_Effect'] = Res.effects
-            if include_standard_errors:
-                all_res_df[f'{method}_SE'] = Res.se
+            if want_full_table:
+                all_res_df[f'{method}_P'] = Res.pvalues
+                all_res_df[f'{method}_Effect'] = Res.effects
+                if include_standard_errors:
+                    all_res_df[f'{method}_SE'] = Res.se
             
             # Check significance
             hits = Res.pvalues <= method_threshold
@@ -1726,8 +1862,12 @@ class GWASPipeline:
             hits_by_method['FarmCPUResampling'] = resampling_mask
 
         if hits_by_method and 'significant_marker_pvalues' in outputs:
-            n_markers = all_res_df.shape[0]
-            method_labels = [[] for _ in range(n_markers)]
+            n_out = (
+                all_res_df.shape[0]
+                if want_full_table and not all_res_df.empty
+                else int(next(iter(hits_by_method.values())).shape[0])
+            )
+            method_labels = [[] for _ in range(n_out)]
             for method in ordered_methods:
                 hits = hits_by_method.get(method)
                 if hits is None or not np.any(hits):
@@ -1737,7 +1877,26 @@ class GWASPipeline:
 
             any_hits = np.array([bool(labels) for labels in method_labels], dtype=bool)
             if np.any(any_hits):
-                sig_df = all_res_df.loc[any_hits].copy()
+                if want_full_table and not all_res_df.empty:
+                    sig_df = all_res_df.loc[any_hits].copy()
+                elif hasattr(self.geno_map, "to_dataframe_at"):
+                    sig_indices = np.where(any_hits)[0]
+                    sig_df = self.geno_map.to_dataframe_at(sig_indices)
+                    for method in ordered_methods:
+                        if method == "FarmCPUResampling" or method not in results:
+                            continue
+                        res_obj = results[method]
+                        sig_df[f"{method}_P"] = res_obj.pvalues[sig_indices]
+                        sig_df[f"{method}_Effect"] = res_obj.effects[sig_indices]
+                        if include_standard_errors:
+                            sig_df[f"{method}_SE"] = res_obj.se[sig_indices]
+                    if not base_columns:
+                        base_columns = [
+                            c for c in sig_df.columns
+                            if not c.endswith("_P") and not c.endswith("_Effect") and not c.endswith("_SE")
+                        ]
+                else:
+                    sig_df = all_res_df.loc[any_hits].copy()
                 if 'MAF' not in sig_df.columns:
                     sig_indices = np.where(any_hits)[0]
                     geno_source = geno_for_maf or self.genotype_matrix

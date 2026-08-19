@@ -70,9 +70,33 @@ def compute_mac_keep_indices(
     non-finite floating values) are excluded from both the allele sum and the
     per-marker sample count.  Using the full cohort size while summing raw
     ``-9`` entries would deflate MAC and drop markers incorrectly.
+
+    Pre-imputed integer ``GenotypeMatrix`` objects (``is_imputed=True``) take a
+    single column-sum pass: there are no missing values, so the validity mask
+    and ``np.where`` copy used below are unnecessary.
     """
     if min_mac is None or int(min_mac) <= 0:
         return None
+
+    min_mac_f = float(int(min_mac))
+    row_idx = getattr(genotype, "_row_indexer", None)
+    storage = getattr(genotype, "_storage", None)
+    if (
+        bool(getattr(genotype, "is_imputed", False))
+        and row_idx is not None
+        and isinstance(storage, np.ndarray)
+        and storage.dtype == np.int8
+        and not getattr(genotype, "is_transposed", False)
+    ):
+        from .compact import column_sums_int8
+
+        if storage.shape[1] == 0:
+            return np.zeros(0, dtype=np.int64)
+        col_sums = column_sums_int8(storage, row_idx)
+        max_total = float(max_dosage) * float(row_idx.size)
+        mac = np.minimum(col_sums, max_total - col_sums)
+        return np.flatnonzero(mac >= min_mac_f).astype(np.int64, copy=False)
+
     if hasattr(genotype, "n_individuals") and hasattr(genotype, "n_markers"):
         n_mrk = genotype.n_markers
         if n_mrk == 0:
@@ -85,6 +109,14 @@ def compute_mac_keep_indices(
         n_mrk = arr.shape[1]
         if n_mrk == 0:
             return np.zeros(0, dtype=np.int64)
+
+    # Imputed integer matrices have no -9/NaN sentinels. Sum in float64 so
+    # int8 dosages cannot overflow (n_individuals * max_dosage).
+    if bool(getattr(genotype, "is_imputed", False)) and not np.issubdtype(arr.dtype, np.floating):
+        col_sums = arr.sum(axis=0, dtype=np.float64)
+        max_total = float(max_dosage) * float(arr.shape[0])
+        mac = np.minimum(col_sums, max_total - col_sums)
+        return np.flatnonzero(mac >= min_mac_f).astype(np.int64, copy=False)
 
     # Valid diploid dosages are non-negative (0/1/2, ...).  The package uses
     # -9 as the missing sentinel; also drop non-finite floats if present.
@@ -103,7 +135,7 @@ def compute_mac_keep_indices(
     with np.errstate(invalid="ignore"):
         mac = np.minimum(col_sums, max_total - col_sums)
     mac = np.where(n_valid > 0, mac, 0.0)
-    return np.flatnonzero(mac >= float(int(min_mac))).astype(np.int64, copy=False)
+    return np.flatnonzero(mac >= min_mac_f).astype(np.int64, copy=False)
 
 
 def pad_association_results(

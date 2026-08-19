@@ -3,11 +3,14 @@ Core data structures for PANICLE package
 """
 
 from dataclasses import dataclass
+import logging
 import re
 import numpy as np
 import pandas as pd
 from typing import Optional, Union, Tuple, Dict, Any, List, Sequence
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 MARKER_ID_COLUMN = "MARKER"
@@ -185,22 +188,41 @@ def _unpack_chromosome_groups(
 class _PackedUtf8Column:
     """Lazy UTF-8 string column stored as a byte blob plus offsets."""
 
-    def __init__(self, offsets: np.ndarray, data: np.ndarray):
+    def __init__(
+        self,
+        offsets: np.ndarray,
+        data: np.ndarray,
+        indexer: Optional[np.ndarray] = None,
+    ):
         self.offsets = np.asarray(offsets, dtype=np.int64)
         self.data = np.asarray(data, dtype=np.uint8)
+        self._indexer = None if indexer is None else np.asarray(indexer, dtype=np.int64)
         self._decoded: Optional[np.ndarray] = None
 
     def __len__(self) -> int:
+        if self._indexer is not None:
+            return int(self._indexer.size)
         return max(0, int(self.offsets.size) - 1)
+
+    def take(self, indices: np.ndarray) -> "_PackedUtf8Column":
+        idx = np.asarray(indices, dtype=np.int64)
+        if self._indexer is not None:
+            idx = self._indexer[idx]
+        return _PackedUtf8Column(self.offsets, self.data, indexer=idx)
 
     def to_numpy(self) -> np.ndarray:
         if self._decoded is None:
             buffer = memoryview(self.data)
-            out = np.empty(len(self), dtype=object)
-            for idx in range(len(out)):
-                start = int(self.offsets[idx])
-                end = int(self.offsets[idx + 1])
-                out[idx] = bytes(buffer[start:end]).decode("utf-8")
+            n = len(self)
+            out = np.empty(n, dtype=object)
+            parent_idx = (
+                np.arange(n, dtype=np.int64) if self._indexer is None else self._indexer
+            )
+            for i in range(n):
+                src = int(parent_idx[i])
+                start = int(self.offsets[src])
+                end = int(self.offsets[src + 1])
+                out[i] = bytes(buffer[start:end]).decode("utf-8")
             self._decoded = out
         return self._decoded
 
@@ -215,6 +237,10 @@ class _CategoricalUtf8Column:
 
     def __len__(self) -> int:
         return int(self.codes.size)
+
+    def take(self, indices: np.ndarray) -> "_CategoricalUtf8Column":
+        idx = np.asarray(indices, dtype=np.int64)
+        return _CategoricalUtf8Column(self.codes[idx], self.categories)
 
     def to_numpy(self) -> np.ndarray:
         if self._decoded is None:
@@ -688,6 +714,18 @@ class GenotypeMap:
         """Number of markers"""
         return len(self._column_data[POS_COLUMN])
     
+    def to_dataframe_at(self, indices: np.ndarray) -> pd.DataFrame:
+        """Materialize only the selected marker rows as a DataFrame."""
+        idx = np.asarray(indices, dtype=np.int64)
+        frame_data = {}
+        for column in self._column_order:
+            data = self._column_data[column]
+            if hasattr(data, "take"):
+                frame_data[column] = data.take(idx).to_numpy()
+            else:
+                frame_data[column] = np.asarray(data)[idx]
+        return pd.DataFrame(frame_data, copy=False)
+
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to pandas DataFrame"""
         out = self.data.copy()
@@ -733,12 +771,36 @@ class GenotypeMap:
 
         new_columns: Dict[str, Any] = {}
         for col_name in self._column_order:
-            data = _materialize_lazy_column(self._column_data[col_name])
-            arr = np.asarray(data)
-            new_columns[col_name] = arr[idx] if idx.size else arr[:0]
+            data = self._column_data[col_name]
+            if idx.size == 0:
+                if hasattr(data, "take"):
+                    new_columns[col_name] = data.take(idx)
+                else:
+                    arr = np.asarray(data)
+                    new_columns[col_name] = arr[:0]
+            elif hasattr(data, "take"):
+                new_columns[col_name] = data.take(idx)
+            else:
+                new_columns[col_name] = np.asarray(data)[idx]
 
         metadata = {k: v for k, v in self.metadata.items()
                     if k not in ("chromosome_groups", "chromosome_order")}
+        parent_groups = self.metadata.get("chromosome_groups")
+        parent_order = self.metadata.get("chromosome_order")
+        if parent_groups and parent_order is not None and idx.size:
+            n_parent = self.n_markers
+            inverse = np.full(n_parent, -1, dtype=np.int64)
+            inverse[idx] = np.arange(idx.size, dtype=np.int64)
+            new_groups: Dict[str, np.ndarray] = {}
+            new_order: List[str] = []
+            for chrom in parent_order:
+                mapped = inverse[np.asarray(parent_groups[str(chrom)], dtype=np.int64)]
+                mapped = mapped[mapped >= 0]
+                if mapped.size:
+                    new_groups[str(chrom)] = mapped
+                    new_order.append(str(chrom))
+            metadata["chromosome_groups"] = new_groups
+            metadata["chromosome_order"] = new_order
         return GenotypeMap.from_columns(
             new_columns,
             column_order=self._column_order,
@@ -1292,8 +1354,35 @@ class GenotypeMatrix:
                     raise IndexError("Marker indices are out of bounds")
 
         if marker_idx.size == 0:
-            subset = np.empty((self.n_individuals, 0), dtype=self._data.dtype)
+            subset = np.empty((self.n_individuals, 0), dtype=self._storage.dtype)
+        elif (
+            not self._transposed
+            and isinstance(self._storage, np.ndarray)
+            and self._storage.dtype == np.int8
+        ):
+            from .compact import can_compact_int8_columns, compact_columns_int8
+
+            if can_compact_int8_columns(self._storage, marker_idx):
+                subset = compact_columns_int8(
+                    self._storage,
+                    marker_idx,
+                    row_idx=self._row_indexer,
+                )
+            else:
+                logger.debug(
+                    "subset_markers using fancy index: keep set not strictly increasing"
+                )
+                subset = np.ascontiguousarray(self.get_columns(marker_idx))
         else:
+            if self._transposed:
+                reason = "transposed storage"
+            elif not isinstance(self._storage, np.ndarray):
+                reason = "storage is not an ndarray"
+            elif self._storage.dtype != np.int8:
+                reason = f"dtype is {self._storage.dtype}, not int8"
+            else:
+                reason = "keep set not strictly increasing"
+            logger.debug("subset_markers using fancy index: %s", reason)
             subset = np.ascontiguousarray(self.get_columns(marker_idx))
 
         if precompute_alleles is None:

@@ -64,6 +64,43 @@ def test_compute_mac_keep_indices_works_on_genotype_matrix() -> None:
     assert keep.tolist() == [1]
 
 
+def test_compute_mac_keep_indices_imputed_matches_missing_aware_path() -> None:
+    """The imputed column-sum path must match the mask path on complete data."""
+    rng = np.random.default_rng(0)
+    g = rng.integers(0, 3, size=(80, 40)).astype(np.int8)
+    # A few rare / monomorphic columns so the keep set is not "everything".
+    g[:, 0] = 0
+    g[0, 1] = 2
+    g[1:, 1] = 0
+
+    imputed = GenotypeMatrix(g, is_imputed=True, precompute_alleles=False)
+    observed = GenotypeMatrix(g.copy(), is_imputed=False, precompute_alleles=False)
+
+    keep_imputed = compute_mac_keep_indices(imputed, 10)
+    keep_observed = compute_mac_keep_indices(observed, 10)
+    keep_array = compute_mac_keep_indices(g, 10)
+
+    assert keep_imputed.tolist() == keep_observed.tolist()
+    assert keep_imputed.tolist() == keep_array.tolist()
+    assert 0 not in keep_imputed.tolist()
+    assert 1 not in keep_imputed.tolist()
+
+
+def test_compute_mac_keep_indices_imputed_respects_max_dosage() -> None:
+    n_ind = 20
+    g = np.zeros((n_ind, 2), dtype=np.int8)
+    # 12 hets: diploid MAC = min(12, 40-12) = 12; haploid MAC = min(12, 20-12) = 8.
+    g[:12, 0] = 1
+    # All het: diploid MAC = 20; haploid MAC = min(20, 20-20) = 0.
+    g[:, 1] = 1
+
+    gm = GenotypeMatrix(g, is_imputed=True, precompute_alleles=False)
+    keep_diploid = compute_mac_keep_indices(gm, 10, max_dosage=2.0)
+    keep_haploid = compute_mac_keep_indices(gm, 10, max_dosage=1.0)
+    assert keep_diploid.tolist() == [0, 1]
+    assert keep_haploid.tolist() == []
+
+
 def test_compute_mac_keep_indices_excludes_missing_sentinel() -> None:
     """Missing genotype sentinel (-9) must not deflate allele counts."""
     n_ind = 20
@@ -91,6 +128,11 @@ def test_compute_mac_keep_indices_excludes_missing_sentinel() -> None:
     # would not keep marker 0 at min_mac=10.
     raw_sum = int(g[:, 0].sum())
     assert raw_sum != 10  # -9s deflate the sum
+
+    # The same array wrapped as a non-imputed GenotypeMatrix must still
+    # exclude -9. The imputed fast path would treat -9 as dosage.
+    gm = GenotypeMatrix(g, is_imputed=False, precompute_alleles=False)
+    assert compute_mac_keep_indices(gm, 10).tolist() == [0, 2]
 
 
 def test_pad_association_results_noop_when_no_filter() -> None:

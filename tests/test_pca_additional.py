@@ -109,3 +109,15 @@ def test_validate_pca_results_reports_issues() -> None:
     is_valid, errors = pca.validate_pca_results(pcs_with_nan)
     assert not is_valid
     assert any("NaN" in err for err in errors)
+
+
+def test_pca_on_materialized_rows_matches_lazy_view() -> None:
+    rng = np.random.default_rng(0)
+    full = rng.integers(0, 3, size=(25, 80), dtype=np.int8)
+    rows = np.array([0, 2, 5, 9, 11, 18, 24], dtype=np.int64)
+    parent = GenotypeMatrix(full, is_imputed=True, precompute_alleles=False)
+    lazy = parent.subset_individuals(rows, materialize=False)
+    eager = parent.subset_individuals(rows, materialize=True)
+    pcs_lazy = PANICLE_PCA(M=lazy, pcs_keep=3, verbose=False)
+    pcs_eager = PANICLE_PCA(M=eager, pcs_keep=3, verbose=False)
+    np.testing.assert_array_equal(pcs_lazy, pcs_eager)

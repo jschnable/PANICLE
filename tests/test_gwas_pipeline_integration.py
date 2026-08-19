@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 import panicle.pipelines.gwas as gwas_module
-from panicle.pipelines.gwas import GWASPipeline
+from panicle.pipelines.gwas import GWASPipeline, _map_has_non_numeric_chrom_labels
+from panicle.utils.data_types import GenotypeMap
 
 
 @pytest.fixture
@@ -103,6 +104,102 @@ def test_resolve_method_cpu_validates_inputs() -> None:
         gwas_module._resolve_method_cpu(ncpus=-1, parallel_mode="auto")
     with pytest.raises(ValueError, match="ncpus must be an integer"):
         gwas_module._resolve_method_cpu(ncpus="bad", parallel_mode="auto")
+
+
+def _lazy_map_from_chroms(chroms, *, with_order: bool = True) -> GenotypeMap:
+    chroms = np.asarray(chroms, dtype=object)
+    n = int(chroms.size)
+    metadata = {}
+    if with_order:
+        # Unique labels in first-seen order, matching group_marker_indices_by_labels.
+        order = list(dict.fromkeys(str(c) for c in chroms))
+        groups = {
+            label: np.flatnonzero(chroms.astype(str) == label)
+            for label in order
+        }
+        metadata = {"chromosome_order": order, "chromosome_groups": groups}
+    return GenotypeMap.from_columns(
+        {
+            "MARKER": np.array([f"m{i}" for i in range(n)]),
+            "CHROM": chroms,
+            "POS": np.arange(n, dtype=np.int64),
+        },
+        metadata=metadata,
+    )
+
+
+def test_map_has_non_numeric_chrom_labels_uses_cached_order() -> None:
+    gmap = _lazy_map_from_chroms(["chr1", "chr1", "chr2"])
+    assert gmap._dataframe_cache is None
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("to_dataframe should not be called for the contig check")
+
+    gmap.to_dataframe = boom  # type: ignore[method-assign]
+    assert _map_has_non_numeric_chrom_labels(gmap) is True
+    assert gmap._dataframe_cache is None
+
+
+def test_map_has_non_numeric_chrom_labels_false_for_numeric() -> None:
+    gmap = _lazy_map_from_chroms(["1", "1", "2"])
+    assert _map_has_non_numeric_chrom_labels(gmap) is False
+    assert gmap._dataframe_cache is None
+
+
+def test_map_has_non_numeric_chrom_labels_handles_missing_map() -> None:
+    assert _map_has_non_numeric_chrom_labels(None) is False
+    assert _map_has_non_numeric_chrom_labels(object()) is False
+
+
+def test_gwas_pipeline_vcf_contig_note_without_map_dataframe(tmp_path, capsys) -> None:
+    """load_data should warn about non-numeric VCF contigs without building a map DataFrame."""
+    vcf_path = tmp_path / "chr_contigs.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+        "chr1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\n"
+        "chr1\t20\trs2\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\t0/1\n",
+        encoding="utf-8",
+    )
+    pheno_path = tmp_path / "pheno.csv"
+    pd.DataFrame({"ID": ["S1", "S2", "S3"], "Trait": [1.0, 2.0, 3.0]}).to_csv(
+        pheno_path, index=False
+    )
+
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "out"))
+    pipeline.load_data(
+        phenotype_file=str(pheno_path),
+        genotype_file=str(vcf_path),
+        trait_columns=["Trait"],
+        genotype_format="vcf",
+    )
+    captured = capsys.readouterr().out
+    assert "htslib may print" in captured
+    assert _map_has_non_numeric_chrom_labels(pipeline.geno_map) is True
+
+
+def test_gwas_pipeline_numeric_vcf_contigs_skip_htslib_note(tmp_path, capsys) -> None:
+    vcf_path = tmp_path / "numeric_contigs.vcf"
+    vcf_path.write_text(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
+        "1\t10\trs1\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\t1/1\n",
+        encoding="utf-8",
+    )
+    pheno_path = tmp_path / "pheno.csv"
+    pd.DataFrame({"ID": ["S1", "S2", "S3"], "Trait": [1.0, 2.0, 3.0]}).to_csv(
+        pheno_path, index=False
+    )
+
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "out"))
+    pipeline.load_data(
+        phenotype_file=str(pheno_path),
+        genotype_file=str(vcf_path),
+        trait_columns=["Trait"],
+        genotype_format="vcf",
+    )
+    captured = capsys.readouterr().out
+    assert "htslib may print" not in captured
 
 
 def test_gwas_pipeline_basic_workflow_glm(synthetic_data, tmp_path):
