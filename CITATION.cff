@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/jschnable/PANICLE"
 url: "https://pypi.org/project/panicle/"
 license: MIT
-version: "0.4.0"
+version: "0.5.0"
 keywords:
   - GWAS
   - genomics

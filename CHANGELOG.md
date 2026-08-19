@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VanRaden / LOCO kinship for complete 0/1/2 dosages is now an exact Gram, and faster.** The uncentered `ZZᵀ` is accumulated from float32 batch GEMMs (exact integers at the default 5k width) into float64; centering is algebraic (`G = ZZᵀ − 1sᵀ − s1ᵀ + (μ·μ)11ᵀ`, with `s` recovered as the row-sum of `ZZᵀ`). VanRaden scaling is a scalar divide. `K` no longer depends on BLAS build, thread count, or batch width. On the maize panel this is ~15 s vs ~20–23 s for the old float32-center-then-GEMM path. This does **not** reproduce those previous matrices; association results that use kinship will change. Missing / non-{0,1,2} dosages keep the older path.
 - LOCO on-disk cache format is now v2 (float64 Grams). v1 sidecars are ignored and rebuilt. The digest no longer includes `maxLine`.
 - `GWASPipeline.run_analysis` logs the runtime BLAS library, version, and thread count.
+- Faster LOCO MLM scan: fused `UsWUs` cross-product, strided GEMM views, reused `U'G` buffer, and `assume_no_missing` on the already-imputed path. Single-trait `PANICLE_MLM_LOCO` now routes through the chromosome-major multi-trait kernel so a trait analysed alone and in a group share the same numbers (float32 rounding only vs the previous single-trait path).
 
 ### Added
 - Parallel `int8→float32` convert for large C-contiguous blocks (bit-identical to `astype`; used on whole-chromosome scans, not 5k kinship batches).
