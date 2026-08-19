@@ -100,6 +100,13 @@ if _NUMBA_AVAILABLE:
                 out[j] += src[src_i, j]
         return out
 
+    @njit(cache=True, parallel=True, nogil=True)
+    def _int8_to_float32(src, dst):
+        n_rows, n_cols = src.shape
+        for i in prange(n_rows):
+            for j in range(n_cols):
+                dst[i, j] = np.float32(src[i, j])
+
 
 def compact_columns_int8(
     src: np.ndarray,
@@ -180,6 +187,37 @@ def column_sums_int8(
     if _NUMBA_AVAILABLE:
         return _column_sums_int8_rows(src, row_idx_i64)
     return src[row_idx_i64, :].sum(axis=0, dtype=np.float64)
+
+
+def int8_to_float32(src: np.ndarray, out: Optional[np.ndarray] = None) -> np.ndarray:
+    """Bit-identical ``src.astype(np.float32)`` for a C-contiguous int8 matrix.
+
+    Integer-to-float32 conversion is exact for every int8 value. The numba
+    parallel kernel matches numpy's ``astype`` elementwise; it exists because
+    numpy's cast is single-threaded.
+    """
+    src = np.asarray(src)
+    if src.ndim != 2 or src.dtype != np.int8:
+        raise TypeError("src must be a 2D int8 array")
+    if not src.flags.c_contiguous:
+        src = np.ascontiguousarray(src)
+    if out is None:
+        dst = np.empty(src.shape, dtype=np.float32)
+    else:
+        dst = np.asarray(out)
+        if dst.shape != src.shape or dst.dtype != np.float32:
+            raise ValueError("out must be float32 with the same shape as src")
+        if not dst.flags.c_contiguous:
+            raise ValueError("out must be C-contiguous")
+    if src.size == 0:
+        return dst
+    # Parallel launch loses on 5k-column kinship batches; numpy wins
+    # there and the kernel only pays off on whole-group converts.
+    if _NUMBA_AVAILABLE and src.size >= 8_000_000:
+        _int8_to_float32(src, dst)
+    else:
+        np.copyto(dst, src, casting="unsafe")
+    return dst
 
 
 def can_compact_int8_columns(src: np.ndarray, keep: np.ndarray) -> bool:

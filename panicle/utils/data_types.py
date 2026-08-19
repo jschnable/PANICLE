@@ -1223,6 +1223,28 @@ class GenotypeMatrix:
         marker_idx = np.asarray(markers, dtype=np.int64)
         return self._storage[np.ix_(self._row_indexer, marker_idx)]
 
+    @staticmethod
+    def _cast_marker_block(
+        marker_block: np.ndarray,
+        dtype: Optional[np.dtype],
+        *,
+        copy: bool = False,
+    ) -> np.ndarray:
+        arr = np.asarray(marker_block)
+        if dtype is not None:
+            target = np.dtype(dtype)
+            if arr.dtype == target:
+                return np.array(arr, copy=True) if copy else arr
+            if arr.dtype == np.int8 and target == np.float32:
+                from .compact import int8_to_float32
+
+                if arr.ndim == 2:
+                    return int8_to_float32(arr)
+            return np.asarray(arr, dtype=target)
+        if copy:
+            return np.array(arr, copy=True)
+        return arr
+
     def get_columns(
         self,
         indices: Union[np.ndarray, list],
@@ -1236,11 +1258,7 @@ class GenotypeMatrix:
         marker_idx = np.asarray(indices, dtype=np.int64)
         marker_slice = self._as_contiguous_marker_slice(marker_idx)
         marker_block = self._select_marker_block(marker_slice if marker_slice is not None else marker_idx)
-        if dtype is not None:
-            return np.asarray(marker_block, dtype=np.dtype(dtype))
-        if copy:
-            return np.array(marker_block, copy=True)
-        return np.asarray(marker_block)
+        return self._cast_marker_block(marker_block, dtype, copy=copy)
 
     def __getitem__(self, key):
         """Support array indexing - returns data in (individuals, markers) order"""
@@ -1279,12 +1297,21 @@ class GenotypeMatrix:
             return self._storage[:, base_idx]
         return self._storage[base_idx, :]
 
-    def get_batch(self, marker_start: int, marker_end: int) -> np.ndarray:
+    def get_batch(
+        self,
+        marker_start: int,
+        marker_end: int,
+        *,
+        dtype: Optional[np.dtype] = None,
+    ) -> np.ndarray:
         """Get batch of markers for efficient processing.
 
         Returns array of shape (n_individuals, n_markers_in_batch).
         """
-        return np.asarray(self._select_marker_block(slice(marker_start, marker_end)))
+        return self._cast_marker_block(
+            self._select_marker_block(slice(marker_start, marker_end)),
+            dtype,
+        )
 
     def subset_individuals(
         self,
@@ -1530,9 +1557,9 @@ class GenotypeMatrix:
         out_dtype = np.dtype(dtype)
         if self._is_imputed:
             # Fast path: pre-imputed data, no missing checks needed.
-            return self.get_batch(marker_start, marker_end).astype(out_dtype, copy=True)
+            return self.get_batch(marker_start, marker_end, dtype=out_dtype)
 
-        batch = self.get_batch(marker_start, marker_end).astype(out_dtype, copy=True)
+        batch = self.get_batch(marker_start, marker_end, dtype=out_dtype)
 
         if batch.size == 0:
             return batch

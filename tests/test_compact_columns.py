@@ -8,6 +8,7 @@ import pytest
 from panicle.utils.compact import (
     can_compact_int8_columns,
     compact_columns_int8,
+    int8_to_float32,
     keep_indices_are_strictly_increasing,
     runs_from_keep_indices,
 )
@@ -169,3 +170,40 @@ def test_subset_markers_logs_fancy_index_fallback(caplog) -> None:
         gm.subset_markers(np.array([5, 1, 3], dtype=np.int64))
     assert any("fancy index" in rec.message for rec in caplog.records)
     assert any("not strictly increasing" in rec.message for rec in caplog.records)
+
+
+def test_int8_to_float32_matches_numpy_astype() -> None:
+    rng = np.random.default_rng(7)
+    src = rng.integers(-9, 3, size=(64, 4096), dtype=np.int8)
+    got = int8_to_float32(src)
+    np.testing.assert_array_equal(got, src.astype(np.float32))
+    assert got.dtype == np.float32
+    assert got.flags.c_contiguous
+
+    # Large enough to take the parallel kernel (>= 8e6 elements).
+    big = rng.integers(-9, 3, size=(200, 50_000), dtype=np.int8)
+    np.testing.assert_array_equal(int8_to_float32(big), big.astype(np.float32))
+
+
+def test_int8_to_float32_empty_and_out() -> None:
+    src = np.zeros((3, 0), dtype=np.int8)
+    got = int8_to_float32(src)
+    assert got.shape == (3, 0)
+    assert got.dtype == np.float32
+
+    src = np.array([[0, 1, 2], [-9, 0, 1]], dtype=np.int8)
+    out = np.empty_like(src, dtype=np.float32)
+    ret = int8_to_float32(src, out=out)
+    assert ret is out
+    np.testing.assert_array_equal(out, src.astype(np.float32))
+
+
+def test_get_columns_float32_matches_astype() -> None:
+    rng = np.random.default_rng(8)
+    arr = rng.integers(0, 3, size=(12, 40), dtype=np.int8)
+    gm = GenotypeMatrix(arr, is_imputed=True, precompute_alleles=False)
+    idx = np.arange(5, 25, dtype=np.int64)
+    got = gm.get_columns(idx, dtype=np.float32)
+    np.testing.assert_array_equal(got, arr[:, idx].astype(np.float32))
+    batch = gm.get_batch(5, 25, dtype=np.float32)
+    np.testing.assert_array_equal(batch, arr[:, 5:25].astype(np.float32))

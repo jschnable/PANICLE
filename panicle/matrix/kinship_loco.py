@@ -103,8 +103,13 @@ def _get_genotype_columns(
 ) -> np.ndarray:
     """Fetch marker columns in individual-major order without mutating source storage."""
     if isinstance(genotype, GenotypeMatrix):
-        return np.array(genotype.get_columns(indices), dtype=dtype, copy=True)
-    return np.array(genotype[:, indices], dtype=dtype, copy=True)
+        return genotype.get_columns(indices, dtype=dtype)
+    block = np.asarray(genotype[:, indices])
+    if block.dtype == np.int8 and np.dtype(dtype) == np.float32 and block.ndim == 2:
+        from ..utils.compact import int8_to_float32
+
+        return int8_to_float32(block)
+    return np.array(block, dtype=dtype, copy=True)
 
 
 class LocoKinship:

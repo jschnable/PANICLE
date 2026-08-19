@@ -561,7 +561,7 @@ def PANICLE_MLM(phe: np.ndarray,
         if isinstance(geno_source, GenotypeMatrix):
             if is_preimputed:
                 # Data is pre-imputed, skip -9 checks for faster access
-                G_batch = geno_source.get_batch(start_marker, end_marker).astype(np.float32)
+                G_batch = geno_source.get_batch(start_marker, end_marker, dtype=np.float32)
             else:
                 # GenotypeMatrix.get_batch_imputed handles -9 and NaN
                 G_batch = geno_source.get_batch_imputed(start_marker, end_marker).astype(np.float32)

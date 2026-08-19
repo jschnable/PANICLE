@@ -389,6 +389,7 @@ class GWASPipeline:
         self._trait_cache_pcs: Optional[np.ndarray] = None
         self._trait_cache_kinship: Optional[np.ndarray] = None
         self._trait_cache_min_mac: Optional[int] = None
+        self._trait_cache_max_dosage: Optional[float] = None
         self._trait_cache_keep_indices: Optional[np.ndarray] = None
         self._trait_cache_geno_map = None
 
@@ -408,6 +409,7 @@ class GWASPipeline:
         self._trait_cache_pcs = None
         self._trait_cache_kinship = None
         self._trait_cache_min_mac = None
+        self._trait_cache_max_dosage = None
         self._trait_cache_keep_indices = None
         self._trait_cache_geno_map = None
         self._loco_kinship_cache.clear()
@@ -1478,11 +1480,15 @@ class GWASPipeline:
             and np.array_equal(geno_idx, np.arange(self.genotype_matrix.n_individuals))
         )
 
+        # Every parameter that changes the keep set belongs here. A false
+        # hit is a silent wrong result, not a crash: same sample mask with a
+        # different min_mac or max_dosage must not reuse keep_indices.
         cache_hit = (
             self._trait_cache_indices is not None
             and self._trait_cache_n_pcs == n_pcs
             and self._trait_cache_need_kinship == need_kinship
             and self._trait_cache_min_mac == int(min_mac or 0)
+            and self._trait_cache_max_dosage == float(max_dosage)
             and np.array_equal(self._trait_cache_indices, geno_idx)
         )
 
@@ -1615,6 +1621,7 @@ class GWASPipeline:
             self._trait_cache_pcs = pcs
             self._trait_cache_kinship = k_final
             self._trait_cache_min_mac = int(min_mac or 0)
+            self._trait_cache_max_dosage = float(max_dosage)
             self._trait_cache_keep_indices = keep_indices
             self._trait_cache_geno_map = trait_geno_map
 

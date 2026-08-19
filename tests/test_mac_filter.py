@@ -135,6 +135,56 @@ def test_compute_mac_keep_indices_excludes_missing_sentinel() -> None:
     assert compute_mac_keep_indices(gm, 10).tolist() == [0, 2]
 
 
+def _prepare_cache_pipeline(tmp_path: Path) -> GWASPipeline:
+    """Two complete traits sharing a sample mask, with MAC-sensitive markers."""
+    n_ind = 20
+    # Marker 0: 6 homozygous alt → diploid MAC=12, haploid MAC=min(12, 8)=8.
+    # Marker 1: 5 hets → MAC=5 under either dosage.
+    # Marker 2: 10 homozygous alt → diploid MAC=20, haploid MAC=0.
+    # Marker 3: monomorphic reference.
+    g = np.zeros((n_ind, 4), dtype=np.int8)
+    g[:6, 0] = 2
+    g[:5, 1] = 1
+    g[:10, 2] = 2
+    ids = [f"S{i}" for i in range(n_ind)]
+    pipeline = GWASPipeline(output_dir=str(tmp_path / "prep_cache"))
+    pipeline.phenotype_df = pd.DataFrame({
+        "ID": ids,
+        "t1": np.arange(n_ind, dtype=float),
+        "t2": np.arange(n_ind, dtype=float) + 1.0,
+    })
+    pipeline.genotype_matrix = GenotypeMatrix(g, is_imputed=True, precompute_alleles=False)
+    pipeline.individual_ids = ids
+    pipeline._matched_indices = np.arange(n_ind, dtype=int)
+    return pipeline
+
+
+def test_prepare_trait_cache_keys_on_min_mac_and_max_dosage(tmp_path: Path) -> None:
+    """Same sample mask must not reuse a keep set built under different filters."""
+    pipeline = _prepare_cache_pipeline(tmp_path)
+
+    first = pipeline._prepare_trait_data("t1", min_mac=5, max_dosage=2.0)
+    second = pipeline._prepare_trait_data("t2", min_mac=5, max_dosage=2.0)
+    assert first is not None and second is not None
+    keep5 = first[6]
+    assert keep5 is second[6]
+    assert keep5.tolist() == [0, 1, 2]
+
+    third = pipeline._prepare_trait_data("t1", min_mac=10, max_dosage=2.0)
+    keep10 = third[6]
+    assert keep10 is not keep5
+    assert keep10.tolist() == [0, 2]
+
+    fourth = pipeline._prepare_trait_data("t2", min_mac=10, max_dosage=1.0)
+    keep_hap = fourth[6]
+    assert keep_hap is not keep10
+    assert keep_hap.tolist() == []
+
+    fifth = pipeline._prepare_trait_data("t1", min_mac=10, max_dosage=2.0)
+    assert fifth[6] is not keep_hap
+    assert fifth[6].tolist() == [0, 2]
+
+
 def test_pad_association_results_noop_when_no_filter() -> None:
     res = AssociationResults(
         effects=np.array([0.1, 0.2, 0.3]),
