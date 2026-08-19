@@ -14,7 +14,7 @@ Validation Status: ✅ PASSED - Ready for production use
 
 import numpy as np
 from typing import Optional, Union, Dict, Tuple
-from scipy import stats, optimize
+from scipy import stats, optimize, special
 from ..utils.data_types import (
     GenotypeMatrix,
     KinshipMatrix,
@@ -221,9 +221,10 @@ def compute_fast_pvalues(t_stats: np.ndarray, dfs: np.ndarray) -> np.ndarray:
         valid_t = t_stats[valid_mask]
         valid_df = dfs[valid_mask]
         
-        # Use stats.t.sf for better numerical precision with very small p-values
-        # This prevents underflow to 0.0 for large t-statistics
-        pvalues[valid_mask] = 2.0 * stats.t.sf(np.abs(valid_t), valid_df)
+        # special.stdtr is the kernel stats.t.sf calls (t.sf(x, df) ==
+        # stdtr(df, -x)); calling it directly skips the rv_continuous argument
+        # machinery per call and gives the same numbers (bit-identical).
+        pvalues[valid_mask] = 2.0 * special.stdtr(valid_df, -np.abs(valid_t))
     
     return pvalues
 
@@ -241,7 +242,10 @@ def compute_batch_crossproducts_f32_vectorized(
     # Guard against spurious BLAS FPE flags on some Accelerate builds.
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         batch_UXWUs = XTW_f32 @ G_batch_f32
-    batch_UsWUs = np.sum(G_batch_f32 * G_batch_f32 * weights_f32[:, np.newaxis], axis=0)
+    # einsum fuses G*G*w and the axis-0 reduction (no 2 temporaries) and
+    # accumulates in the same sequential row order as np.sum(axis=0), so the
+    # float32 result is bit-identical to the previous expression.
+    batch_UsWUs = np.einsum("ij,ij,i->j", G_batch_f32, G_batch_f32, weights_f32)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         batch_UsWy = G_batch_f32.T @ wy_f32
     return batch_UXWUX, batch_UXWy, batch_UXWUs, batch_UsWUs, batch_UsWy
@@ -300,7 +304,8 @@ def PANICLE_MLM(phe: np.ndarray,
            vc_method: str = "BRENT",
            maxLine: int = 1000,  # Larger batches for vectorization
            cpu: int = 1,
-           verbose: bool = True) -> AssociationResults:
+           verbose: bool = True,
+           assume_no_missing: bool = False) -> AssociationResults:
     """Mixed Linear Model for GWAS analysis - Optimized Implementation
     
     This is the production MLM implementation with comprehensive optimizations:
@@ -334,6 +339,8 @@ def PANICLE_MLM(phe: np.ndarray,
         maxLine: Batch size for processing markers (larger for vectorization)
         cpu: Number of CPU threads for parallel processing
         verbose: Print progress information
+        assume_no_missing: When ``geno`` is a numpy array the caller already
+            imputed (no -9 / NaN), skip the two full-matrix missing-value scans.
     
     Returns:
         AssociationResults object containing Effect, SE, and P-value for each marker
@@ -544,6 +551,10 @@ def PANICLE_MLM(phe: np.ndarray,
         # If pre-imputed, no need to check for -9 in numpy path
         is_preimputed = genotype.is_imputed
         genotype_has_missing = False
+    elif assume_no_missing:
+        geno_source = genotype
+        is_preimputed = False
+        genotype_has_missing = False
     else:
         geno_source = genotype
         is_preimputed = False
@@ -566,14 +577,21 @@ def PANICLE_MLM(phe: np.ndarray,
                 # GenotypeMatrix.get_batch_imputed handles -9 and NaN
                 G_batch = geno_source.get_batch_imputed(start_marker, end_marker).astype(np.float32)
         else:
-            # Numpy array: convert to float32 per batch (cache-friendly, faster matmul)
-            G_batch = geno_source[:, start_marker:end_marker].astype(np.float32)
-            # Use the same major-allele imputation strategy as GenotypeMatrix.
+            # Numpy array: convert to float32 per batch (cache-friendly, faster matmul).
+            # If the source is already float32 and clean, hand the strided
+            # slice straight to the matmul instead of copying it first; BLAS
+            # takes the row stride as lda and the product is unchanged.
             if genotype_has_missing:
+                # Use the same major-allele imputation strategy as GenotypeMatrix
+                # (copies, so the source is never mutated).
                 G_batch = impute_numpy_batch_major_allele(
-                    G_batch,
+                    geno_source[:, start_marker:end_marker],
                     fill_value=None,
                     dtype=np.float32,
+                )
+            else:
+                G_batch = np.asarray(
+                    geno_source[:, start_marker:end_marker], dtype=np.float32
                 )
 
         # Transform genotypes to eigenspace (float32 @ float32 = fast)

@@ -139,9 +139,9 @@ def _run_wald_with_pretransformed_genotypes(
         for batch_idx in range(n_batches):
             start_marker = batch_idx * maxLine
             end_marker = min(start_marker + maxLine, n_markers)
-            G_batch_f32 = np.ascontiguousarray(
-                chrom_geno_eigen_f32[:, start_marker:end_marker], dtype=np.float32
-            )
+            # Strided view (no copy): the sgemm/sgemv/einsum below all accept
+            # it and give the same result as on a contiguous copy.
+            G_batch_f32 = chrom_geno_eigen_f32[:, start_marker:end_marker]
             batch_data = (
                 G_batch_f32,
                 weights_f32,
@@ -379,6 +379,10 @@ def _process_chromosome(
     eigenK = loco_kinship.get_eigen(chrom)
     K_loco = loco_kinship.get_loco(chrom)
 
+    # _subset_genotypes returns an imputed float32 block; for pre-imputed
+    # GenotypeMatrix sources there is nothing to scan for, so tell PANICLE_MLM
+    # to skip its two full-block -9/NaN passes.
+    no_missing = isinstance(geno, GenotypeMatrix) and geno.is_imputed
     res = PANICLE_MLM(
         phe=phe,
         geno=geno_subset,
@@ -389,6 +393,7 @@ def _process_chromosome(
         maxLine=maxLine,
         cpu=cpu,  # marker-level parallelism (chromosomes run sequentially)
         verbose=False,
+        assume_no_missing=no_missing,
     )
 
     return chrom, indices, res.effects, res.se, res.pvalues
@@ -467,68 +472,28 @@ def PANICLE_MLM_LOCO(
             "recompute LOCO kinship after dropping missing phenotype rows."
         )
 
-    effects = np.zeros(n_markers, dtype=np.float64)
-    std_errors = np.zeros(n_markers, dtype=np.float64)
-    p_values = np.ones(n_markers, dtype=np.float64)
-
-    # Filter out empty chromosome groups
-    chrom_items = [(chrom, indices) for chrom, indices in chrom_groups.items() if indices.size > 0]
-    n_chroms = len(chrom_items)
-
-    if verbose:
-        print("=" * 60)
-        print("LOCO MLM")
-        print("=" * 60)
-        print(f"Chromosomes: {n_chroms}")
-
-    # Handle cpu=0 to mean use all available cores (affinity-aware)
-    if cpu == 0:
-        cpu = available_cpu_count()
-
-    # Chromosomes are processed sequentially; parallelism happens at the
-    # marker level inside PANICLE_MLM (BLAS cross-products + numba prange,
-    # pinned to `cpu`). This avoids the previous chromosome-level joblib
-    # threading, which nested with the all-core BLAS/numba work inside each
-    # chromosome and oversubscribed cores.
-    for chrom, indices in chrom_items:
-        if verbose:
-            print(f"Processing chromosome {chrom} ({indices.size} markers)")
-
-        _, _, eff, se, pvals = _process_chromosome(
-            chrom=chrom,
-            indices=indices,
-            geno=geno,
-            phe=phe,
-            loco_kinship=loco_kinship,
-            CV=CV,
-            vc_method=vc_method,
-            maxLine=maxLine,
-            cpu=cpu,
-        )
-        effects[indices] = eff
-        std_errors[indices] = se
-        p_values[indices] = pvals
-
-    if lrt_refinement:
-        _apply_lrt_refinement(
-            trait_values=trait_values_full,
-            geno=geno,
-            loco_kinship=loco_kinship,
-            CV=CV,
-            chrom_values=chrom_values,
-            chrom_items=chrom_items,
-            effects=effects,
-            std_errors=std_errors,
-            p_values=p_values,
-            screen_threshold=screen_threshold,
-            lrt_solver_norm=lrt_solver_norm,
-            lrt_batch_size=lrt_batch_size,
-            verbose=verbose,
-            trait_label=None,
-            cpu=cpu,
-        )
-
-    return AssociationResults(effects=effects, se=std_errors, pvalues=p_values)
+    # Run through the chromosome-major kernel (one U'G transform per
+    # chromosome, then the Wald scan on the transformed block). This is the
+    # same code path the grouped multi-trait scan uses, so a trait analysed
+    # alone and the same trait analysed in a group give identical numbers, and
+    # it is faster than the previous per-batch transform in PANICLE_MLM.
+    results = PANICLE_MLM_LOCO_MULTI(
+        phe=trait_values_full[:, np.newaxis],
+        geno=geno,
+        map_data=map_data,
+        trait_names=["trait"],
+        loco_kinship=loco_kinship,
+        CV=CV,
+        vc_method=vc_method,
+        maxLine=maxLine,
+        cpu=cpu,
+        lrt_refinement=lrt_refinement,
+        screen_threshold=screen_threshold,
+        lrt_solver=lrt_solver,
+        lrt_batch_size=lrt_batch_size,
+        verbose=verbose,
+    )
+    return results["trait"]
 
 
 def PANICLE_MLM_LOCO_MULTI(
@@ -646,6 +611,14 @@ def PANICLE_MLM_LOCO_MULTI(
         print(f"Traits: {n_traits}")
         print(f"Chromosomes: {n_chroms}")
 
+    # One float32 buffer, sized for the largest chromosome and reused for every
+    # U'G product. A fresh multi-GB allocation per chromosome is returned to
+    # the OS on free and re-page-faulted on the next chromosome (~1 s per GB);
+    # writing into a buffer that is already touched avoids that and gives the
+    # same bits (matmul(out=) vs a fresh result).
+    max_chrom_markers = max((indices.size for _, indices in chrom_items), default=0)
+    transform_buffer = np.empty(n_individuals * max_chrom_markers, dtype=np.float32)
+
     for chrom, indices in chrom_items:
         if verbose:
             print(
@@ -666,14 +639,22 @@ def PANICLE_MLM_LOCO_MULTI(
             else eigenvecs_32
         )
 
-        # Chromosome-major optimization: transform chromosome genotypes once.
+        # Chromosome-major optimization: transform chromosome genotypes once,
+        # into a C-contiguous prefix of the reused buffer.
+        chrom_geno_eigen_f32 = transform_buffer[: n_individuals * indices.size].reshape(
+            n_individuals, indices.size
+        )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                chrom_geno_eigen_f32 = eigenvecs_32.T @ geno_subset.astype(
-                    np.float32, copy=False
+                np.matmul(
+                    eigenvecs_32.T,
+                    geno_subset.astype(np.float32, copy=False),
+                    out=chrom_geno_eigen_f32,
                 )
-        chrom_geno_eigen_f32 = np.ascontiguousarray(chrom_geno_eigen_f32, dtype=np.float32)
+        # The untransformed float32 block is not needed after this point; drop
+        # it so only one chromosome-sized float32 block is live per chromosome.
+        del geno_subset
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -700,8 +681,9 @@ def PANICLE_MLM_LOCO_MULTI(
             std_errors_by_trait[trait_name][indices] = chrom_se
             p_values_by_trait[trait_name][indices] = chrom_p
 
-        # Free chromosome-level transformed genotype matrix before next chromosome.
+        # Drop the view into the reused transform buffer before the next chromosome.
         del chrom_geno_eigen_f32
+    del transform_buffer
 
     if lrt_refinement:
         for trait_idx, trait_name in enumerate(resolved_trait_names):
