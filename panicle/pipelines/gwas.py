@@ -35,7 +35,7 @@ from ..utils.data_types import (
     infer_marker_id_column,
 )
 from ..utils.effective_tests import estimate_effective_tests_from_genotype
-from ..utils.perf import available_cpu_count
+from ..utils.perf import available_cpu_count, format_blas_runtime
 from ..association.farmcpu_resampling import (
     PANICLE_FarmCPUResampling,
     FarmCPUResamplingResults,
@@ -951,6 +951,7 @@ class GWASPipeline:
         self.log_step("Step 4: Running GWAS analysis")
         method_cpus = _resolve_method_cpu(ncpus=ncpus, parallel_mode=parallel_mode)
         self.log(f"   Method CPU setting: {method_cpus} (ncpus={ncpus}, parallel_mode={parallel_mode})")
+        self.log(f"   BLAS: {format_blas_runtime()}")
 
         # 1. Trait Selection — with case-insensitive / whitespace-stripped fallback
         available_traits = [c for c in self.phenotype_df.columns if c != 'ID' and pd.api.types.is_numeric_dtype(self.phenotype_df[c])]

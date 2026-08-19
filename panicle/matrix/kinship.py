@@ -11,6 +11,11 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     impute_numpy_batch_major_allele,
 )
+from .kinship_exact import (
+    accumulate_uncentered,
+    can_use_exact_gram,
+    vanraden_from_centered,
+)
 import warnings
 
 logger = logging.getLogger(__name__)
@@ -57,66 +62,74 @@ def PANICLE_K_VanRaden(M: Union[GenotypeMatrix, np.ndarray],
     if verbose:
         logger.info("Calculating kinship matrix for %d individuals, %d markers", n_individuals, n_markers)
 
-    # Initialize kinship matrix in float32 for faster BLAS operations
-    kin = np.zeros((n_individuals, n_individuals), dtype=np.float32)
-
-    if verbose:
-        logger.info("Computing kinship matrix in batches...")
-
-    # Process markers in batches to manage memory
-    n_batches = (n_markers + maxLine - 1) // maxLine
-    if progress_every is None:
-        progress_every = max(1, n_batches // 10)
+    if can_use_exact_gram(genotype):
+        if verbose:
+            logger.info("Computing exact uncentered Gram (0/1/2 int8) then centering...")
+        gram = accumulate_uncentered(genotype, n_individuals, n_markers, maxLine)
+        centered = gram.centered()
+        mean_diag = float(np.mean(np.diag(centered))) if n_individuals else 0.0
+        kin = vanraden_from_centered(centered)
     else:
-        progress_every = max(1, int(progress_every))
+        # Initialize kinship matrix in float32 for faster BLAS operations
+        kin = np.zeros((n_individuals, n_individuals), dtype=np.float32)
 
-    for batch_idx in range(n_batches):
-        start_marker = batch_idx * maxLine
-        end_marker = min(start_marker + maxLine, n_markers)
+        if verbose:
+            logger.info("Computing kinship matrix in batches...")
 
-        should_report = (
-            batch_idx == 0
-            or batch_idx == n_batches - 1
-            or (batch_idx + 1) % progress_every == 0
-        )
-        if verbose and n_batches > 1 and should_report:
-            logger.info("Processing batch %d/%d (markers %d-%d)", batch_idx + 1, n_batches, start_marker, end_marker - 1)
-
-        # Get batch of markers in float32 (faster BLAS, sufficient precision for kinship)
-        if isinstance(genotype, GenotypeMatrix):
-            # get_batch_imputed handles missing values and returns requested dtype
-            Z_batch = genotype.get_batch_imputed(start_marker, end_marker, dtype=np.float32)
+        # Process markers in batches to manage memory
+        n_batches = (n_markers + maxLine - 1) // maxLine
+        if progress_every is None:
+            progress_every = max(1, n_batches // 10)
         else:
-            Z_batch = impute_numpy_batch_major_allele(
-                genotype[:, start_marker:end_marker],
-                fill_value=None,
-                dtype=np.float32,
+            progress_every = max(1, int(progress_every))
+
+        for batch_idx in range(n_batches):
+            start_marker = batch_idx * maxLine
+            end_marker = min(start_marker + maxLine, n_markers)
+
+            should_report = (
+                batch_idx == 0
+                or batch_idx == n_batches - 1
+                or (batch_idx + 1) % progress_every == 0
             )
+            if verbose and n_batches > 1 and should_report:
+                logger.info("Processing batch %d/%d (markers %d-%d)", batch_idx + 1, n_batches, start_marker, end_marker - 1)
 
-        # Center the genotype matrix by subtracting per-marker means (2p)
-        # Use regular mean since get_batch_imputed already handles missing values
-        means_batch = np.mean(Z_batch, axis=0)
-        Z_batch -= means_batch[np.newaxis, :]
+            # Get batch of markers in float32 (faster BLAS, sufficient precision for kinship)
+            if isinstance(genotype, GenotypeMatrix):
+                # get_batch_imputed handles missing values and returns requested dtype
+                Z_batch = genotype.get_batch_imputed(start_marker, end_marker, dtype=np.float32)
+            else:
+                Z_batch = impute_numpy_batch_major_allele(
+                    genotype[:, start_marker:end_marker],
+                    fill_value=None,
+                    dtype=np.float32,
+                )
 
-        # Compute cross products: kin += Z_batch @ Z_batch.T
-        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
-            kin += Z_batch @ Z_batch.T
+            # Center the genotype matrix by subtracting per-marker means (2p)
+            # Use regular mean since get_batch_imputed already handles missing values
+            means_batch = np.mean(Z_batch, axis=0)
+            Z_batch -= means_batch[np.newaxis, :]
 
-    # Convert to float64 for final operations (normalization needs precision)
-    kin = kin.astype(np.float64)
+            # Compute cross products: kin += Z_batch @ Z_batch.T
+            with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+                kin += Z_batch @ Z_batch.T
 
-    if verbose:
-        logger.info("Symmetrizing and normalizing kinship matrix...")
-    
-    # Ensure symmetry (should already be symmetric, but numerical precision)
-    kin = (kin + kin.T) / 2.0
-    
-    # Normalize by mean diagonal element (VanRaden scaling)
-    mean_diag = np.mean(np.diag(kin))
-    if mean_diag > 0:
-        kin /= mean_diag
-    else:
-        warnings.warn("Mean diagonal element is zero or negative, skipping normalization")
+        # Convert to float64 for final operations (normalization needs precision)
+        kin = kin.astype(np.float64)
+
+        if verbose:
+            logger.info("Symmetrizing and normalizing kinship matrix...")
+
+        # Ensure symmetry (should already be symmetric, but numerical precision)
+        kin = (kin + kin.T) / 2.0
+
+        # Normalize by mean diagonal element (VanRaden scaling)
+        mean_diag = np.mean(np.diag(kin))
+        if mean_diag > 0:
+            kin /= mean_diag
+        else:
+            warnings.warn("Mean diagonal element is zero or negative, skipping normalization")
     
     if verbose:
         logger.info("Kinship matrix computation complete. Mean diagonal: %.6f", mean_diag)

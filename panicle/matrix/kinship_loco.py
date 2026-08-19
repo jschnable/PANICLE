@@ -19,6 +19,12 @@ from ..utils.data_types import (
     ensure_eager_genotype,
     group_marker_indices_by_labels,
 )
+from .kinship_exact import (
+    UncenteredGram,
+    accumulate_uncentered,
+    can_use_exact_gram,
+    vanraden_from_centered,
+)
 
 # LOCO kinship is computed sequentially (one chromosome at a time); chromosome
 # parallelism was removed as it oversubscribed cores against BLAS and was slower.
@@ -116,16 +122,33 @@ class LocoKinship:
     """Container for LOCO kinship computations and cached eigendecompositions."""
 
     def __init__(self,
-                 total_raw: np.ndarray,
-                 total_diag: np.ndarray,
-                 chrom_raw: Dict[str, np.ndarray],
-                 chrom_diag: Dict[str, np.ndarray],
-                 chrom_order: List[str]):
+                 total_raw: Optional[np.ndarray] = None,
+                 total_diag: Optional[np.ndarray] = None,
+                 chrom_raw: Optional[Dict[str, np.ndarray]] = None,
+                 chrom_diag: Optional[Dict[str, np.ndarray]] = None,
+                 chrom_order: Optional[List[str]] = None,
+                 exact_chroms: Optional[Dict[str, UncenteredGram]] = None):
+        self._chrom_order = list(chrom_order or (exact_chroms or {}))
+        self._exact_chroms = exact_chroms
+        self._exact_total: Optional[UncenteredGram] = None
+        if exact_chroms:
+            n = next(iter(exact_chroms.values())).n_individuals
+            total = UncenteredGram(n)
+            for chrom in self._chrom_order:
+                total.add_gram(exact_chroms[chrom])
+            self._exact_total = total
+            if total_raw is None:
+                centered = total.centered()
+                total_raw = centered
+                total_diag = np.diag(centered).copy()
+                chrom_raw = {c: g.centered() for c, g in exact_chroms.items()}
+                chrom_diag = {c: np.diag(chrom_raw[c]).copy() for c in exact_chroms}
+        if total_raw is None or total_diag is None or chrom_raw is None or chrom_diag is None:
+            raise ValueError("LocoKinship requires either exact_chroms or raw/diag arrays")
         self._total_raw = total_raw
         self._total_diag = total_diag
         self._chrom_raw = chrom_raw
         self._chrom_diag = chrom_diag
-        self._chrom_order = list(chrom_order)
 
         self._loco_cache: Dict[str, KinshipMatrix] = {}
         self._eigen_cache: Dict[str, Dict[str, np.ndarray]] = {}
@@ -154,7 +177,12 @@ class LocoKinship:
     def get_full(self) -> KinshipMatrix:
         """Return the full (non-LOCO) kinship matrix."""
         if self._full_cache is None:
-            self._full_cache = self._normalize(self._total_raw, self._total_diag, "full")
+            if self._exact_total is not None:
+                self._full_cache = KinshipMatrix(
+                    vanraden_from_centered(self._exact_total.centered())
+                )
+            else:
+                self._full_cache = self._normalize(self._total_raw, self._total_diag, "full")
         return self._full_cache
 
     def get_loco(self, chrom: Union[str, int]) -> KinshipMatrix:
@@ -162,6 +190,15 @@ class LocoKinship:
         chrom_key = str(chrom)
         if chrom_key in self._loco_cache:
             return self._loco_cache[chrom_key]
+        if self._exact_total is not None:
+            if chrom_key not in self._exact_chroms:
+                raise KeyError(f"Chromosome {chrom_key} not found in LOCO kinship")
+            left = UncenteredGram(self._exact_total.n_individuals)
+            left.S = self._exact_total.S - self._exact_chroms[chrom_key].S
+            left.ss = self._exact_total.ss - self._exact_chroms[chrom_key].ss
+            kin = KinshipMatrix(vanraden_from_centered(left.centered()))
+            self._loco_cache[chrom_key] = kin
+            return kin
         if chrom_key not in self._chrom_raw:
             raise KeyError(f"Chromosome {chrom_key} not found in LOCO kinship")
 
@@ -241,6 +278,11 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
     # compatibility but no longer affects this computation.
     raw_by_chrom = {}
     diag_by_chrom = {}
+    exact_chroms: Dict[str, UncenteredGram] = {}
+
+    use_exact = can_use_exact_gram(genotype_data)
+    if verbose and use_exact:
+        print("Using exact uncentered Gram + algebraic centering (0/1/2 int8)")
 
     # Process each chromosome separately
     for chrom_idx, chrom in enumerate(chrom_order):
@@ -249,6 +291,16 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
 
         if verbose:
             print(f"Processing chromosome {chrom} ({n_chrom_markers} markers)")
+
+        if use_exact:
+            exact_chroms[chrom] = accumulate_uncentered(
+                genotype_data,
+                n_individuals,
+                n_chrom_markers,
+                maxLine,
+                indices=indices,
+            )
+            continue
 
         # Initialize accumulator for this chromosome (float32 for faster matmul)
         raw_chrom = np.zeros((n_individuals, n_individuals), dtype=np.float32)
@@ -296,8 +348,10 @@ def PANICLE_K_VanRaden_LOCO(M: Union[GenotypeMatrix, np.ndarray],
         raw_by_chrom[chrom] = (raw_chrom + raw_chrom.T) / 2.0
         diag_by_chrom[chrom] = diag_chrom
 
+    if use_exact:
+        return LocoKinship(chrom_order=chrom_order, exact_chroms=exact_chroms)
+
     # Compute total from per-chromosome sums (avoids redundant computation)
-    # Keep as float32 for consistency; eigendecomp will convert to float64
     raw_total = np.zeros((n_individuals, n_individuals), dtype=np.float32)
     diag_total = np.zeros(n_individuals, dtype=np.float32)
     for chrom in chrom_order:

@@ -139,6 +139,33 @@ def _detect_blas_backend() -> Optional[str]:
     return None
 
 
+def format_blas_runtime() -> str:
+    """BLAS library, version, and thread count from the running process.
+
+    Prefer threadpoolctl's loaded-library view over ``np.show_config()``,
+    which can report the wheel's build-time OpenBLAS ``MAX_THREADS`` rather
+    than the runtime cap.
+    """
+    try:
+        from threadpoolctl import threadpool_info
+    except Exception:
+        backend = _detect_blas_backend()
+        return backend or "unknown"
+    parts = []
+    for lib in threadpool_info():
+        if lib.get("user_api") != "blas":
+            continue
+        name = lib.get("internal_api") or lib.get("prefix") or "blas"
+        version = lib.get("version") or "?"
+        threads = lib.get("num_threads")
+        arch = lib.get("architecture")
+        bit = f"{name} {version} threads={threads}"
+        if arch:
+            bit += f" ({arch})"
+        parts.append(bit)
+    return "; ".join(parts) if parts else (_detect_blas_backend() or "unknown")
+
+
 def warn_if_potential_single_thread_blas() -> None:
     """
     Emit a guidance warning when NumPy appears to be linked against a BLAS that

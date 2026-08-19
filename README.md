@@ -129,7 +129,7 @@ panicle-gwas \
 ```
 
 ```bash
-panicle-gwas --version   # e.g. panicle-gwas 0.4.0
+panicle-gwas --version   # e.g. panicle-gwas 0.5.0
 panicle-gwas --help
 ```
 

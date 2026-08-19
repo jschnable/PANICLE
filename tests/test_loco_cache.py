@@ -42,16 +42,11 @@ def test_loco_cache_roundtrip(tmp_path: Path) -> None:
     loaded = load_loco_kinship(path)
     assert loaded is not None
     assert loaded.chromosomes == loco.chromosomes
-    np.testing.assert_array_equal(loaded._total_raw, loco._total_raw)
-    np.testing.assert_array_equal(loaded._total_diag, loco._total_diag)
+    np.testing.assert_array_equal(loaded.get_full().to_numpy(), loco.get_full().to_numpy())
     for chrom in loco.chromosomes:
-        np.testing.assert_array_equal(loaded._chrom_raw[chrom], loco._chrom_raw[chrom])
-        np.testing.assert_array_equal(loaded._chrom_diag[chrom], loco._chrom_diag[chrom])
-        np.testing.assert_allclose(
+        np.testing.assert_array_equal(
             loaded.get_loco(chrom).to_numpy(),
             loco.get_loco(chrom).to_numpy(),
-            rtol=0,
-            atol=0,
         )
 
 
@@ -65,7 +60,8 @@ def test_loco_cache_digest_changes_with_rows_and_keep() -> None:
     assert base != loco_cache_digest(rows, keep[:-1], chroms, n_markers=3, max_line=5000)
     assert base != loco_cache_digest(rows, None, chroms, n_markers=4, max_line=5000)
     assert base != loco_cache_digest(rows, keep, ["1"], n_markers=4, max_line=5000)
-    assert base != loco_cache_digest(rows, keep, chroms, n_markers=4, max_line=1000)
+    # Batch width is not part of the v2 digest: the exact Gram does not depend on it.
+    assert base == loco_cache_digest(rows, keep, chroms, n_markers=4, max_line=1000)
 
 
 def test_loco_cache_path_sidecar_dir() -> None:

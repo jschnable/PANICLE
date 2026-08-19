@@ -120,6 +120,8 @@ def test_validate_kinship_matrix_detects_shape_and_psd_issues() -> None:
 def test_panicle_k_vanraden_throttles_progress_logging(caplog) -> None:
     rng = np.random.default_rng(5)
     geno = rng.integers(0, 3, size=(6, 80), dtype=np.int8)
+    # Missing sentinels keep this on the batched float32 path that logs progress.
+    geno[0, ::7] = -9
 
     with caplog.at_level("INFO", logger="panicle.matrix.kinship"):
         PANICLE_K_VanRaden(geno, maxLine=2, verbose=True)
