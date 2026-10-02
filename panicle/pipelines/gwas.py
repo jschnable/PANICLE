@@ -17,6 +17,7 @@ from ..core.thresholds import base_threshold as resolve_base_threshold, trait_th
 from ..reporting.models import MethodReport, TraitReport, ReportOptions
 from ..reporting.pipeline import TraitOutputContext, write_trait_results, write_trait_report
 
+import dataclasses
 import os
 import time
 import warnings
@@ -52,6 +53,10 @@ from ..association.bayes_loco.config import BayesLocoConfig
 from ..association.farmcpu import PANICLE_FarmCPU
 from ..association.blink import PANICLE_BLINK
 from ..matrix.pca import PANICLE_PCA
+from ..matrix.ld import LDDecay, ld_decay, ld_prune
+from ..matrix.admixture import fit_admixture
+from ..postgwas.heritability import REMLHeritability, gower_scale, reml_heritability
+from ..postgwas.trait import PostGWASOptions, run_post_gwas, write_heritability
 from ..matrix.kinship import PANICLE_K_VanRaden
 from ..matrix.kinship_loco import PANICLE_K_VanRaden_LOCO
 from ..visualization.manhattan import PANICLE_Report
@@ -391,6 +396,16 @@ class GWASPipeline:
         self._structure_genotype: Optional[GenotypeMatrix] = None
 
         self._structure_n_pcs: int = 0
+        # Set when structure covariates are not plain all-marker PCs (LD-pruned
+        # PCA and/or admixture Q); such covariates must never be recomputed by
+        # the all-marker PCA fallback in _prepare_trait.
+        self._structure_custom: bool = False
+        self.structure_marker_indices: Optional[np.ndarray] = None
+        self.admixture = None
+        # REML h2 per trait (null model, global kinship).
+        self.heritability: Dict[str, REMLHeritability] = {}
+        self._h2_eigen_cache: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+        self.ld_decay: Optional[LDDecay] = None
 
         self._trait_cache: Optional[TraitPreparation] = None
 
@@ -780,7 +795,19 @@ class GWASPipeline:
 
         self.log_step("Individual matching", step_start)
 
-    def compute_population_structure(self, n_pcs: int = 3, calculate_kinship: bool = True):
+    def compute_population_structure(
+        self,
+        n_pcs: int = 3,
+        calculate_kinship: bool = True,
+        *,
+        ld_prune_pca: bool = False,
+        prune_r2: float = 0.2,
+        prune_window_kb: float = 500.0,
+        prune_max_window_snps: int = 500,
+        prune_min_maf: float = 0.01,
+        admixture_k: int = 0,
+        admixture_params: Optional[Dict] = None,
+    ):
         """
         Calculate principal components and/or kinship matrix for population structure correction.
 
@@ -799,6 +826,19 @@ class GWASPipeline:
                                     Only required for non-LOCO MLM. Default: True
                                     (but can skip for map-backed MLM/LOCO, GLM,
                                     FarmCPU, or BLINK)
+            ld_prune_pca (bool): Compute PCs on an LD-pruned marker subset
+                       (in-sample r^2; no reference panel needed). Prevents
+                       long LD blocks (inversions, introgressions, sweeps) from
+                       dominating the top PCs. Requires a genetic map.
+            prune_r2, prune_window_kb, prune_max_window_snps, prune_min_maf:
+                       Pruning parameters (pairs within the window with
+                       r^2 > prune_r2 lose their lower-MAF member).
+            admixture_k (int): If >= 2, fit the ADMIXTURE model with K
+                       ancestral populations on the LD-pruned markers and add
+                       K-1 ancestry proportions (Q1..Q{K-1}) as covariates,
+                       after any PCs ("Q + K" model). Requires a genetic map.
+            admixture_params (dict): Passed to ``fit_admixture`` (max_iter,
+                       tol, n_restarts, seed).
 
         Sets:
             self.pcs: ndarray of shape (n_individuals, n_pcs) if n_pcs > 0
@@ -835,6 +875,8 @@ class GWASPipeline:
 
         self._structure_n_pcs = int(n_pcs)
         self._clear_trait_cache()
+        self._h2_eigen_cache.clear()
+        self.ld_decay = None
 
         step_start = time.time()
         self.log_step("Step 3: Calculating population structure")
@@ -863,11 +905,51 @@ class GWASPipeline:
         # Eager aligned buffer: PCA and per-mask compact read from this, not the mmap.
         self._structure_genotype = geno_for_structure
 
+        admixture_k = int(admixture_k or 0)
+        if admixture_k == 1 or admixture_k < 0:
+            raise ValueError("admixture_k must be 0 (off) or >= 2")
+        need_pruned = (ld_prune_pca and n_pcs > 0) or admixture_k >= 2
+        self._structure_custom = bool(need_pruned)
+        self.structure_marker_indices = None
+        self.admixture = None
+        if need_pruned:
+            if self.geno_map is None:
+                raise ValueError("LD pruning / admixture require a genetic map (chromosome, position)")
+            self.log(
+                f"   LD pruning markers in-sample (r2>{prune_r2}, window {prune_window_kb:g} kb, "
+                f"<= {prune_max_window_snps} SNPs, MAF>={prune_min_maf})..."
+            )
+            self.structure_marker_indices = ld_prune(
+                geno_for_structure,
+                self.geno_map.chromosomes.to_numpy(),
+                self.geno_map.positions.to_numpy(),
+                r2_threshold=prune_r2,
+                window_kb=prune_window_kb,
+                max_window_snps=prune_max_window_snps,
+                min_maf=prune_min_maf,
+            )
+            n_kept = int(self.structure_marker_indices.size)
+            self.log(f"   Retained {n_kept}/{geno_for_structure.n_markers} markers after pruning")
+            if n_kept < 10:
+                raise ValueError(f"Only {n_kept} markers survived LD pruning; relax prune settings")
+            pd.DataFrame({
+                "SNP": self.geno_map.marker_ids.to_numpy()[self.structure_marker_indices],
+                "CHROM": self.geno_map.chromosomes.to_numpy()[self.structure_marker_indices],
+                "POS": self.geno_map.positions.to_numpy()[self.structure_marker_indices],
+            }).to_csv(self.output_dir / "structure_pruned_markers.csv", index=False)
+
         # PCA
         if n_pcs > 0:
             try:
-                self.log(f"   Calculating {n_pcs} PCs...")
-                self.pcs = PANICLE_PCA(M=geno_for_structure, pcs_keep=n_pcs, verbose=False)
+                if ld_prune_pca:
+                    self.log(f"   Calculating {n_pcs} PCs on LD-pruned markers...")
+                    pruned = geno_for_structure.get_columns_imputed(
+                        self.structure_marker_indices, dtype=np.float32,
+                    )
+                    self.pcs = PANICLE_PCA(M=pruned, pcs_keep=n_pcs, verbose=False)
+                else:
+                    self.log(f"   Calculating {n_pcs} PCs...")
+                    self.pcs = PANICLE_PCA(M=geno_for_structure, pcs_keep=n_pcs, verbose=False)
                 self.pc_names = [f'PC{i + 1}' for i in range(self.pcs.shape[1])]
             except Exception as e:
                 raise ValueError(f"Error calculating PCs: {e}")
@@ -877,6 +959,33 @@ class GWASPipeline:
             self.log("   WARNING: Running with 0 PCs. This may lead to inflated p-values if")
             self.log("            your samples have population structure. Consider using --n-pcs 3")
             self.log("            or higher to control for population stratification.")
+
+        # Admixture Q covariates
+        if admixture_k >= 2:
+            params = dict(admixture_params or {})
+            self.log(f"   Fitting admixture model (K={admixture_k}) on pruned markers...")
+            self.admixture = fit_admixture(
+                geno_for_structure, admixture_k,
+                marker_indices=self.structure_marker_indices, **params,
+            )
+            self.log(
+                f"   Admixture log-likelihood {self.admixture.log_likelihood:.1f} "
+                f"({self.admixture.n_iter} EM steps, converged={self.admixture.converged})"
+            )
+            q_cov = self.admixture.covariates()
+            self.pcs = np.column_stack([self.pcs, q_cov]) if self.pcs.size else q_cov
+            self.pc_names = self.pc_names + [f"Q{i + 1}" for i in range(q_cov.shape[1])]
+
+        if self.pc_names:
+            ids = self.phenotype_df["ID"].astype(str).to_numpy() if self.phenotype_df is not None else None
+            structure_df = pd.DataFrame(self.pcs, columns=self.pc_names)
+            if self.admixture is not None:
+                for k in range(self.admixture.Q.shape[1]):
+                    structure_df[f"Q{k + 1}_full"] = self.admixture.Q[:, k]
+            if ids is not None and len(ids) == structure_df.shape[0]:
+                structure_df.insert(0, "ID", ids)
+            structure_df.to_csv(self.output_dir / "population_structure_covariates.csv", index=False)
+        self._structure_n_pcs = int(self.pcs.shape[1])
 
         # Kinship
         if calculate_kinship:
@@ -906,12 +1015,26 @@ class GWASPipeline:
                      blink_params: Optional[Dict] = None,
                      bayesloco_params: Optional[Dict] = None,
                      outputs: List[str] = list(OUTPUT_CHOICES),
-                     include_standard_errors: bool = False):
+                     include_standard_errors: bool = False,
+                     identify_loci: bool = True,
+                     heritability: bool = True,
+                     post_gwas_params: Optional[Dict] = None):
         """
         Run GWAS analysis for specified traits and methods.
 
         Parameters
         ----------
+        identify_loci : bool, default True
+            Clump significant markers into independent loci using in-sample
+            r^2 and write ``GWAS_<trait>_<method>_loci.csv``.
+        heritability : bool, default True
+            Report SNP heritability (``H2_REML``, ``H2_REML_SE``) from the
+            REML null model y = Xb + g + e with the global (all-chromosome)
+            VanRaden kinship and the scan's fixed covariates, and write
+            ``GWAS_<trait>_heritability.csv``.
+        post_gwas_params : dict, optional
+            Overrides for ``PostGWASOptions`` (clump_kb, clump_r2,
+            clump_p_secondary, merge_gap_kb).
         mlm_mode : {'loco', 'global'}, default 'loco'
             How MLM handles relatedness. ``'loco'`` uses leave-one-chromosome-out
             kinship when a genetic map is available (falls back to global
@@ -924,6 +1047,7 @@ class GWASPipeline:
             raise ValueError("Data not loaded.")
 
         mlm_mode_norm = normalize_mlm_mode(mlm_mode)
+        post_options = PostGWASOptions.from_dict(identify_loci, heritability, post_gwas_params)
 
         self.log_step("Step 4: Running GWAS analysis")
         method_cpus = _resolve_method_cpu(ncpus=ncpus, parallel_mode=parallel_mode)
@@ -1238,6 +1362,7 @@ class GWASPipeline:
                 ),
                 report_options,
             )
+            self._post_gwas_trait(prepared, method_reports, trait_summary, post_options, genotype=g_view)
             summary_rows.extend(trait_summary)
             self.log(f"Trait {trait_name} completed in {trait_runtime:.2f} seconds")
             remaining_pack_uses[subset_key] = remaining_pack_uses.get(subset_key, 1) - 1
@@ -1254,6 +1379,96 @@ class GWASPipeline:
             self.log(f"\nSaved global summary to {sum_path}")
 
         self.log("\nGWAS Analysis Completed Successfully.")
+
+    def _trait_heritability(self, trait: PreparedTrait, genotype: GenotypeMatrix) -> REMLHeritability:
+        """REML h2 for one trait: null model with the global kinship.
+
+        The kinship covers all chromosomes (not LOCO), uses the trait's
+        retained samples, and the eigendecomposition is cached per sample set.
+        """
+        idx = np.asarray(trait.sample_indices, dtype=np.int64)
+        key = self._sample_subset_cache_key(idx)
+        eigen = self._h2_eigen_cache.get(key)
+        if eigen is None:
+            K = None
+            if trait.kinship is not None:
+                K = np.asarray(trait.kinship.to_numpy() if hasattr(trait.kinship, "to_numpy") else trait.kinship)
+            elif (
+                self.kinship is not None
+                and self._structure_indices is not None
+                and np.array_equal(self._structure_indices, idx)
+            ):
+                K = np.asarray(self.kinship.to_numpy() if hasattr(self.kinship, "to_numpy") else self.kinship)
+            if K is None:
+                # LOCO-MLM already holds the per-chromosome Gram sums; their
+                # all-chromosome total is the global VanRaden kinship.
+                for (sample_key, _), loco in self._loco_kinship_cache.items():
+                    if sample_key == key and hasattr(loco, "get_full"):
+                        K = np.asarray(loco.get_full().to_numpy())
+                        break
+            if K is None:
+                K = PANICLE_K_VanRaden(genotype, verbose=False)
+                K = np.asarray(K.to_numpy() if hasattr(K, "to_numpy") else K)
+            s, U = np.linalg.eigh(gower_scale(K))
+            eigen = (s, U)
+            if len(self._h2_eigen_cache) >= 4:
+                self._h2_eigen_cache.pop(next(iter(self._h2_eigen_cache)))
+            self._h2_eigen_cache[key] = eigen
+        return reml_heritability(trait.phenotype[:, 1], None, trait.covariates, eigen=eigen)
+
+    def _auto_clump_kb(self, r2_threshold: float) -> float:
+        """Clumping window from the panel's in-sample LD decay (computed once)."""
+        if self.ld_decay is None:
+            geno = self._structure_genotype
+            if geno is None:
+                geno = self.genotype_matrix.subset_individuals(
+                    np.asarray(self._matched_indices, dtype=int), materialize=True,
+                )
+            self.ld_decay = ld_decay(
+                geno, self.geno_map.chromosomes.to_numpy(), self.geno_map.positions.to_numpy(),
+            )
+            self.ld_decay.to_frame().to_csv(self.output_dir / "LD_decay.csv", index=False)
+        window = self.ld_decay.decay_distance_kb(r2_threshold)
+        if not np.isfinite(window):
+            window = 250.0
+        return float(window)
+
+    def _post_gwas_trait(self, trait: PreparedTrait, method_reports, trait_summary,
+                         options: PostGWASOptions, *, genotype: GenotypeMatrix):
+        """REML h2, Lambda_1000 and locus clumping for one trait.
+
+        ``genotype`` is the trait's sample subset with every marker (not the
+        MAC-filtered association matrix), aligned with the padded p-values.
+        """
+        h2 = None
+        if options.heritability:
+            try:
+                h2 = self._trait_heritability(trait, genotype)
+                self.heritability[trait.name] = h2
+                write_heritability(trait.name, h2, self.output_dir)
+                self.log(
+                    f"   REML h2 (global kinship): {h2.h2:.3f} (SE {h2.h2_se:.3f}), "
+                    f"LRT p={h2.lrt_p:.2e}"
+                )
+            except Exception as e:
+                self.log(f"   REML heritability failed for {trait.name}: {e}")
+        try:
+            if options.loci and options.clump_kb == "auto" and self.geno_map is not None:
+                window = self._auto_clump_kb(options.clump_r2)
+                self.log(
+                    f"   Clumping window from LD decay: {window:.0f} kb "
+                    f"(Q{int(round(self.ld_decay.quantile * 100))} r2 < {options.clump_r2} beyond it)"
+                )
+                options = dataclasses.replace(options, clump_kb=window)
+            run_post_gwas(
+                trait_name=trait.name, method_reports=method_reports,
+                summary_rows=trait_summary, phenotype=trait.phenotype[:, 1],
+                genotype=genotype, geno_map=self.geno_map,
+                output_dir=self.output_dir, options=options, log=self.log,
+                heritability=h2,
+            )
+        except Exception as e:
+            self.log(f"   Post-GWAS step failed for {trait.name}: {e}")
 
     def _prepare_trait(
         self,
@@ -1382,6 +1597,11 @@ class GWASPipeline:
                 ):
                     # Subset PCs from structure cache (fast, avoids recomputing PCA)
                     pcs = self.pcs[local_indices_for_structure, :]
+                elif self._structure_custom:
+                    raise ValueError(
+                        "Trait samples are not covered by the structure covariates "
+                        "(LD-pruned PCs / admixture Q); rerun compute_population_structure()."
+                    )
                 else:
                     pcs = PANICLE_PCA(M=g_final, pcs_keep=n_pcs, verbose=False)
             else:

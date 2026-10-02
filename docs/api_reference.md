@@ -241,6 +241,12 @@ pipeline.compute_population_structure(
 **Parameters:**
 - `n_pcs` (int): Number of principal components to compute. Default: 3. Set to 0 to skip PCA
 - `calculate_kinship` (bool): Whether to calculate kinship matrix. Default: True
+- `ld_prune_pca` (bool): Compute PCs on markers LD-pruned with in-sample r². Default: False. Requires a map
+- `prune_r2`, `prune_window_kb`, `prune_max_window_snps`, `prune_min_maf`: pruning settings (defaults 0.2, 500, 500, 0.01)
+- `admixture_k` (int): If ≥ 2, add K−1 ADMIXTURE-model ancestry proportions (Q1..) as covariates. Default: 0
+- `admixture_params` (dict): `max_iter`, `tol`, `n_restarts`, `seed` for the admixture EM
+
+See [LD-aware structure and post-GWAS](ld_aware_structure_and_postgwas.md) for details.
 
 **Side Effects:**
 - Sets `self.pcs` (n_individuals × n_pcs array)

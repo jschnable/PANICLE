@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **LD-aware population structure for panels without an LD reference.**
+  `compute_population_structure(ld_prune_pca=True, ...)` / `--pca-ld-prune`
+  computes PCs on markers pruned with in-sample r² (`panicle.matrix.ld.ld_prune`),
+  so long LD blocks such as inversions or introgressions no longer become top PCs.
+  `admixture_k=K` / `--admixture-k K` fits the ADMIXTURE/FRAPPE likelihood
+  (`panicle.matrix.admixture.fit_admixture`, SQUAREM-accelerated EM) on the
+  pruned markers and adds K-1 ancestry proportions as covariates (Q + K model).
+- **Locus identification**: significant markers are clumped into independent
+  loci with in-sample r² (`panicle.postgwas.identify_loci`), written to
+  `GWAS_<trait>_<method>_loci.csv`; `N_Loci` is added to the summary. On by
+  default; `--no-loci` disables it. The clumping window defaults to the panel's
+  in-sample LD-decay distance (`--clump-kb auto`; `panicle.matrix.ld.ld_decay`,
+  written to `LD_decay.csv`), so long LD blocks in selfing crops are not split
+  into many loci.
+- **lambda_1000** (`Lambda_1000` summary column): lambda_GC rescaled to
+  1000 samples, or to 1000 cases + 1000 controls for binary traits.
+- **SNP heritability (REML)**: `H2_REML` and `H2_REML_SE` summary columns and
+  `GWAS_<trait>_heritability.csv` (Vg, Ve, LRT p). The MLM null model is fitted
+  with the global (all-chromosome) VanRaden kinship and the scan's fixed
+  covariates; the SE comes from the REML information matrix with the delta
+  method. On by default; `--no-h2` disables it. LOCO-MLM runs reuse the LOCO
+  object's full kinship.
+- See `docs/ld_aware_structure_and_postgwas.md` for methods, validation, and caveats.
+
 ### Fixed
 - **LOCO MLM LRT refinement no longer stalls on traits with two-bracket markers.** Markers whose profile-ML derivative changes sign on both sides of the null h2 (caused by the clamped near-zero kinship eigenvalue making the derivative negative at h2 = 0.999, combined with an alternative-model h2 below the null h2) were sent to the ~2-3 ms/marker scalar exact solver. Both brackets are now root-solved inside the compiled LRT kernel (`_lrt_grid_solve_numba`) and the best state is kept. P-values are unchanged (< 1e-10 in -log10 p across 242k refined markers); refinement is 17-44x faster for affected traits (e.g. 47 s -> 1 s for 21,880 candidates). The numba-less NumPy path is unchanged.
 - Close VCF readers and discard temporary genotype matrices after decoding

@@ -194,7 +194,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         valid_methods, pipeline, mlm_mode=args.mlm_mode
     )
     pipeline.compute_population_structure(
-        n_pcs=args.n_pcs, calculate_kinship=need_kinship
+        n_pcs=args.n_pcs,
+        calculate_kinship=need_kinship,
+        ld_prune_pca=args.pca_ld_prune,
+        prune_r2=args.prune_r2,
+        prune_window_kb=args.prune_window_kb,
+        prune_max_window_snps=args.prune_max_window_snps,
+        prune_min_maf=args.prune_min_maf,
+        admixture_k=args.admixture_k,
+        admixture_params={"seed": args.admixture_seed},
     )
 
     def _resolve_denom() -> float:
@@ -288,6 +296,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         bayesloco_params=(bayesloco_params or None),
         include_standard_errors=args.include_standard_errors,
         outputs=outputs,
+        identify_loci=not args.no_loci,
+        heritability=not args.no_h2,
+        post_gwas_params={
+            "clump_kb": args.clump_kb,
+            "clump_r2": args.clump_r2,
+            "clump_p_secondary": args.clump_p2,
+            "merge_gap_kb": args.merge_gap_kb,
+        },
     )
     return 0
 

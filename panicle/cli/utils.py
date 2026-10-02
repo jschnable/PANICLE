@@ -111,6 +111,39 @@ def parse_args(argv=None):
                        help="Methods to run (comma-separated: GLM, MLM, BAYESLOCO, FarmCPU, BLINK, FarmCPUResampling)")
     parser.add_argument("--n-pcs", type=int, default=3,
                        help="Number of PCs")
+    structure = parser.add_argument_group("Population structure (LD-aware)")
+    structure.add_argument("--pca-ld-prune", action="store_true",
+                       help="Compute PCs on markers LD-pruned with in-sample r^2 "
+                            "(keeps long LD blocks such as inversions from dominating PCs)")
+    structure.add_argument("--prune-r2", type=float, default=0.2,
+                       help="r^2 threshold for LD pruning (default 0.2)")
+    structure.add_argument("--prune-window-kb", type=float, default=500.0,
+                       help="LD pruning window in kb (default 500)")
+    structure.add_argument("--prune-max-window-snps", type=int, default=500,
+                       help="Maximum markers apart for an LD pruning pair (default 500)")
+    structure.add_argument("--prune-min-maf", type=float, default=0.01,
+                       help="Minimum MAF for markers entering pruning (default 0.01)")
+    structure.add_argument("--admixture-k", type=int, default=0,
+                       help="Fit the ADMIXTURE model with K ancestral populations on "
+                            "LD-pruned markers and add K-1 Q columns as covariates (0 = off)")
+    structure.add_argument("--admixture-seed", type=int, default=0,
+                       help="Random seed for admixture EM restarts")
+
+    post = parser.add_argument_group("Post-GWAS")
+    post.add_argument("--no-loci", action="store_true",
+                       help="Skip LD-clumping locus identification")
+    post.add_argument("--clump-kb", default="auto",
+                       help="Clumping window around index markers in kb, or 'auto' (default) to "
+                            "use the distance where in-sample LD has decayed below --clump-r2 "
+                            "(90th percentile of r^2 by distance; written to LD_decay.csv)")
+    post.add_argument("--clump-r2", type=float, default=0.1,
+                       help="Minimum in-sample r^2 with the index marker to join a locus (default 0.1)")
+    post.add_argument("--clump-p2", type=float, default=None,
+                       help="p-value threshold for markers joining a locus (default: significance threshold)")
+    post.add_argument("--merge-gap-kb", type=float, default=0.0,
+                       help="Merge loci on the same chromosome closer than this (default 0)")
+    post.add_argument("--no-h2", action="store_true",
+                       help="Skip REML SNP heritability (null model with global kinship)")
     parser.add_argument(
         "--mlm-mode",
         choices=["loco", "global"],
