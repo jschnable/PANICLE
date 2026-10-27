@@ -158,6 +158,12 @@ Related tool: **`panicle-cache-genotype`** pre-converts large genotype files for
 | **`--covariate-id-column`** | ID column name in covariate file. | ID |
 | **`--max-iterations`** | Max iterations for FarmCPU/BLINK. | 10 |
 | **`--max-genotype-dosage`** | Max dosage (e.g., 2 for diploid). | 2.0 |
+| **`--stream-results`** | eQTL-scale mode: LOCO MLM over all selected traits with results streamed to `--outputdir`. `hits` keeps cells with p ≤ `--stream-p-threshold` (`hits.csv`, `trait_summary.csv`, `markers.csv`); `all` also writes `effects.npy`/`se.npy`/`pvalues.npy` (traits × markers memmaps) for fine mapping. Only MLM runs; a map is required; samples missing any selected trait are dropped. | Off |
+| **`--stream-p-threshold`** | Hit threshold for `--stream-results`. | `--significance`, else `--alpha`/markers |
+| **`--no-lrt-refinement`** | Skip exact LRT refinement of Wald hits in `--stream-results` mode. | False |
+| **`--lrt-screen-threshold`** | Wald p below which cells are LRT-refined (`--stream-results`). | 5e-4 |
+| **`--trait-block-size`** | Traits per batched block (`--stream-results`). | auto |
+| **`--stream-dtype`** | Storage dtype of `effects.npy`/`se.npy` for `--stream-results all` (p-values stay float64). | float32 |
 | **`--outputdir`** | Output directory. | ./GWAS_results |
 | **`--outputs`** | Outputs to generate: `all_marker_pvalues`, `significant_marker_pvalues`, `manhattan`, `qq` (see [docs/output_files.md](docs/output_files.md)). | All |
 | **`--include-standard-errors`** | Include `{METHOD}_SE` columns in merged result CSV outputs. | False |
@@ -169,6 +175,25 @@ Other useful filters:
 - `--snps-only`, `--no-split-multiallelic`
 
 <a id="pipeline-api"></a>
+### eQTL-scale runs (thousands of traits)
+
+```bash
+# 20k expression traits: keep only sub-threshold cells (default) ...
+panicle-gwas -p expression.csv -g geno.vcf.gz -m map.csv --stream-results hits -o eqtl_out --ncpus 0
+# ... or keep every cell on disk for fine mapping (e.g. SuSiE z = effect / se)
+panicle-gwas -p expression.csv -g geno.vcf.gz -m map.csv --stream-results all -o eqtl_out --ncpus 0
+```
+
+```python
+from panicle.association.multi_trait_store import MultiTraitResultStore
+store = MultiTraitResultStore.open("eqtl_out")
+store.hits                 # Trait, MARKER, CHROM, POS, Effect, SE, P_value
+store.trait_summary        # top marker per trait
+store["GeneA"].pvalues     # keep="all" only: memmap-backed per-trait arrays
+```
+
+The same two modes are available from Python via `PANICLE_MLM_LOCO_MULTI(..., keep="hits"|"all", output_dir=...)`.
+
 ## Pipeline API (step-by-step control)
 
 For multi-step workflows in scripts or notebooks, use the `GWASPipeline` class — it exposes loading, alignment, structure, and analysis as separate steps you can inspect between.

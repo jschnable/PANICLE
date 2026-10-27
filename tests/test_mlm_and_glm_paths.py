@@ -237,6 +237,7 @@ def test_mlm_loco_multi_matches_single_trait_runs() -> None:
         cpu=1,
         lrt_refinement=False,
         verbose=False,
+        keep="all",
     )
 
     for trait_idx, trait_name in enumerate(trait_names):
@@ -546,3 +547,204 @@ def test_glm_ultrafast_handles_singular_covariates_and_df_guard() -> None:
     geno_long = np.array([[0, 1], [1, 0], [0, 0], [2, 1]], dtype=np.int8)
     res = glm_fwl_qr.PANICLE_GLM_ultrafast(phe=phe_long, geno=geno_long, CV=cov_long, verbose=False)
     assert res.effects.shape[0] == geno.shape[1]
+
+
+def test_brent_batch_matches_scalar_variance_components() -> None:
+    from panicle.association.mlm import (
+        estimate_variance_components_brent,
+        estimate_variance_components_brent_batch,
+    )
+
+    rng = np.random.default_rng(5)
+    n, q0, T = 60, 2, 12
+    U, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    eig = np.sort(rng.gamma(2.0, 0.5, size=n))[::-1].copy()
+    eig[-1] = 0.0  # clamped near-zero eigenvalue like a real LOCO kinship
+    X = U.T @ np.column_stack([np.ones(n), rng.normal(size=(n, q0 - 1))])
+    g = U @ (np.sqrt(np.maximum(eig, 1e-6))[:, None] * rng.normal(size=(n, T)))
+    h2 = np.linspace(0.02, 0.95, T)
+    Y = U.T @ (np.sqrt(h2) * g / g.std(axis=0) + np.sqrt(1 - h2) * rng.normal(size=(n, T)))
+
+    delta, vg, ve = estimate_variance_components_brent_batch(Y, X, eig)
+    ref = np.array([estimate_variance_components_brent(Y[:, t], X, eig) for t in range(T)])
+    np.testing.assert_allclose(delta, ref[:, 0], rtol=1e-6)
+    np.testing.assert_allclose(vg, ref[:, 1], rtol=1e-6)
+    np.testing.assert_allclose(ve, ref[:, 2], rtol=1e-6)
+
+
+def test_wald_trait_block_matches_per_trait_kernel() -> None:
+    rng = np.random.default_rng(6)
+    n, m, q0, T = 80, 300, 2, 7
+    U, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    eig = np.sort(rng.gamma(2.0, 0.5, size=n))[::-1].copy()
+    G = rng.integers(0, 3, size=(n, m)).astype(np.float32)
+    G_eig = (U.T.astype(np.float32) @ G).astype(np.float32)
+    X_eig = U.T @ np.column_stack([np.ones(n), rng.normal(size=(n, q0 - 1))])
+    Y = rng.normal(size=(n, T))
+    Y[:, 0] += 0.8 * G[:, 3]
+    Y_eig = U.T @ Y
+
+    eff_b, se_b, p_b = mlm_loco._run_wald_trait_block(
+        Y_eig, X_eig, eig, G_eig, vc_method="BRENT", maxLine=128, cpu=1
+    )
+    for t in range(T):
+        eff, se, p = mlm_loco._run_wald_with_pretransformed_genotypes(
+            Y_eig[:, t], X_eig, eig, G_eig, vc_method="BRENT", maxLine=128, cpu=1
+        )
+        # Same float32 cross-products, different BLAS reduction order.
+        np.testing.assert_allclose(eff_b[t], eff, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(se_b[t], se, rtol=1e-4)
+        np.testing.assert_allclose(-np.log10(p_b[t]), -np.log10(p), atol=1e-3)
+    assert p_b[0].argmin() == 3
+
+
+def test_mlm_loco_multi_trait_block_size_invariant() -> None:
+    rng = np.random.default_rng(8)
+    n, m, T = 40, 60, 9
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+    phe = rng.normal(size=(n, T))
+    geno_matrix = GenotypeMatrix(geno)
+    loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=16, verbose=False)
+    kwargs = dict(
+        phe=phe, geno=geno_matrix, map_data=map_df, loco_kinship=loco,
+        maxLine=16, cpu=1, lrt_refinement=False, verbose=False, keep="all",
+    )
+    whole = PANICLE_MLM_LOCO_MULTI(trait_block_size=T, **kwargs)
+    split = PANICLE_MLM_LOCO_MULTI(trait_block_size=4, **kwargs)
+    for name in whole:
+        np.testing.assert_allclose(
+            -np.log10(whole[name].pvalues), -np.log10(split[name].pvalues), atol=1e-3
+        )
+    with pytest.raises(ValueError):
+        PANICLE_MLM_LOCO_MULTI(trait_block_size=0, **kwargs)
+
+
+def _multi_trait_fixture(seed: int = 11, n: int = 36, m: int = 48, T: int = 6):
+    rng = np.random.default_rng(seed)
+    geno = rng.integers(0, 3, size=(n, m), dtype=np.int8)
+    map_df = pd.DataFrame(
+        {
+            "SNP": [f"s{i}" for i in range(m)],
+            "CHROM": ["1"] * (m // 2) + ["2"] * (m - m // 2),
+            "POS": np.arange(1, m + 1),
+        }
+    )
+    phe = rng.normal(size=(n, T))
+    phe[:, 0] += 1.5 * geno[:, 3]
+    phe[:, 2] += 1.5 * geno[:, 30]
+    geno_matrix = GenotypeMatrix(geno)
+    loco = PANICLE_K_VanRaden_LOCO(geno_matrix, map_df, maxLine=16, verbose=False)
+    names = [f"gene{t}" for t in range(T)]
+    kwargs = dict(
+        phe=phe, geno=geno_matrix, map_data=map_df, trait_names=names, loco_kinship=loco,
+        maxLine=16, cpu=1, verbose=False,
+    )
+    return names, map_df, kwargs
+
+
+def test_estimate_null_ml_batch_matches_scalar() -> None:
+    from panicle.association.mlm import (
+        _calculate_neg_ml_likelihood,
+        estimate_null_ml_batch,
+        estimate_variance_components_brent,
+    )
+
+    rng = np.random.default_rng(9)
+    n, q0, T = 50, 2, 8
+    U, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    eig = np.sort(rng.gamma(2.0, 0.5, size=n))[::-1].copy()
+    X = U.T @ np.column_stack([np.ones(n), rng.normal(size=(n, q0 - 1))])
+    Y = U.T @ rng.normal(size=(n, T))
+    h2_b, nll_b = estimate_null_ml_batch(Y, X, eig)
+    for t in range(T):
+        _, vg, ve = estimate_variance_components_brent(Y[:, t], X, eig, use_ml=True)
+        h2 = vg / (vg + ve)
+        np.testing.assert_allclose(h2_b[t], h2, rtol=1e-6, atol=1e-9)
+        np.testing.assert_allclose(nll_b[t], _calculate_neg_ml_likelihood(h2, Y[:, t], X, eig), rtol=1e-8)
+
+
+@pytest.mark.parametrize("lrt_refinement", [False, True])
+def test_mlm_loco_multi_hits_store_matches_full_results(lrt_refinement: bool) -> None:
+    from panicle.association.multi_trait_store import MultiTraitResultStore
+
+    names, map_df, kwargs = _multi_trait_fixture()
+    thr = 1e-3
+    full = PANICLE_MLM_LOCO_MULTI(keep="all", lrt_refinement=lrt_refinement, **kwargs)
+    store = PANICLE_MLM_LOCO_MULTI(keep="hits", p_threshold=thr, lrt_refinement=lrt_refinement, **kwargs)
+    assert isinstance(store, MultiTraitResultStore)
+    assert store.keep == "hits" and store.complete and not store.dense
+    with pytest.raises(RuntimeError):
+        store["gene0"]
+
+    hits = store.hits
+    expected_rows = 0
+    for name in names:
+        res = full[name]
+        idx = np.nonzero(res.pvalues <= thr)[0]
+        expected_rows += idx.size
+        th = store.trait_hits(name)
+        assert th.shape[0] == idx.size
+        got = th.set_index("MARKER")
+        for i in idx:
+            marker = map_df.loc[i, "SNP"]
+            np.testing.assert_allclose(got.loc[marker, "P_value"], res.pvalues[i], rtol=1e-12)
+            np.testing.assert_allclose(got.loc[marker, "Effect"], res.effects[i], rtol=1e-12)
+            np.testing.assert_allclose(got.loc[marker, "SE"], res.se[i], rtol=1e-12)
+        # top marker per trait
+        row = store.trait_summary.set_index("Trait").loc[name]
+        assert row["top_MARKER"] == map_df.loc[int(res.pvalues.argmin()), "SNP"]
+        np.testing.assert_allclose(row["top_P_value"], res.pvalues.min(), rtol=1e-12)
+    assert hits.shape[0] == expected_rows
+    assert expected_rows >= 2  # the two planted signals
+    assert set(hits["Trait"]) >= {"gene0", "gene2"}
+    assert set(hits.columns) == {"Trait", "MARKER", "CHROM", "POS", "Effect", "SE", "P_value"}
+
+
+def test_mlm_loco_multi_dense_store_streams_and_reopens(tmp_path) -> None:
+    from panicle.association.multi_trait_store import MultiTraitResultStore
+
+    names, map_df, kwargs = _multi_trait_fixture()
+    full = PANICLE_MLM_LOCO_MULTI(keep="all", lrt_refinement=False, **kwargs)
+    out = tmp_path / "eqtl_store"
+    store = PANICLE_MLM_LOCO_MULTI(
+        keep="all", output_dir=out, p_threshold=1e-3, lrt_refinement=False, dense_dtype=np.float64, **kwargs
+    )
+    assert store.dense and store.complete
+    assert store.pvalues.shape == (len(names), map_df.shape[0])
+    for name in names:
+        np.testing.assert_allclose(store[name].pvalues, full[name].pvalues, rtol=1e-12)
+        np.testing.assert_allclose(store[name].effects, full[name].effects, rtol=1e-12)
+        np.testing.assert_allclose(store[name].se, full[name].se, rtol=1e-12)
+    assert list(store.keys()) == names and "gene1" in store and len(store) == len(names)
+
+    for fname in ("effects.npy", "se.npy", "pvalues.npy", "hits.csv", "trait_summary.csv", "metadata.json"):
+        assert (out / fname).exists()
+    hits_on_disk = pd.read_csv(out / "hits.csv")
+    assert hits_on_disk.shape[0] == store.hits.shape[0]
+
+    reopened = MultiTraitResultStore.open(out)
+    assert reopened.keep == "all" and reopened.trait_names == names
+    np.testing.assert_allclose(reopened["gene2"].pvalues, full["gene2"].pvalues, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(reopened.pvalues), np.asarray(store.pvalues))
+    assert reopened.hits.shape == store.hits.shape
+    pd.testing.assert_frame_equal(
+        reopened.trait_summary.reset_index(drop=True), pd.read_csv(out / "trait_summary.csv")
+    )
+
+    # float32 dense storage keeps p-values in float64
+    store32 = PANICLE_MLM_LOCO_MULTI(keep="all", output_dir=tmp_path / "f32", lrt_refinement=False, **kwargs)
+    assert store32.effects.dtype == np.float32 and store32.pvalues.dtype == np.float64
+    np.testing.assert_allclose(store32["gene0"].effects, full["gene0"].effects, rtol=1e-5)
+
+
+def test_mlm_loco_multi_rejects_bad_keep() -> None:
+    _, _, kwargs = _multi_trait_fixture()
+    with pytest.raises(ValueError):
+        PANICLE_MLM_LOCO_MULTI(keep="some", **kwargs)

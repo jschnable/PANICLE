@@ -295,6 +295,9 @@ panicle-gwas \
 | `--min-maf` | Minimum minor allele frequency filter | 0.0 |
 | `--max-missing` | Maximum missing data proportion | 1.0 |
 | `--significance` | Fixed p-value threshold (overrides Bonferroni) | — |
+| `--stream-results` | eQTL-scale LOCO MLM with streamed results: `hits` (sub-threshold cells only) or `all` (plus traits × markers memmaps) | Off |
+| `--stream-p-threshold` | Hit threshold for `--stream-results` | `--significance`, else `--alpha`/markers |
+| `--no-lrt-refinement` | Skip LRT refinement in `--stream-results` mode | Off |
 | `--version` | Print package version and exit | — |
 
 ### Examples

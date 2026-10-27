@@ -889,6 +889,164 @@ class GWASPipeline:
         
         self.log_step("Population structure", step_start)
 
+    def run_multi_trait_stream(
+        self,
+        traits: Optional[List[str]] = None,
+        *,
+        keep: str = "hits",
+        p_threshold: Optional[float] = None,
+        significance: Optional[float] = None,
+        alpha: float = 0.05,
+        ncpus: int = 1,
+        parallel_mode: str = "auto",
+        min_mac: int = 10,
+        max_genotype_dosage: float = 2.0,
+        lrt_refinement: bool = True,
+        screen_threshold: float = 5e-4,
+        trait_block_size: Optional[int] = None,
+        dense_dtype: str = "float32",
+    ):
+        """LOCO MLM over many traits (eQTL scale) with results streamed to the output directory.
+
+        All selected traits are analysed on one shared sample set: samples with a
+        missing value in any selected trait or covariate are dropped (logged).
+        Population-structure PCs from ``compute_population_structure`` are used
+        as covariates like the per-trait pipeline, and the MAC filter is applied
+        once to the shared sample set. Results go to a
+        :class:`~panicle.association.multi_trait_store.MultiTraitResultStore`
+        in ``output_dir`` (``hits.csv``, ``trait_summary.csv``, ``markers.csv``
+        and, with ``keep="all"``, ``effects.npy`` / ``se.npy`` / ``pvalues.npy``).
+        """
+        if self.phenotype_df is None:
+            raise ValueError("Data not loaded.")
+        if self._matched_indices is None:
+            raise ValueError("Samples not aligned. Call align_samples() first.")
+        if self.geno_map is None:
+            raise ValueError("Multi-trait streaming MLM needs a genetic map (LOCO kinship)")
+        keep_norm = str(keep).lower()
+        if keep_norm not in {"hits", "all"}:
+            raise ValueError("keep must be 'hits' or 'all'")
+
+        self.log_step("Step 4: Multi-trait LOCO MLM (streamed results)")
+        method_cpus = _resolve_method_cpu(ncpus=ncpus, parallel_mode=parallel_mode)
+        self.log(f"   Method CPU setting: {method_cpus} (ncpus={ncpus}, parallel_mode={parallel_mode})")
+        self.log(f"   BLAS: {format_blas_runtime()}")
+        started = time.time()
+
+        selected_traits = self._select_traits(traits)
+        Y = np.column_stack(
+            [pd.to_numeric(self.phenotype_df[t], errors="coerce").to_numpy(dtype=float) for t in selected_traits]
+        )
+        ext_covs = None
+        if self.covariate_df is not None:
+            ext_covs = self.covariate_df[self.covariate_names].to_numpy(dtype=float)
+        mask = np.isfinite(Y).all(axis=1)
+        if ext_covs is not None:
+            mask &= np.isfinite(ext_covs).all(axis=1)
+        n_excluded = int((~mask).sum())
+        if n_excluded:
+            excluded_ids = self.phenotype_df.loc[~mask, "ID"].astype(str).to_numpy()
+            shown = ", ".join(excluded_ids[:10]) + (f", ... and {n_excluded - 10} more" if n_excluded > 10 else "")
+            self.log(
+                f"   Excluded {n_excluded} sample(s) with a missing/non-finite value in any selected "
+                f"trait or covariate (all traits share one sample set): {shown}"
+            )
+        if mask.sum() < 3:
+            raise ValueError("Fewer than 3 samples have complete data across the selected traits")
+
+        geno_idx = np.asarray(self._matched_indices, dtype=int)[np.where(mask)[0]]
+        prepared = self._prepare_sample_subset(
+            geno_idx, self._structure_n_pcs, False, min_mac, max_genotype_dosage
+        )
+        keep_indices, scan_map = prepared.keep_indices, prepared.geno_map
+        n_markers_all = int(self.genotype_matrix.n_markers)
+        if keep_indices is not None and keep_indices.size < n_markers_all:
+            self.log(
+                f"   MAC filter (min_mac={int(min_mac)}) dropped {n_markers_all - keep_indices.size}/{n_markers_all} markers"
+            )
+        cov_parts = []
+        if ext_covs is not None:
+            cov_parts.append(ext_covs[mask, :])
+        if prepared.pcs is not None and prepared.pcs.size > 0:
+            cov_parts.append(prepared.pcs)
+        CV = np.column_stack(cov_parts) if cov_parts else None
+
+        scan_geno = self._association_genotype(prepared.genotype, keep_indices)
+        n_tested = int(scan_geno.n_markers)
+        loco_kinship = self._get_or_create_loco_kinship(
+            scan_geno, geno_idx, maxLine=5000, map_data=scan_map, keep_indices=keep_indices,
+        )
+        if p_threshold is None:
+            p_threshold = float(significance) if significance is not None else float(alpha) / max(1, n_tested)
+        self.log(
+            f"   {len(selected_traits)} traits x {n_tested} markers on {int(mask.sum())} samples; "
+            f"keep={keep_norm}, p_threshold={p_threshold:.3g}, LRT refinement={'on' if lrt_refinement else 'off'}"
+        )
+
+        store = PANICLE_MLM_LOCO_MULTI(
+            phe=Y[mask],
+            geno=scan_geno,
+            map_data=scan_map,
+            trait_names=selected_traits,
+            loco_kinship=loco_kinship,
+            CV=CV,
+            cpu=method_cpus,
+            lrt_refinement=lrt_refinement,
+            screen_threshold=screen_threshold,
+            verbose=True,
+            trait_block_size=trait_block_size,
+            keep=keep_norm,
+            output_dir=self.output_dir,
+            p_threshold=p_threshold,
+            dense_dtype=np.dtype(dense_dtype),
+        )
+        self.log_step("Multi-trait LOCO MLM", started)
+        self.log(f"   Wrote {store!r}")
+        return store
+
+    def _select_traits(self, traits: Optional[List[str]]) -> List[str]:
+        """Resolve requested trait names against the loaded numeric phenotype columns."""
+        available_traits = [c for c in self.phenotype_df.columns if c != 'ID' and pd.api.types.is_numeric_dtype(self.phenotype_df[c])]
+        if traits:
+             lower_map = {t.lower(): t for t in available_traits}
+             stripped_map = {t.strip().lower(): t for t in available_traits}
+
+             selected_traits = []
+             still_missing = []
+             for t in traits:
+                 if t in available_traits:
+                     selected_traits.append(t)
+                 elif t.lower() in lower_map:
+                     actual = lower_map[t.lower()]
+                     selected_traits.append(actual)
+                     self.log(f"   Note: trait '{t}' matched '{actual}' (case-insensitive)")
+                 elif t.strip().lower() in stripped_map:
+                     actual = stripped_map[t.strip().lower()]
+                     selected_traits.append(actual)
+                     self.log(f"   Note: trait '{t}' matched '{actual}' (after stripping whitespace)")
+                 else:
+                     still_missing.append(t)
+
+             if still_missing:
+                 self.log(f"   Warning: Traits not found or non-numeric: {still_missing}")
+                 self.log(f"   Available traits: {available_traits}")
+        else:
+             selected_traits = available_traits
+
+        if not selected_traits:
+            if available_traits:
+                raise ValueError(f"No valid traits found to analyze. Available traits: {available_traits}")
+            else:
+                all_cols = [c for c in self.phenotype_df.columns if c != 'ID']
+                raise ValueError(
+                    "No valid traits found to analyze. "
+                    "The phenotype file has no numeric trait columns loaded. "
+                    "Check that the --traits names match the column names in "
+                    f"your phenotype file. Loaded columns (non-ID): {all_cols}"
+                )
+
+        return selected_traits
+
     def run_analysis(self,
                      traits: Optional[List[str]] = None,
                      methods: List[str] = ['GLM', 'MLM', 'FARMCPU', 'BLINK'],
@@ -930,45 +1088,7 @@ class GWASPipeline:
         self.log(f"   Method CPU setting: {method_cpus} (ncpus={ncpus}, parallel_mode={parallel_mode})")
         self.log(f"   BLAS: {format_blas_runtime()}")
 
-        # 1. Trait Selection — with case-insensitive / whitespace-stripped fallback
-        available_traits = [c for c in self.phenotype_df.columns if c != 'ID' and pd.api.types.is_numeric_dtype(self.phenotype_df[c])]
-        if traits:
-             lower_map = {t.lower(): t for t in available_traits}
-             stripped_map = {t.strip().lower(): t for t in available_traits}
-
-             selected_traits = []
-             still_missing = []
-             for t in traits:
-                 if t in available_traits:
-                     selected_traits.append(t)
-                 elif t.lower() in lower_map:
-                     actual = lower_map[t.lower()]
-                     selected_traits.append(actual)
-                     self.log(f"   Note: trait '{t}' matched '{actual}' (case-insensitive)")
-                 elif t.strip().lower() in stripped_map:
-                     actual = stripped_map[t.strip().lower()]
-                     selected_traits.append(actual)
-                     self.log(f"   Note: trait '{t}' matched '{actual}' (after stripping whitespace)")
-                 else:
-                     still_missing.append(t)
-
-             if still_missing:
-                 self.log(f"   Warning: Traits not found or non-numeric: {still_missing}")
-                 self.log(f"   Available traits: {available_traits}")
-        else:
-             selected_traits = available_traits
-
-        if not selected_traits:
-            if available_traits:
-                raise ValueError(f"No valid traits found to analyze. Available traits: {available_traits}")
-            else:
-                all_cols = [c for c in self.phenotype_df.columns if c != 'ID']
-                raise ValueError(
-                    "No valid traits found to analyze. "
-                    "The phenotype file has no numeric trait columns loaded. "
-                    "Check that the --traits names match the column names in "
-                    f"your phenotype file. Loaded columns (non-ID): {all_cols}"
-                )
+        selected_traits = self._select_traits(traits)
 
         methods_upper_check = [m.upper() for m in methods]
         if 'BAYESLOCO' in methods_upper_check:
@@ -1102,7 +1222,7 @@ class GWASPipeline:
                 raw_mlm = run_trait_group(
                     group_items, group_geno, runner=PANICLE_MLM_LOCO_MULTI,
                     options=dict(map_data=group_map, loco_kinship=group_loco_kinship,
-                                 cpu=method_cpus, verbose=False),
+                                 cpu=method_cpus, verbose=False, keep="all"),
                 )
                 for tname, tres in raw_mlm.items():
                     grouped_mlm_results[tname] = pad_association_results(
@@ -1300,6 +1420,37 @@ class GWASPipeline:
         idx = np.where(mask)[0]
         base_indices = np.asarray(self._matched_indices, dtype=int)
         geno_idx = base_indices[idx]
+        prepared = self._prepare_sample_subset(geno_idx, n_pcs, need_kinship, min_mac, max_dosage)
+        g_final, pcs, k_final = prepared.genotype, prepared.pcs, prepared.kinship
+        keep_indices, trait_geno_map = prepared.keep_indices, prepared.geno_map
+
+        y_final = np.column_stack([np.arange(mask.sum()), y_vals[mask]])
+
+        cov_parts = []
+        if ext_covs is not None:
+            cov_parts.append(ext_covs[mask, :])
+        if pcs is not None and pcs.size > 0:
+            cov_parts.append(pcs)
+
+        cov_final = np.column_stack(cov_parts) if cov_parts else None
+
+        return PreparedTrait(trait_name, y_final, g_final, cov_final, k_final, geno_idx, trait_geno_map, keep_indices)
+
+    def _prepare_sample_subset(
+        self,
+        geno_idx: np.ndarray,
+        n_pcs: int,
+        need_kinship: bool,
+        min_mac: int,
+        max_dosage: float,
+    ) -> TraitPreparation:
+        """Genotype view, PCs, kinship and MAC-filtered marker set for one sample subset.
+
+        ``geno_idx`` are genotype row indices (already matched to phenotype
+        rows). Cached on the (subset, parameters) key so consecutive traits
+        with the same sample set reuse it.
+        """
+        geno_idx = np.asarray(geno_idx, dtype=int)
         is_full_geno = (
             geno_idx.size == self.genotype_matrix.n_individuals
             and np.array_equal(geno_idx, np.arange(self.genotype_matrix.n_individuals))
@@ -1385,7 +1536,7 @@ class GWASPipeline:
                 else:
                     pcs = PANICLE_PCA(M=g_final, pcs_keep=n_pcs, verbose=False)
             else:
-                pcs = np.zeros((idx.size, 0))
+                pcs = np.zeros((geno_idx.size, 0))
 
             k_final = None
             if need_kinship:
@@ -1418,18 +1569,8 @@ class GWASPipeline:
             self._trait_cache = TraitPreparation(
                 cache_key, g_final, pcs, k_final, trait_geno_map, keep_indices,
             )
+        return self._trait_cache
 
-        y_final = np.column_stack([np.arange(mask.sum()), y_vals[mask]])
-
-        cov_parts = []
-        if ext_covs is not None:
-            cov_parts.append(ext_covs[mask, :])
-        if pcs is not None and pcs.size > 0:
-            cov_parts.append(pcs)
-
-        cov_final = np.column_stack(cov_parts) if cov_parts else None
-
-        return PreparedTrait(trait_name, y_final, g_final, cov_final, k_final, geno_idx, trait_geno_map, keep_indices)
 
     def _prepare_trait_data(self, trait_name, n_pcs=0, need_kinship=False, min_mac=0, max_dosage=2.0):
         """Compatibility wrapper for callers of the former tuple-returning helper."""

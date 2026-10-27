@@ -152,6 +152,31 @@ def parse_args(argv=None):
     parser.add_argument("--traits", default=None,
                        help="Comma-separated traits")
     
+    # Multi-trait streaming MLM (eQTL scale)
+    parser.add_argument(
+        "--stream-results",
+        choices=["hits", "all"],
+        default=None,
+        help=(
+            "Run the many-trait LOCO MLM scan (e.g. 20k expression traits) with results "
+            "streamed to --outputdir instead of the per-trait GWAS reports. 'hits' keeps "
+            "only cells with p <= --stream-p-threshold (plus each trait's top marker) in "
+            "hits.csv/trait_summary.csv; 'all' also writes effects.npy/se.npy/pvalues.npy "
+            "(traits x markers memmaps) for fine mapping. Only MLM runs in this mode; a "
+            "genetic map is required. Samples missing any selected trait are dropped."
+        ),
+    )
+    parser.add_argument("--stream-p-threshold", type=float, default=None,
+                       help="Hit threshold for --stream-results (default: --significance, else --alpha / n_markers)")
+    parser.add_argument("--no-lrt-refinement", action='store_true',
+                       help="Skip exact LRT refinement of Wald hits in --stream-results mode")
+    parser.add_argument("--lrt-screen-threshold", type=float, default=5e-4,
+                       help="Wald p-value below which cells are LRT-refined in --stream-results mode")
+    parser.add_argument("--trait-block-size", type=int, default=None,
+                       help="Traits per batched block in --stream-results mode (default: automatic)")
+    parser.add_argument("--stream-dtype", choices=["float32", "float64"], default="float32",
+                       help="Storage dtype of effects/se memmaps for --stream-results all (p-values are always float64)")
+
     # Output
     parser.add_argument("--outputs", nargs='+',
                        choices=list(OUTPUT_CHOICES),

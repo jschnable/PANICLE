@@ -212,8 +212,17 @@ else:
         return effects, std_errors, t_stats, dfs
 
 # Phase 2: Fast p-value calculation
-def compute_fast_pvalues(t_stats: np.ndarray, dfs: np.ndarray) -> np.ndarray:
-    """Fast p-value calculation with proper numerical precision for very small p-values"""
+# Below this many valid cells a single stdtr call is cheaper than thread launch.
+_PVALUE_THREAD_MIN_CELLS = 1 << 16
+
+
+def compute_fast_pvalues(t_stats: np.ndarray, dfs: np.ndarray, cpu: int = 1) -> np.ndarray:
+    """Fast p-value calculation with proper numerical precision for very small p-values.
+
+    ``cpu`` > 1 splits the stdtr evaluation across that many threads for large
+    inputs (the scipy ufunc releases the GIL); each cell is computed
+    independently so the result is bit-identical to the single-threaded call.
+    """
     pvalues = np.ones_like(t_stats)
     valid_mask = ~np.isnan(t_stats) & (dfs > 0) & ~np.isnan(dfs)
     
@@ -224,7 +233,23 @@ def compute_fast_pvalues(t_stats: np.ndarray, dfs: np.ndarray) -> np.ndarray:
         # special.stdtr is the kernel stats.t.sf calls (t.sf(x, df) ==
         # stdtr(df, -x)); calling it directly skips the rv_continuous argument
         # machinery per call and gives the same numbers (bit-identical).
-        pvalues[valid_mask] = 2.0 * special.stdtr(valid_df, -np.abs(valid_t))
+        neg_abs_t = -np.abs(valid_t)
+        n_threads = int(cpu) if cpu is not None else 1
+        if n_threads > 1 and valid_t.size >= _PVALUE_THREAD_MIN_CELLS:
+            from concurrent.futures import ThreadPoolExecutor
+
+            out = np.empty_like(valid_t)
+            bounds = np.linspace(0, valid_t.size, n_threads + 1, dtype=np.int64)
+
+            def _chunk(i):
+                lo, hi = bounds[i], bounds[i + 1]
+                special.stdtr(valid_df[lo:hi], neg_abs_t[lo:hi], out=out[lo:hi])
+
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                list(pool.map(_chunk, range(n_threads)))
+            pvalues[valid_mask] = 2.0 * out
+        else:
+            pvalues[valid_mask] = 2.0 * special.stdtr(valid_df, neg_abs_t)
     
     return pvalues
 
@@ -736,6 +761,271 @@ def estimate_variance_components_brent(y: np.ndarray,
         print(f"Converged: {result.success if 'result' in locals() else False}")
     
     return delta_hat, vg_hat, ve_hat
+
+
+# ---------------------------------------------------------------------------
+# Batched REML variance-component estimation (many traits, one eigen-basis).
+# A numba port of scipy's bounded Brent (_minimize_scalar_bounded) around the
+# same REML objective as _calculate_neg_reml_likelihood, run over traits in a
+# prange so 20k gene-expression traits do not pay the Python optimizer loop
+# one at a time.
+# ---------------------------------------------------------------------------
+_BRENT_H2_LO = 0.001
+_BRENT_H2_HI = 0.999
+_BRENT_XATOL = 1.22e-4
+_BRENT_MAXITER = 500
+
+if HAS_NUMBA:
+
+    @numba.jit(nopython=True, cache=True)
+    def _reml_profile_jit(h2, y, X, eig_safe, XViX, rhs, use_ml):
+        """REML (or ML) pieces at h2: fills XViX/rhs, returns (neg_loglik, yP0y, ok).
+
+        ok=False mirrors the np.inf returns of _calculate_neg_reml_likelihood /
+        _calculate_neg_ml_likelihood.
+        """
+        n = y.shape[0]
+        p = X.shape[1]
+        log_V0b_sum = 0.0
+        for a in range(p):
+            rhs[a] = 0.0
+            for b in range(p):
+                XViX[a, b] = 0.0
+        for i in range(n):
+            v = h2 * eig_safe[i] + (1.0 - h2)
+            if v <= 0.0:
+                return np.inf, 0.0, False
+            vi = 1.0 / v
+            log_V0b_sum += np.log(v)
+            yi = vi * y[i]
+            for a in range(p):
+                xia = vi * X[i, a]
+                rhs[a] += xia * y[i]
+                for b in range(p):
+                    XViX[a, b] += X[i, a] * vi * X[i, b]
+        sign, log_det = np.linalg.slogdet(XViX)
+        if use_ml:
+            if sign == 0:
+                beta = np.linalg.lstsq(XViX, rhs)[0]
+            else:
+                beta = np.linalg.solve(XViX, rhs)
+        else:
+            if sign <= 0 or not np.isfinite(log_det):
+                return np.inf, 0.0, False
+            beta = np.linalg.solve(XViX, rhs)
+        # y' P0 y = y' V^-1 y - (X' V^-1 y)' beta
+        yViy = 0.0
+        for i in range(n):
+            v = h2 * eig_safe[i] + (1.0 - h2)
+            yViy += y[i] * y[i] / v
+        yP0y = yViy
+        for a in range(p):
+            yP0y -= rhs[a] * beta[a]
+        if yP0y <= 0.0:
+            return np.inf, yP0y, False
+        if use_ml:
+            nll = 0.5 * (log_V0b_sum + n * np.log(yP0y / max(1, n)))
+            return nll, yP0y, True
+        df = n - p
+        if df <= 0:
+            return np.inf, yP0y, False
+        nll = 0.5 * (log_V0b_sum - log_det + df * np.log(yP0y) + df * (1.0 - np.log(df)))
+        return nll, yP0y, True
+
+    @numba.jit(nopython=True, cache=True)
+    def _brent_bounded_reml_jit(y, X, eig_safe, x1, x2, xatol, maxiter, XViX, rhs, use_ml):
+        """scipy.optimize._minimize_scalar_bounded, specialised to the REML objective.
+
+        Returns (xf, flag) with flag 0 = converged, 1 = maxiter, 2 = nan.
+        """
+        sqrt_eps = np.sqrt(2.2e-16)
+        golden_mean = 0.5 * (3.0 - np.sqrt(5.0))
+        a = x1
+        b = x2
+        fulc = a + golden_mean * (b - a)
+        nfc = fulc
+        xf = fulc
+        rat = 0.0
+        e = 0.0
+        x = xf
+        fx, _, _ = _reml_profile_jit(x, y, X, eig_safe, XViX, rhs, use_ml)
+        num = 1
+        fu = np.inf
+        ffulc = fx
+        fnfc = fx
+        xm = 0.5 * (a + b)
+        tol1 = sqrt_eps * abs(xf) + xatol / 3.0
+        tol2 = 2.0 * tol1
+        flag = 0
+        while abs(xf - xm) > (tol2 - 0.5 * (b - a)):
+            golden = True
+            if abs(e) > tol1:
+                golden = False
+                r = (xf - nfc) * (fx - ffulc)
+                q = (xf - fulc) * (fx - fnfc)
+                p = (xf - fulc) * q - (xf - nfc) * r
+                q = 2.0 * (q - r)
+                if q > 0.0:
+                    p = -p
+                q = abs(q)
+                r = e
+                e = rat
+                if (abs(p) < abs(0.5 * q * r)) and (p > q * (a - xf)) and (p < q * (b - xf)):
+                    rat = (p + 0.0) / q
+                    x = xf + rat
+                    if ((x - a) < tol2) or ((b - x) < tol2):
+                        si = np.sign(xm - xf) + (1.0 if (xm - xf) == 0 else 0.0)
+                        rat = tol1 * si
+                else:
+                    golden = True
+            if golden:
+                if xf >= xm:
+                    e = a - xf
+                else:
+                    e = b - xf
+                rat = golden_mean * e
+            si = np.sign(rat) + (1.0 if rat == 0 else 0.0)
+            x = xf + si * max(abs(rat), tol1)
+            fu, _, _ = _reml_profile_jit(x, y, X, eig_safe, XViX, rhs, use_ml)
+            num += 1
+            if fu <= fx:
+                if x >= xf:
+                    a = xf
+                else:
+                    b = xf
+                fulc = nfc
+                ffulc = fnfc
+                nfc = xf
+                fnfc = fx
+                xf = x
+                fx = fu
+            else:
+                if x < xf:
+                    a = x
+                else:
+                    b = x
+                if (fu <= fnfc) or (nfc == xf):
+                    fulc = nfc
+                    ffulc = fnfc
+                    nfc = x
+                    fnfc = fu
+                elif (fu <= ffulc) or (fulc == xf) or (fulc == nfc):
+                    fulc = x
+                    ffulc = fu
+            xm = 0.5 * (a + b)
+            tol1 = sqrt_eps * abs(xf) + xatol / 3.0
+            tol2 = 2.0 * tol1
+            if num >= maxiter:
+                flag = 1
+                break
+        if np.isnan(xf) or np.isnan(fx) or np.isnan(fu):
+            flag = 2
+        return xf, flag
+
+    @numba.jit(nopython=True, parallel=True, cache=True)
+    def _estimate_vc_brent_batch_jit(YT, X, eig_safe, x1, x2, xatol, maxiter, use_ml):
+        """Per-trait (delta, vg, ve, h2_null, ml_nll_null) for the rows of YT (B, n).
+
+        Traits run in prange. h2_null/ml_nll_null are the ML null model used by
+        LRT refinement (h2 = vg/(vg+ve) and the ML objective there).
+        """
+        B = YT.shape[0]
+        n = YT.shape[1]
+        p = X.shape[1]
+        delta = np.empty(B)
+        vg = np.empty(B)
+        ve = np.empty(B)
+        h2_null = np.empty(B)
+        nll_null = np.empty(B)
+        for t in numba.prange(B):
+            XViX = np.empty((p, p))
+            rhs = np.empty(p)
+            y = YT[t]
+            h2, flag = _brent_bounded_reml_jit(y, X, eig_safe, x1, x2, xatol, maxiter, XViX, rhs, use_ml)
+            if flag != 0:
+                h2 = 0.5
+            # Final components at h2 (same formulas as the scalar routine).
+            _, yP0y, ok = _reml_profile_jit(h2, y, X, eig_safe, XViX, rhs, use_ml)
+            if not ok:
+                # Singular X'V^-1X: least-squares beta like the scalar fallback.
+                sign, _ = np.linalg.slogdet(XViX)
+                if sign == 0:
+                    beta = np.linalg.lstsq(XViX, rhs)[0]
+                else:
+                    beta = np.linalg.solve(XViX, rhs)
+                yViy = 0.0
+                for i in range(n):
+                    v = h2 * eig_safe[i] + (1.0 - h2)
+                    yViy += y[i] * y[i] / v
+                yP0y = yViy
+                for a in range(p):
+                    yP0y -= rhs[a] * beta[a]
+            df = n - p
+            v_base = yP0y / max(1, df)
+            ve_t = (1.0 - h2) * v_base
+            vg_t = h2 * v_base
+            vg[t] = vg_t
+            ve[t] = ve_t
+            delta[t] = ve_t / vg_t if vg_t > 0 else 1.0
+            h2n = vg_t / (vg_t + ve_t) if (vg_t + ve_t) > 0 else 0.0
+            h2_null[t] = h2n
+            nll_null[t], _, _ = _reml_profile_jit(h2n, y, X, eig_safe, XViX, rhs, True)
+        return delta, vg, ve, h2_null, nll_null
+
+
+def _vc_brent_batch(Y, X, eigenvals, use_ml):
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim != 2:
+        raise ValueError("Y must be 2D (n_individuals, n_traits)")
+    X = np.ascontiguousarray(X, dtype=np.float64)
+    eig_safe = np.ascontiguousarray(np.maximum(np.asarray(eigenvals, dtype=np.float64), 1e-6))
+    if not HAS_NUMBA:
+        T = Y.shape[1]
+        out = np.empty((T, 5), dtype=np.float64)
+        for t in range(T):
+            d, vg, ve = estimate_variance_components_brent(Y[:, t], X, eigenvals, verbose=False, use_ml=use_ml)
+            h2n = vg / (vg + ve) if (vg + ve) > 0 else 0.0
+            out[t] = (d, vg, ve, h2n, _calculate_neg_ml_likelihood(h2n, Y[:, t], X, eigenvals))
+        return tuple(out[:, k] for k in range(5))
+    YT = np.ascontiguousarray(Y.T)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            return _estimate_vc_brent_batch_jit(
+                YT, X, eig_safe, _BRENT_H2_LO, _BRENT_H2_HI, _BRENT_XATOL, _BRENT_MAXITER, bool(use_ml)
+            )
+
+
+def estimate_variance_components_brent_batch(
+    Y: np.ndarray, X: np.ndarray, eigenvals: np.ndarray, use_ml: bool = False
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """REML (or ML) variance components for many traits sharing one eigen-basis.
+
+    Args:
+        Y: Transformed phenotypes U'Y, shape (n_individuals, n_traits).
+        X: Transformed covariates U'X, shape (n_individuals, q0).
+        eigenvals: Kinship eigenvalues (floored at 1e-6 internally).
+        use_ml: Optimise the ML instead of the REML objective.
+
+    Returns:
+        (delta, vg, ve) arrays of length n_traits, matching
+        estimate_variance_components_brent applied column by column (same
+        bounds, tolerance and optimizer; float64 reduction-order differences only).
+    """
+    delta, vg, ve, _, _ = _vc_brent_batch(Y, X, eigenvals, use_ml)
+    return delta, vg, ve
+
+
+def estimate_null_ml_batch(
+    Y: np.ndarray, X: np.ndarray, eigenvals: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """ML null model per trait for LRT refinement: (h2_null, null_neg_loglik).
+
+    Same numbers as estimate_variance_components_brent(..., use_ml=True)
+    followed by _calculate_neg_ml_likelihood at h2 = vg / (vg + ve).
+    """
+    _, _, _, h2_null, nll_null = _vc_brent_batch(Y, X, eigenvals, True)
+    return h2_null, nll_null
 
 
 def _calculate_neg_reml_likelihood(h2: float, y: np.ndarray, X: np.ndarray, eigenvals: np.ndarray) -> float:

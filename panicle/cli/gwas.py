@@ -174,6 +174,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     pipeline.align_samples()
 
+    stream_mode = getattr(args, "stream_results", None)
+    if stream_mode:
+        if pipeline.geno_map is None:
+            raise SystemExit("--stream-results requires a genetic map (--map or a genotype format that carries one)")
+        requested = [m.strip().upper() for m in (args.methods or "").split(",") if m.strip()]
+        extra = sorted(set(requested) - {"MLM"})
+        if extra and args.methods != "GLM,MLM,FarmCPU":
+            print(f"Note: --stream-results runs LOCO MLM only; ignoring methods {', '.join(extra)}")
+        pipeline.compute_population_structure(n_pcs=args.n_pcs, calculate_kinship=False)
+        pipeline.run_multi_trait_stream(
+            traits=traits,
+            keep=stream_mode,
+            p_threshold=args.stream_p_threshold,
+            significance=args.significance,
+            alpha=args.alpha,
+            ncpus=args.ncpus,
+            parallel_mode=args.parallel_mode,
+            min_mac=args.min_mac,
+            max_genotype_dosage=args.max_genotype_dosage,
+            lrt_refinement=not args.no_lrt_refinement,
+            screen_threshold=args.lrt_screen_threshold,
+            trait_block_size=args.trait_block_size,
+            dense_dtype=args.stream_dtype,
+        )
+        return 0
+
     methods: List[str] = []
     if args.glm:
         methods.append("GLM")
